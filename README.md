@@ -7,5 +7,6 @@
 ![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![Nginx](https://img.shields.io/badge/Nginx-reverse%20proxy-009639?logo=nginx&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./csv-handler, ./transformer locally, no external registry. Real source code included.

@@ -1,0 +1,198 @@
+# OrgComms v4 - Dokploy Compose deployment
+#
+# In Dokploy: create the resource as type "Compose" (NOT "Application" — that
+# path uses Nixpacks/single-app auto-detect and can't build this monorepo).
+# Point it at this file, set the environment variables listed in
+# .env.vps.example under the resource's Environment tab, then deploy.
+#
+# Exposing services to the internet: don't publish host ports here (removed
+# below on purpose). Instead, in Dokploy go to this app's "Domains" tab and
+# add a domain per service you want public, e.g.:
+#   - service: frontend, container port: 80   -> app.yourdomain.com
+#   - service: api,      container port: 3000 -> api.yourdomain.com
+#   - service: api,      container port: 3001 -> (webhook path/subdomain, if needed)
+# Dokploy's Traefik proxy joins the compose network and reaches each
+# container directly over its internal port — publishing a fixed host port
+# is unnecessary and risks colliding with other projects on the same VPS.
+# postgres/redis/clamav/hermes/paperclip/csv-handler/transformer-worker stay
+# internal-only; nothing else needs to reach them except sibling containers.
+
+networks:
+  frontend:
+  backend:
+    internal: true
+  db:
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  recordings:
+  clamav_data:
+  paperclip_cache:
+
+services:
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - clamav_data:/var/lib/clamav
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    networks: [db]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orgcomms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-orgcomms_prod}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
+    # No ports: published — reachable internally as postgres:5432 only.
+    # Need a one-off psql session? Use Dokploy's container terminal, or
+    # `docker exec -it <postgres-container> psql -U orgcomms` on the host.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [db]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 0.0.0.0 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [frontend, backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+      - /app/logs:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    depends_on: [postgres, redis, clamav]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      CLAMAV_HOST: clamav
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      HERMES_MODE: premium_multiagent
+    volumes:
+      - recordings:/app/recordings
+    expose:
+      - "3000"
+      - "3001"
+    # Give this service a domain in Dokploy's Domains tab (container port 3000,
+    # and a second entry on 3001 if webhooks need their own host/path).
+
+  hermes-orchestrator:
+    build:
+      context: ./hermes
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+    depends_on: [redis, postgres]
+
+  paperclip-transformer:
+    build:
+      context: ./paperclip
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [backend]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+      - /app/cache:size=500M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - recordings:/app/recordings
+      - paperclip_cache:/app/cache
+
+  csv-handler:
+    build:
+      context: ./csv-handler
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      CLAMAV_HOST: clamav
+
+  transformer-worker:
+    build:
+      context: ./transformer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [backend]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+    depends_on: [redis]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [frontend]
+    expose:
+      - "80"
+    # Give this service a domain in Dokploy's Domains tab (container port 80).

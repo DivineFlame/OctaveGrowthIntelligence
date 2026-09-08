@@ -13,14 +13,14 @@ async function runAgent(type, payload) {
   if (type==='compliance') return { compliant: true };
   if (type==='publisher') { console.log(`Publishing variant ${payload.variant_id}`); return { published: true, url: `https://youtube.com/watch?v=${payload.variant_id}` }; }
   if (type==='lead_intake') {
-    // Inbound webhook leads carry no tenant_id (the /webhooks/:channel route
-    // has no way to identify which tenant they belong to yet), so this
-    // cannot safely INSERT into the tenant-scoped leads table without
-    // risking cross-tenant data. Logging honestly instead of pretending
-    // this enriches/persists anything until per-tenant webhook
-    // identification exists.
-    console.log(`[Hermes] lead_intake received a webhook lead with no tenant association, skipping persistence:`, payload.source_channel || payload.channel);
-    return { enriched: false, skipped_reason: 'no tenant_id on inbound webhook payload' };
+    // The webhook route (api/src/server.js: /webhooks/:tenantId/:webhookSecret/:channel)
+    // already validates the tenant, dedupes, and INSERTs the lead synchronously
+    // before this job is even queued — payload here is just { lead_id, tenant_id, channel }
+    // as a downstream-enrichment signal. Real enrichment (GSTIN lookup, language
+    // detection, etc. per the README) isn't implemented yet, so this only logs
+    // rather than claiming work that doesn't happen.
+    console.log(`[Hermes] lead_intake notified for lead ${payload.lead_id} (tenant ${payload.tenant_id}, channel ${payload.channel}) — enrichment not yet implemented`);
+    return { enriched: false, lead_id: payload.lead_id };
   }
   return {};
 }

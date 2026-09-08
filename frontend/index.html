@@ -215,6 +215,7 @@ Error generating stack: `+u.message+`
       var existing = document.getElementById('oc-admin');
       if (existing) existing.remove();
       var isSuperAdmin = session.user.role === 'SUPER_ADMIN';
+      var canSeeWebhooks = isSuperAdmin || session.user.role === 'IT_ADMIN';
       var wrap = document.createElement('div');
       wrap.id = 'oc-admin';
       wrap.innerHTML =
@@ -224,9 +225,11 @@ Error generating stack: `+u.message+`
           '<div class="oc-tabs">' +
             (isSuperAdmin ? '<button class="oc-tab oc-active" data-tab="tenants">Tenants</button>' : '') +
             '<button class="oc-tab' + (isSuperAdmin ? '' : ' oc-active') + '" data-tab="users">Users</button>' +
+            (canSeeWebhooks ? '<button class="oc-tab" data-tab="webhooks">Webhooks</button>' : '') +
           '</div>' +
           '<div id="oc-tab-tenants" style="display:' + (isSuperAdmin ? 'block' : 'none') + '"></div>' +
           '<div id="oc-tab-users" style="display:' + (isSuperAdmin ? 'none' : 'block') + '"></div>' +
+          '<div id="oc-tab-webhooks" style="display:none"></div>' +
         '</div>';
       document.body.appendChild(wrap);
       document.getElementById('oc-admin-close').addEventListener('click', function(){ wrap.remove(); });
@@ -237,6 +240,7 @@ Error generating stack: `+u.message+`
           tab.classList.add('oc-active');
           document.getElementById('oc-tab-tenants').style.display = tab.dataset.tab === 'tenants' ? 'block' : 'none';
           document.getElementById('oc-tab-users').style.display = tab.dataset.tab === 'users' ? 'block' : 'none';
+          document.getElementById('oc-tab-webhooks').style.display = tab.dataset.tab === 'webhooks' ? 'block' : 'none';
         });
       });
 
@@ -331,8 +335,39 @@ Error generating stack: `+u.message+`
         } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
       }
 
+      async function loadWebhooks(){
+        var el = document.getElementById('oc-tab-webhooks');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var data = await api(session, '/integrations/webhook-urls');
+          var rows = data.urls.map(function(u){
+            return '<tr><td>' + u.channel + '</td><td><input readonly value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px" onclick="this.select()"></td></tr>';
+          }).join('');
+          el.innerHTML =
+            '<table><tr><th>Channel</th><th>Webhook URL</th></tr>' + rows + '</table>' +
+            '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>' +
+            '<div class="oc-msg" id="oc-webhook-msg"></div>';
+          el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
+            if (!confirm('Rotating invalidates every URL above — every configured channel will need the new URL. Continue?')) return;
+            var msg = document.getElementById('oc-webhook-msg');
+            try {
+              await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Rotated. URLs below are updated.';
+              loadWebhooks();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){
+          el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '<br>No secret yet? Rotate once to provision one.</div>' +
+            '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>';
+          el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
+            try { await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' }); loadWebhooks(); } catch(e2){ alert(e2.message); }
+          });
+        }
+      }
+
       if (isSuperAdmin) loadTenants();
       loadUsers();
+      if (canSeeWebhooks) loadWebhooks();
     }
 
     function boot(){

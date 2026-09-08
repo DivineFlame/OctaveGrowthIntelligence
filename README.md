@@ -46,3 +46,36 @@ expires.
 Note: the Studio/Leads/Inbox panels elsewhere in the frontend still show
 illustrative example content (sample leads, sample inbox messages) — only
 the login and tenant/user administration are wired to the real API so far.
+
+## Webhooks (per-tenant, so leads actually persist)
+
+If your database already existed before this feature was added, run
+`postgres/migrate-webhook-secret.sql` once (same `docker exec ... psql`
+pattern as the bootstrap script) — it adds the `webhook_secret` column and
+backfills a real secret for every existing tenant.
+
+Inbound webhooks are URL-shaped as:
+
+```
+POST /webhooks/<tenant_id>/<webhook_secret>/<channel>
+```
+
+`<channel>` is one of `whatsapp, facebook, instagram, linkedin, youtube,
+quora, email`. The secret is embedded in the path rather than a header
+because most of these platforms' webhook config UIs only accept a plain
+callback URL. A request with a wrong or missing secret gets `401`; an
+unknown tenant or channel gets `404`.
+
+A `SUPER_ADMIN` or `IT_ADMIN` gets the exact URLs to paste into each
+channel's dashboard from the Admin panel's **Webhooks** tab (backed by
+`GET /integrations/webhook-urls`), and can invalidate + reissue all of them
+at once from the same tab if a URL ever leaks (`POST
+/integrations/webhook-secret/rotate`).
+
+A valid request is deduped (by phone/email against existing leads for that
+tenant) and inserted into `leads` directly — persistence no longer depends
+on the Hermes queue consumer being up. It also still pushes a
+`{lead_id, tenant_id, channel}` notification onto `webhook:incoming` for
+`lead_intake` to pick up for downstream enrichment (GSTIN lookup, language
+detection, etc.) — that enrichment step is not implemented yet, so
+`lead_intake` currently only logs the notification.

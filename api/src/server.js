@@ -12,6 +12,7 @@ const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config({ path: '../.env.production' });
 
 const app = express();
@@ -159,11 +160,22 @@ app.post('/auth/refresh', async (req, res) => {
   } catch(e){ return res.status(401).json({ error: 'Invalid or expired refresh token' }); }
 });
 
+// Tenant columns safe to return to any authenticated user. webhook_secret is
+// deliberately excluded here — it's a bearer credential (anyone who has it
+// can post fake leads into this tenant), so it's only ever returned by the
+// dedicated /integrations/webhook-urls route below, gated to roles that can
+// manage integrations.
+const TENANT_PUBLIC_COLUMNS = 'id, name, subdomain, plan, is_premium, created_at';
+
 // Tenants - Create (Super Admin only)
 app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
   const { name, subdomain, plan } = req.body;
   try {
-    const { rows } = await pool.query('INSERT INTO tenants (name, subdomain, plan, is_premium) VALUES ($1,$2,$3,$4) RETURNING *', [name, subdomain, plan, plan==='premium']);
+    const webhookSecret = crypto.randomBytes(24).toString('hex');
+    const { rows } = await pool.query(
+      `INSERT INTO tenants (name, subdomain, plan, is_premium, webhook_secret) VALUES ($1,$2,$3,$4,$5) RETURNING ${TENANT_PUBLIC_COLUMNS}`,
+      [name, subdomain, plan, plan==='premium', webhookSecret]
+    );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_TENANT', 'tenant', rows[0].id, req, 'SUCCESS', { subdomain });
     res.json(rows[0]);
   } catch(e){ res.status(500).json({ error: e.message }); }
@@ -172,7 +184,7 @@ app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req
 // Tenants - List all (Super Admin only)
 app.get('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM tenants ORDER BY created_at DESC');
+    const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants ORDER BY created_at DESC`);
     res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
@@ -180,7 +192,7 @@ app.get('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req,
 // Tenants - Get own tenant (any authenticated user)
 app.get('/tenants/me', authMiddleware, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM tenants WHERE id=$1', [req.user.tenant_id]);
+    const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants WHERE id=$1`, [req.user.tenant_id]);
     if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
     res.json(rows[0]);
   } catch(e){ res.status(500).json({ error: e.message }); }
@@ -434,27 +446,74 @@ app.post('/integrations/toggle', authMiddleware, rbacMiddleware(['SUPER_ADMIN','
   res.json({ channel, enabled, message: 'Channel toggled, logged' });
 });
 
-// Webhook handlers - 7 channels
-app.post('/webhooks/:channel', async (req, res) => {
-  const { channel } = req.params;
-  // Rate limiting via Nginx, here process
-  const lead = {
-    id: uuidv4(),
-    source_channel: channel,
-    company_name: req.body.company || 'Unknown',
-    contact_name: req.body.name || req.body.full_name || 'Lead',
-    phone: req.body.phone || '',
-    email: req.body.email || '',
-    value_inr: req.body.value || 0
-    // NOTE: no tenant_id here — this endpoint has no way to know which
-    // tenant an inbound webhook belongs to (no per-tenant path/token).
-    // The lead_intake consumer can therefore log/dedupe but cannot safely
-    // insert into the tenant-scoped leads table until that's designed.
-  };
-  // Push to Redis for processing (single shared key — see transformer/publisher note above)
-  await redisClient.lPush('webhook:incoming', JSON.stringify(lead));
-  res.json({ received: true, channel, lead_id: lead.id });
+// Integrations - Webhook URLs for the caller's own tenant, one per channel.
+// Copy these into WhatsApp/Facebook/etc.'s webhook config. The secret is
+// embedded in the path (not a header) because most of these platforms only
+// let you configure a callback URL, not custom headers.
+app.get('/integrations/webhook-urls', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT webhook_secret FROM tenants WHERE id=$1', [req.user.tenant_id]);
+    if (!rows.length || !rows[0].webhook_secret) return res.status(404).json({ error: 'No webhook secret provisioned for this tenant yet — rotate one first' });
+    const base = process.env.API_DOMAIN ? `https://${process.env.API_DOMAIN}` : '';
+    const secret = rows[0].webhook_secret;
+    const urls = INTEGRATION_CHANNELS.map(channel => ({ channel, url: `${base}/webhooks/${req.user.tenant_id}/${secret}/${channel}` }));
+    res.json({ urls });
+  } catch(e){ res.status(500).json({ error: e.message }); }
 });
+
+// Integrations - Rotate this tenant's webhook secret (invalidates all previously issued URLs)
+app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+  try {
+    const newSecret = crypto.randomBytes(24).toString('hex');
+    await pool.query('UPDATE tenants SET webhook_secret=$1 WHERE id=$2', [newSecret, req.user.tenant_id]);
+    await auditLog(req.user.tenant_id, req.user.id, 'ROTATE_WEBHOOK_SECRET', 'tenant', req.user.tenant_id, req, 'SUCCESS', {});
+    res.json({ message: 'Webhook secret rotated. Update every configured channel URL with the new one.' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Webhook handlers - 7 channels, per-tenant + secret so inbound leads can be
+// safely attributed and persisted. Shared by both the main app (below) and
+// the separate webhook server on WEBHOOK_PORT.
+async function handleInboundWebhook(req, res) {
+  const { tenantId, webhookSecret, channel } = req.params;
+  if (!INTEGRATION_CHANNELS.includes(channel)) return res.status(404).json({ error: 'Unknown channel' });
+  try {
+    const { rows } = await pool.query('SELECT id, webhook_secret FROM tenants WHERE id=$1', [tenantId]);
+    if (!rows.length || !rows[0].webhook_secret) return res.status(404).json({ error: 'Unknown tenant' });
+    const provided = Buffer.from(webhookSecret || '');
+    const expected = Buffer.from(rows[0].webhook_secret);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return res.status(401).json({ error: 'Invalid webhook secret' });
+    }
+
+    const company_name = sanitizeCSVValue(req.body.company || req.body.company_name || 'Unknown');
+    const contact_name = sanitizeCSVValue(req.body.name || req.body.full_name || 'Lead');
+    const phone = sanitizeCSVValue(req.body.phone || '');
+    const email = sanitizeCSVValue(req.body.email || '');
+    const value_inr = Number(req.body.value) || 0;
+
+    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', tenantId]);
+    const dup = await pool.query(
+      `SELECT id FROM leads WHERE tenant_id=$1 AND ((phone<>'' AND phone=$2) OR (email<>'' AND email=$3)) LIMIT 1`,
+      [tenantId, phone, email]
+    );
+    const isDuplicate = dup.rows.length > 0;
+
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO leads (tenant_id, source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'NEW',$8) RETURNING id`,
+      [tenantId, channel, company_name, contact_name, phone, email, value_inr, isDuplicate]
+    );
+
+    await auditLog(tenantId, null, 'WEBHOOK_LEAD_RECEIVED', 'lead', inserted[0].id, req, 'SUCCESS', { channel, is_duplicate: isDuplicate });
+    // Notify Hermes for downstream enrichment (GSTIN lookup, language detection, etc.)
+    await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: inserted[0].id, tenant_id: tenantId, channel }));
+
+    res.json({ received: true, channel, lead_id: inserted[0].id, is_duplicate: isDuplicate });
+  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+}
+
+app.post('/webhooks/:tenantId/:webhookSecret/:channel', handleInboundWebhook);
 
 // Hermes Agents status - Premium multiagent
 // Reports real rows only. An empty list is an honest "no agents registered yet",
@@ -472,10 +531,6 @@ app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT
 // Webhook server separate
 const webhookApp = express();
 webhookApp.use(express.json());
-webhookApp.post('/webhooks/:channel', async (req, res) => {
-  const { channel } = req.params;
-  await redisClient.lPush('webhook:incoming', JSON.stringify(Object.assign({}, req.body, { source_channel: channel })));
-  res.json({ received: true });
-});
+webhookApp.post('/webhooks/:tenantId/:webhookSecret/:channel', handleInboundWebhook);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));

@@ -13,6 +13,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const NodeClam = require('clamscan');
 require('dotenv').config({ path: '../.env.production' });
 
 const app = express();
@@ -29,6 +30,49 @@ const pool = new Pool({
 const redisClient = redis.createClient({ url: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD}@redis:6379` });
 redisClient.connect().catch(console.error);
 redisClient.on('error', err => console.error('Redis error', err));
+
+// ClamAV - real scanning over the wire to the clamd container, no local binary needed.
+// Fails CLOSED by default: if the scanner can't be reached, uploads are rejected
+// rather than silently treated as clean. Set CLAMAV_REQUIRED=false to disable
+// (e.g. for local dev without a clamav container running).
+const CLAMAV_REQUIRED = process.env.CLAMAV_REQUIRED !== 'false';
+let clamscanInstance = null;
+async function getClamscan() {
+  if (!clamscanInstance) {
+    clamscanInstance = await new NodeClam().init({
+      removeInfected: false,
+      clamscan: { active: false },
+      clamdscan: {
+        host: process.env.CLAMAV_HOST || 'clamav',
+        port: parseInt(process.env.CLAMAV_PORT || '3310', 10),
+        timeout: 60000,
+        localFallback: false
+      },
+      preference: 'clamdscan'
+    });
+  }
+  return clamscanInstance;
+}
+// Returns { isInfected, viruses }. Throws if CLAMAV_REQUIRED and the scanner
+// is unreachable or returns an inconclusive (null) result — callers must
+// treat a thrown error as "reject the upload", not "assume clean".
+async function scanFile(filePath) {
+  if (!CLAMAV_REQUIRED) return { isInfected: false, viruses: [] };
+  try {
+    const scanner = await getClamscan();
+    const { isInfected, viruses } = await scanner.isInfected(filePath);
+    if (isInfected === null) throw new Error('Scan result inconclusive');
+    return { isInfected: !!isInfected, viruses: viruses || [] };
+  } catch (e) {
+    throw new Error(`Virus scan unavailable: ${e.message}`);
+  }
+}
+if (CLAMAV_REQUIRED) {
+  getClamscan()
+    .then(scanner => scanner.getVersion())
+    .then(v => console.log(`ClamAV connected: ${v}`))
+    .catch(e => console.warn(`ClamAV not reachable at startup — uploads will be rejected until it is (${e.message})`));
+}
 
 // Middleware
 app.use(helmet({
@@ -279,12 +323,22 @@ app.get('/leads', authMiddleware, async (req, res) => {
 app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   try {
+    let scan;
+    try {
+      scan = await scanFile(req.file.path);
+    } catch (scanErr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(503).json({ error: scanErr.message });
+    }
+    if (scan.isInfected) {
+      fs.unlink(req.file.path, () => {});
+      await auditLog(req.user.tenant_id, req.user.id, 'VIRUS_DETECTED', 'csv_upload', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
+    }
+
     const content = fs.readFileSync(req.file.path, 'utf-8');
     const records = parse(content, { columns: true, skip_empty_lines: true, trim: true });
-    if (records.length > 5000) return res.status(400).json({ error: 'Max 5000 rows' });
-
-    // Virus scan via ClamAV (mock - in production call clamav service)
-    // await fetch(`http://${process.env.CLAMAV_HOST}:3310/scan`)
+    if (records.length > 5000) { fs.unlink(req.file.path, () => {}); return res.status(400).json({ error: 'Max 5000 rows' }); }
 
     // Sanitize + validate
     const sanitized = records.map(r => {
@@ -314,7 +368,7 @@ app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (r
     // Insert with RLS
     await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
     const uploadId = uuidv4();
-    await pool.query('INSERT INTO csv_uploads (id, tenant_id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [uploadId, req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'COMPLETED']);
+    await pool.query('INSERT INTO csv_uploads (id, tenant_id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [uploadId, req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
 
     for (const row of toInsert.slice(0, 5000)) {
       await pool.query('INSERT INTO leads (tenant_id, company_name, contact_name, phone, email, source_channel, status, csv_upload_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [req.user.tenant_id, row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'csv_upload', 'NEW', uploadId]);
@@ -325,6 +379,7 @@ app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (r
     // Push to Redis for Sarvam queue - language auto
     await redisClient.lPush(`sarvam:queue:${req.user.tenant_id}`, JSON.stringify({ uploadId, valid, tenant_id: req.user.tenant_id }));
 
+    fs.unlink(req.file.path, () => {}); // temp CSV is fully parsed into the DB now, no need to keep it
     res.json({ uploadId, rows_total: records.length, rows_valid: valid, rows_duplicate: dup, rows_invalid: invalid, message: 'CSV imported, pushed to Inbox + Sarvam queue' });
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 });
@@ -333,7 +388,18 @@ app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (r
 app.post('/content/upload', authMiddleware, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   try {
-    // Mock virus scan - in production call clamav
+    let scan;
+    try {
+      scan = await scanFile(req.file.path);
+    } catch (scanErr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(503).json({ error: scanErr.message });
+    }
+    if (scan.isInfected) {
+      fs.unlink(req.file.path, () => {});
+      await auditLog(req.user.tenant_id, req.user.id, 'VIRUS_DETECTED', 'content_asset', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
+    }
     const virusStatus = 'CLEAN';
 
     await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);

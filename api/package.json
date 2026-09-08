@@ -21,6 +21,7 @@
     "morgan": "^1.10.0",
     "uuid": "^9.0.1",
     "dotenv": "^16.3.1",
-    "node-fetch": "^3.0.0"
+    "node-fetch": "^3.0.0",
+    "clamscan": "^2.4.0"
   }
 }

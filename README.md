@@ -79,3 +79,21 @@ on the Hermes queue consumer being up. It also still pushes a
 `lead_intake` to pick up for downstream enrichment (GSTIN lookup, language
 detection, etc.) — that enrichment step is not implemented yet, so
 `lead_intake` currently only logs the notification.
+
+## Virus scanning (ClamAV)
+
+`POST /leads/upload-csv` and `POST /content/upload` scan every uploaded file
+against the `clamav` container before touching it — via `clamscan`'s
+network mode, no local ClamAV binary needed in the `api` container, just
+TCP to `CLAMAV_HOST:CLAMAV_PORT` (defaults to `clamav:3310`, already set in
+`docker-compose.dokploy.yml`).
+
+This fails **closed** by default: if ClamAV can't be reached or returns an
+inconclusive result, the upload is rejected with `503` rather than treated
+as clean. Check the `api` container's logs on startup — it logs `ClamAV
+connected: <version>` if the connection works, or a clear warning if not.
+An infected file is rejected with `400` and the matched signature name(s),
+and is deleted rather than kept around.
+
+Set `CLAMAV_REQUIRED=false` to disable scanning entirely (local dev without
+a `clamav` container running) — don't set this in production.

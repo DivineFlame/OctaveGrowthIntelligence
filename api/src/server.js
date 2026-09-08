@@ -330,7 +330,12 @@ app.post('/content/upload', authMiddleware, upload.single('file'), async (req, r
     await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
     // Push to transformer queue - Hermes + Paperclip
-    await redisClient.lPush(`transformer:queue:${req.user.tenant_id}`, JSON.stringify({ asset_id: rows[0].id, tenant_id: req.user.tenant_id, channels: req.body.channels || ['youtube','instagram-feed','facebook'], requested_by: req.user.id }));
+    // NOTE: this is a single shared key, not per-tenant (tenant_id travels
+    // in the payload instead) — Redis BRPOP takes exact key names, not
+    // wildcards, so a per-tenant key here would mean the consumers below
+    // could never actually block on "all tenants' queues" the way a
+    // `transformer:queue:*` pattern implies but does not do.
+    await redisClient.lPush('transformer:queue', JSON.stringify({ asset_id: rows[0].id, tenant_id: req.user.tenant_id, channels: req.body.channels || ['youtube','instagram-feed','facebook'], requested_by: req.user.id }));
 
     res.json({ asset: rows[0], message: 'Uploaded, queued for Paperclip transform per channel spec' });
   } catch(e){ res.status(500).json({ error: e.message }); }
@@ -386,8 +391,8 @@ app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(
     await pool.query('INSERT INTO approvals (tenant_id, variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5,$6)', [req.user.tenant_id, rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
 
     if (newStatus === 'APPROVED') {
-      // Push to publisher queue - Hermes Publisher Agent
-      await redisClient.lPush(`publisher:queue:${req.user.tenant_id}`, JSON.stringify({ variant_id: variantId, tenant_id: req.user.tenant_id }));
+      // Push to publisher queue - Hermes Publisher Agent (shared key, see note above)
+      await redisClient.lPush('publisher:queue', JSON.stringify({ variant_id: variantId, tenant_id: req.user.tenant_id }));
     }
 
     await auditLog(req.user.tenant_id, req.user.id, `${action}_CONTENT`, 'content_variant', variantId, req, 'SUCCESS', { comment });
@@ -441,9 +446,13 @@ app.post('/webhooks/:channel', async (req, res) => {
     phone: req.body.phone || '',
     email: req.body.email || '',
     value_inr: req.body.value || 0
+    // NOTE: no tenant_id here — this endpoint has no way to know which
+    // tenant an inbound webhook belongs to (no per-tenant path/token).
+    // The lead_intake consumer can therefore log/dedupe but cannot safely
+    // insert into the tenant-scoped leads table until that's designed.
   };
-  // Push to Redis for processing
-  await redisClient.lPush(`webhook:${channel}`, JSON.stringify(lead));
+  // Push to Redis for processing (single shared key — see transformer/publisher note above)
+  await redisClient.lPush('webhook:incoming', JSON.stringify(lead));
   res.json({ received: true, channel, lead_id: lead.id });
 });
 
@@ -465,7 +474,7 @@ const webhookApp = express();
 webhookApp.use(express.json());
 webhookApp.post('/webhooks/:channel', async (req, res) => {
   const { channel } = req.params;
-  await redisClient.lPush(`webhook:${channel}`, JSON.stringify(req.body));
+  await redisClient.lPush('webhook:incoming', JSON.stringify(Object.assign({}, req.body, { source_channel: channel })));
   res.json({ received: true });
 });
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));

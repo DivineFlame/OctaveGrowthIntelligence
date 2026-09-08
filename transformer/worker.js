@@ -4,7 +4,10 @@ client.connect();
 async function processJob(){
   while(true){
     try{
-      const job=await client.brPop('transformer:queue:*',5);
+      // BRPOP takes exact key names, not wildcards — 'transformer:queue:*'
+      // never matched the real key producers push to (see api/src/server.js),
+      // so this worker was permanently blocking on a key that never got data.
+      const job=await client.brPop('transformer:queue',5);
       if(job){
         const payload=JSON.parse(job.element);
         console.log('Transforming asset',payload.asset_id,'channels',payload.channels);

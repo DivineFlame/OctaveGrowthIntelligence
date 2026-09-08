@@ -152,23 +152,13 @@ services:
       # at the same path, which Docker Compose rejects
       - paperclip_cache:/app/cache
 
-  csv-handler:
-    build:
-      context: ./csv-handler
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    networks: [backend, db]
-    user: "1001:1001"
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      CLAMAV_HOST: clamav
+  # csv-handler service removed: csv-handler/csv-handler.js only defines and
+  # exports functions — it never opens a server or a Redis consumer loop, so
+  # as a standalone container it logged one line and exited immediately,
+  # which `restart: unless-stopped` then crash-looped forever. Its logic is
+  # already fully duplicated inline in api/src/server.js's
+  # POST /leads/upload-csv route, which is what actually runs today.
+  # Reintroduce this service only once it's wired to a real queue/consumer.
 
   transformer-worker:
     build:

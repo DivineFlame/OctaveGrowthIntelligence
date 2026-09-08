@@ -112,6 +112,11 @@ services:
       # Environment tab to your real domains (no scheme, e.g. app.example.com).
       APP_DOMAIN: ${APP_DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
+      # Unset (or anything other than the literal string "false") = signup
+      # stays open until the first account is created (see POST /auth/signup).
+      # Set to "false" here once you've created your Super Admin, to close
+      # the route outright rather than relying only on the one-time-use gate.
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
     volumes:
       - recordings:/app/recordings
     expose:

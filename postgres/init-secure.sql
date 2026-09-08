@@ -1,6 +1,11 @@
 -- Secure Postgres Multitenant RLS + Audit
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- Atomic one-time gate for POST /auth/signup: the first request to insert
+-- 'signup_used' wins the race (ON CONFLICT DO NOTHING), so even if
+-- SIGNUP_ENABLED is left on by mistake, at most one Super Admin can ever be
+-- created through that route.
+CREATE TABLE IF NOT EXISTS system_flags (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS tenants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(200), subdomain VARCHAR(100) UNIQUE, plan VARCHAR(20) DEFAULT 'starter', is_premium BOOLEAN DEFAULT false, webhook_secret TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, email VARCHAR(255) UNIQUE, password_hash TEXT, role VARCHAR(50), max_history_days INT, can_view_revenue BOOLEAN DEFAULT false, can_view_integrations BOOLEAN DEFAULT false, can_approve_content BOOLEAN DEFAULT false, two_fa_enabled BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS roles (name VARCHAR(50) PRIMARY KEY, max_history_days INT, can_view_revenue BOOLEAN, can_view_integrations BOOLEAN, can_approve_content BOOLEAN, can_publish BOOLEAN, can_manage_users BOOLEAN);

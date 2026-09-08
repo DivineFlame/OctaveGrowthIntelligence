@@ -206,6 +206,82 @@ app.post('/auth/login', async (req, res) => {
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 });
 
+// Auth - Signup status (lets the frontend show/hide the Sign Up option without guessing)
+app.get('/auth/signup-status', async (req, res) => {
+  try {
+    const used = await pool.query(`SELECT 1 FROM system_flags WHERE key='signup_used'`);
+    const enabled = process.env.SIGNUP_ENABLED !== 'false';
+    res.json({ available: enabled && !used.rows.length });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Auth - Signup (bootstraps the very first Super Admin + their tenant only)
+// This is NOT general self-service registration - every subsequent user is
+// created by a tenant admin via POST /users. Two independent gates:
+//   1. SIGNUP_ENABLED=false in the environment disables it outright.
+//   2. Even left enabled, system_flags.signup_used is claimed atomically via
+//      INSERT ... ON CONFLICT DO NOTHING - only the first request to win
+//      that race can ever create an account here, so forgetting to flip
+//      SIGNUP_ENABLED off can't mint a second Super Admin.
+app.post('/auth/signup', async (req, res) => {
+  if (process.env.SIGNUP_ENABLED === 'false') {
+    return res.status(403).json({ error: 'Signup is disabled' });
+  }
+  const { email, password, company_name } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const claim = await client.query(
+      `INSERT INTO system_flags (key, value) VALUES ('signup_used', 'true') ON CONFLICT (key) DO NOTHING RETURNING key`
+    );
+    if (!claim.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Signup already used — an account already exists. Ask your Super Admin to create yours.' });
+    }
+
+    const tenantName = company_name || 'Default Tenant';
+    const subdomain = tenantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-+|-+$)/g, '').slice(0, 90) || 'default';
+    const webhookSecret = crypto.randomBytes(24).toString('hex');
+    const tenantRows = await client.query(
+      `INSERT INTO tenants (name, subdomain, plan, is_premium, webhook_secret) VALUES ($1,$2,'premium',true,$3) RETURNING id`,
+      [tenantName, subdomain, webhookSecret]
+    );
+    const tenantId = tenantRows.rows[0].id;
+
+    const roleRow = await client.query(`SELECT * FROM roles WHERE name='SUPER_ADMIN'`);
+    const r = roleRow.rows[0];
+    const password_hash = await bcrypt.hash(password, 12);
+    const userRows = await client.query(
+      `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
+       VALUES ($1,$2,$3,'SUPER_ADMIN',$4,$5,$6,$7) RETURNING id, tenant_id, email, role`,
+      [tenantId, email, password_hash, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
+    );
+    const user = userRows.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_logs (tenant_id, user_id, action, resource_type, resource_id, ip_address, user_agent, result, details) VALUES ($1,$2,'SIGNUP_FIRST_ADMIN','user',$2,$3,$4,'SUCCESS',$5)`,
+      [tenantId, user.id, req.ip, req.headers['user-agent'], JSON.stringify({ email })]
+    );
+
+    await client.query('COMMIT');
+
+    const token = jwt.sign({ id: user.id, tenant_id: tenantId, role: 'SUPER_ADMIN', email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
+    res.json({ token, refresh, user: { id: user.id, tenant_id: tenantId, role: 'SUPER_ADMIN', email } });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    if (e.code === '23505') return res.status(409).json({ error: 'That email or company name is already taken' });
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Auth - Refresh (exchange a 7-day refresh token for a new 15-minute access token)
 // Without this, the access token issued at login has no way to be renewed and
 // every session silently dies 15 minutes after login.

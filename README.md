@@ -13,16 +13,35 @@ Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./csv-handler, .
 
 ## First login
 
-There is no signup route and no seeded user — run `postgres/bootstrap-admin.sql`
-once against the running Postgres container to create the first tenant and a
-SUPER_ADMIN login (edit the EMAIL/PASSWORD placeholders in that file first).
-See the comments in that file for the exact `docker exec` command.
+There's no general signup — every user after the first is created by a
+tenant admin via the Admin panel (see below) — but `POST /auth/signup`
+exists for exactly one purpose: creating the very first Super Admin without
+touching the database by hand.
 
-Then open the frontend and sign in with the email/password from the
-bootstrap step above. The API base URL is no longer a visible field — it's
-hardcoded in `frontend/index.html` as `API_BASE` (currently
-`https://api.octaveaiautomation.com`). If the API's domain ever changes,
-update that one constant and redeploy the frontend.
+1. Run the migration once if your database predates this feature: `postgres/migrate-signup-flag.sql`
+   (same `docker exec ... psql` pattern as the other migrations).
+2. Make sure `SIGNUP_ENABLED` isn't set to `false` in Dokploy's Environment
+   tab (unset, or `true`, leaves it open).
+3. Open the frontend — the login screen shows **"First time here? Create
+   the Super Admin account"**. Fill in company name, email, and password.
+4. **Set `SIGNUP_ENABLED=false` in Dokploy right after** and redeploy, to
+   close the route outright.
+
+Step 4 isn't just tidiness: even if you forget it, the route is still safe
+— `POST /auth/signup` atomically claims a one-time-use flag in the database
+before creating anything, so at most one account can ever be created
+through it regardless of how long `SIGNUP_ENABLED` stays on. But closing it
+removes the endpoint from your attack surface entirely, which is worth
+doing.
+
+Prefer not to expose a signup endpoint even briefly? `postgres/bootstrap-admin.sql`
+still exists as a fully offline alternative — create the first tenant + Super
+Admin directly via SQL instead, with `SIGNUP_ENABLED=false` from the start.
+
+The frontend's API base URL is hardcoded in `frontend/index.html` as
+`API_BASE` (currently `https://api.octaveaiautomation.com`) — not a visible
+field. If the API's domain ever changes, update that one constant and
+redeploy the frontend.
 
 ## Tenants and users
 

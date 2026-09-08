@@ -46,6 +46,9 @@ Error generating stack: `+u.message+`
     #oc-gate button.oc-primary{margin-top:20px;width:100%;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
     #oc-gate button.oc-primary:disabled{opacity:.5;cursor:default}
     #oc-gate .oc-err{margin-top:12px;font-size:12px;color:#ff6b6b}
+    #oc-gate .oc-switch{text-align:center;margin-top:16px;font-size:12px}
+    #oc-gate .oc-switch a{color:#00a884;text-decoration:none;font-weight:600}
+    #oc-gate .oc-switch a:hover{text-decoration:underline}
     #oc-bar{position:fixed;top:12px;right:12px;z-index:99998;display:flex;gap:8px;align-items:center;background:#141416;border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:6px 6px 6px 14px;font:12px Inter,system-ui,sans-serif;color:#fff}
     #oc-bar .oc-who{color:rgba(255,255,255,.6)}
     #oc-bar .oc-bar-icon{width:20px;height:20px;border-radius:5px;background:#fff;object-fit:contain;padding:1px}
@@ -131,61 +134,87 @@ Error generating stack: `+u.message+`
 
       var gate = document.createElement('div');
       gate.id = 'oc-gate';
-      gate.innerHTML =
-        '<div class="oc-card">' +
-          '<img src="/octave-logo.png" alt="Octave Growth Intelligence" class="oc-logo">' +
-          '<h1>Sign In</h1>' +
-          '<p class="oc-sub">Sign in to your tenant</p>' +
-          '<form id="oc-login-form">' +
-            '<label>Email</label>' +
-            '<input id="oc-email" type="email" required>' +
-            '<label>Password</label>' +
-            '<input id="oc-password" type="password" required>' +
-            '<div id="oc-totp-wrap" style="display:none">' +
-              '<label>2FA Code</label>' +
-              '<input id="oc-totp">' +
-            '</div>' +
-            '<button class="oc-primary" type="submit">Sign In</button>' +
-            '<div class="oc-err" id="oc-err" style="display:none"></div>' +
-          '</form>' +
-        '</div>';
       document.body.appendChild(gate);
 
-      document.getElementById('oc-login-form').addEventListener('submit', async function(ev){
-        ev.preventDefault();
-        var apiBase = API_BASE;
-        var email = document.getElementById('oc-email').value.trim();
-        var password = document.getElementById('oc-password').value;
-        var totp = document.getElementById('oc-totp').value.trim();
-        var errEl = document.getElementById('oc-err');
-        errEl.style.display = 'none';
-        var btn = ev.target.querySelector('button');
-        btn.disabled = true;
-        try {
-          var body = { email: email, password: password };
-          if (totp) body.totp = totp;
-          var loginRes = await fetch(apiBase.replace(/\/$/,'') + '/auth/login', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+      function renderForm(mode, signupAvailable){
+        var isSignup = mode === 'signup';
+        gate.innerHTML =
+          '<div class="oc-card">' +
+            '<img src="/octave-logo.png" alt="Octave Growth Intelligence" class="oc-logo">' +
+            '<h1>' + (isSignup ? 'Create Super Admin Account' : 'Sign In') + '</h1>' +
+            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your tenant' : 'Sign in to your tenant') + '</p>' +
+            '<form id="oc-auth-form">' +
+              (isSignup ? '<label>Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
+              '<label>Email</label>' +
+              '<input id="oc-email" type="email" required>' +
+              '<label>Password</label>' +
+              '<input id="oc-password" type="password" minlength="12" required>' +
+              (isSignup ? '<label>Confirm Password</label><input id="oc-password-confirm" type="password" minlength="12" required>' : '') +
+              (!isSignup ? '<div id="oc-totp-wrap" style="display:none"><label>2FA Code</label><input id="oc-totp"></div>' : '') +
+              '<button class="oc-primary" type="submit">' + (isSignup ? 'Create Account' : 'Sign In') + '</button>' +
+              '<div class="oc-err" id="oc-err" style="display:none"></div>' +
+            '</form>' +
+            (signupAvailable ? '<p class="oc-switch"><a href="#" id="oc-switch-link">' + (isSignup ? 'Already have an account? Sign in' : 'First time here? Create the Super Admin account') + '</a></p>' : '') +
+          '</div>';
+
+        if (signupAvailable) {
+          document.getElementById('oc-switch-link').addEventListener('click', function(ev){
+            ev.preventDefault();
+            renderForm(isSignup ? 'login' : 'signup', signupAvailable);
           });
-          var loginData = await loginRes.json();
-          if (!loginRes.ok) {
-            if (loginData && loginData.need_2fa) {
-              document.getElementById('oc-totp-wrap').style.display = 'block';
-              throw new Error('Enter your 2FA code and sign in again');
-            }
-            throw new Error((loginData && loginData.error) || 'Login failed');
-          }
-          var session = { apiBase: apiBase, token: loginData.token, refresh: loginData.refresh, user: loginData.user, tenant: null };
-          var tenantRes = await fetch(apiBase.replace(/\/$/,'') + '/tenants/me', { headers: { Authorization: 'Bearer ' + loginData.token } });
-          if (tenantRes.ok) session.tenant = await tenantRes.json();
-          saveSession(session);
-          location.reload();
-        } catch(e){
-          errEl.textContent = e.message;
-          errEl.style.display = 'block';
-          btn.disabled = false;
         }
-      });
+
+        document.getElementById('oc-auth-form').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var apiBase = API_BASE;
+          var email = document.getElementById('oc-email').value.trim();
+          var password = document.getElementById('oc-password').value;
+          var errEl = document.getElementById('oc-err');
+          errEl.style.display = 'none';
+          var btn = ev.target.querySelector('button');
+          btn.disabled = true;
+          try {
+            var endpoint, body;
+            if (isSignup) {
+              var confirmPassword = document.getElementById('oc-password-confirm').value;
+              if (password !== confirmPassword) throw new Error('Passwords do not match');
+              endpoint = '/auth/signup';
+              body = { email: email, password: password, company_name: document.getElementById('oc-company').value.trim() };
+            } else {
+              var totp = document.getElementById('oc-totp').value.trim();
+              endpoint = '/auth/login';
+              body = { email: email, password: password };
+              if (totp) body.totp = totp;
+            }
+            var authRes = await fetch(apiBase.replace(/\/$/,'') + endpoint, {
+              method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+            });
+            var authData = await authRes.json();
+            if (!authRes.ok) {
+              if (!isSignup && authData && authData.need_2fa) {
+                document.getElementById('oc-totp-wrap').style.display = 'block';
+                throw new Error('Enter your 2FA code and sign in again');
+              }
+              throw new Error((authData && authData.error) || (isSignup ? 'Signup failed' : 'Login failed'));
+            }
+            var session = { apiBase: apiBase, token: authData.token, refresh: authData.refresh, user: authData.user, tenant: null };
+            var tenantRes = await fetch(apiBase.replace(/\/$/,'') + '/tenants/me', { headers: { Authorization: 'Bearer ' + authData.token } });
+            if (tenantRes.ok) session.tenant = await tenantRes.json();
+            saveSession(session);
+            location.reload();
+          } catch(e){
+            errEl.textContent = e.message;
+            errEl.style.display = 'block';
+            btn.disabled = false;
+          }
+        });
+      }
+
+      renderForm('login', false);
+      fetch(API_BASE.replace(/\/$/,'') + '/auth/signup-status')
+        .then(function(r){ return r.ok ? r.json() : { available: false }; })
+        .then(function(status){ if (status.available) renderForm('login', true); })
+        .catch(function(){});
     }
 
     function renderBar(session){

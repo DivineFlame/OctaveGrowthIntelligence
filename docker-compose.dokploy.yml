@@ -143,12 +143,13 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=200M
-      - /app/cache:size=500M
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     volumes:
       - recordings:/app/recordings
+      # persistent cache — was previously double-mounted with a tmpfs entry
+      # at the same path, which Docker Compose rejects
       - paperclip_cache:/app/cache
 
   csv-handler:

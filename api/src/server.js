@@ -136,10 +136,27 @@ app.post('/auth/login', async (req, res) => {
       if (!totp) return res.status(401).json({ error: '2FA required', need_2fa: true });
     }
     const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
-    const refresh = jwt.sign({ id: user.id }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
+    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
     await auditLog(user.tenant_id, user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
     res.json({ token, refresh, user: { id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email } });
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Auth - Refresh (exchange a 7-day refresh token for a new 15-minute access token)
+// Without this, the access token issued at login has no way to be renewed and
+// every session silently dies 15 minutes after login.
+app.post('/auth/refresh', async (req, res) => {
+  const { refresh } = req.body;
+  if (!refresh) return res.status(400).json({ error: 'refresh token required' });
+  try {
+    const decoded = jwt.verify(refresh, process.env.JWT_SECRET || 'dev-secret-change-me');
+    if (decoded.type !== 'refresh') return res.status(401).json({ error: 'Not a refresh token' });
+    const { rows } = await pool.query('SELECT * FROM users WHERE id=$1', [decoded.id]);
+    if (!rows.length) return res.status(401).json({ error: 'User no longer exists' });
+    const user = rows[0];
+    const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    res.json({ token, user: { id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email } });
+  } catch(e){ return res.status(401).json({ error: 'Invalid or expired refresh token' }); }
 });
 
 // Tenants - Create (Super Admin only)
@@ -148,6 +165,91 @@ app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req
   try {
     const { rows } = await pool.query('INSERT INTO tenants (name, subdomain, plan, is_premium) VALUES ($1,$2,$3,$4) RETURNING *', [name, subdomain, plan, plan==='premium']);
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_TENANT', 'tenant', rows[0].id, req, 'SUCCESS', { subdomain });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Tenants - List all (Super Admin only)
+app.get('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tenants ORDER BY created_at DESC');
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Tenants - Get own tenant (any authenticated user)
+app.get('/tenants/me', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tenants WHERE id=$1', [req.user.tenant_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Roles - List available roles (for user-creation role picker)
+app.get('/roles', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM roles ORDER BY name');
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Roles allowed to create/manage users, kept in sync with roles.can_manage_users
+const USER_MANAGER_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+
+// Users - List within a tenant (own tenant; Super Admin may pass ?tenant_id= to inspect another tenant)
+app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  try {
+    const targetTenant = (req.user.role === 'SUPER_ADMIN' && req.query.tenant_id) ? req.query.tenant_id : req.user.tenant_id;
+    const { rows } = await pool.query('SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at FROM users WHERE tenant_id=$1 ORDER BY created_at DESC', [targetTenant]);
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Users - Create within a tenant, role drives permissions (single source of truth: roles table)
+// Super Admin may pass tenant_id to seed the first user of a tenant they just created —
+// everyone else is locked to their own tenant regardless of what they send.
+app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  const { email, password, role, tenant_id } = req.body;
+  if (!email || !password || !role) return res.status(400).json({ error: 'email, password and role are required' });
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
+  try {
+    const targetTenant = (req.user.role === 'SUPER_ADMIN' && tenant_id) ? tenant_id : req.user.tenant_id;
+    const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
+    if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
+    const r = roleRow.rows[0];
+    const password_hash = await bcrypt.hash(password, 12);
+    const { rows } = await pool.query(
+      `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at`,
+      [targetTenant, email, password_hash, r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name, tenant_id: targetTenant });
+    res.json(rows[0]);
+  } catch(e){
+    if (e.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Users - Change an existing user's role (own tenant only, even for Super Admin)
+app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  const { userId } = req.params;
+  const { role } = req.body;
+  if (!role) return res.status(400).json({ error: 'role is required' });
+  try {
+    const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
+    if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
+    const r = roleRow.rows[0];
+    const { rows } = await pool.query(
+      `UPDATE users SET role=$1, max_history_days=$2, can_view_revenue=$3, can_view_integrations=$4, can_approve_content=$5
+       WHERE id=$6 AND tenant_id=$7
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at`,
+      [r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content, userId, req.user.tenant_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
+    await auditLog(req.user.tenant_id, req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
     res.json(rows[0]);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
@@ -295,29 +397,30 @@ app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(
 });
 
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
+// Status/keys are read from this tenant's actual environment config — nothing here is simulated.
+// A channel with no <CHANNEL>_API_KEY env var set is honestly reported as not_configured.
+const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+
 app.get('/integrations', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
-  // Return masked keys only
-  res.json({
-    channels: [
-      { name: 'whatsapp', status: 'connected', api_key_masked: '••••••••a4f9', webhook_masked: 'https://api.../webhooks/****', last_event: '2s ago', queue: 0 },
-      { name: 'facebook', status: 'connected', api_key_masked: '••••••••b7c2', webhook_masked: 'https://api.../webhooks/****' },
-      { name: 'instagram', status: 'connected', api_key_masked: '••••••••c3d4' },
-      { name: 'linkedin', status: 'disconnected' },
-      { name: 'youtube', status: 'connected', api_key_masked: '••••••••d8e1' },
-      { name: 'quora', status: 'disconnected' },
-      { name: 'email', status: 'connected', api_key_masked: '••••••••e9f2' }
-    ],
-    security: { ip_whitelist: 'Enabled', two_fa_required: true, token_rotation: '90 days' }
+  const channels = INTEGRATION_CHANNELS.map(name => {
+    const key = process.env[`${name.toUpperCase()}_API_KEY`];
+    return key
+      ? { name, status: 'connected', api_key_masked: `••••••••${key.slice(-4)}` }
+      : { name, status: 'not_configured' };
   });
+  res.json({ channels });
 });
 
 app.post('/integrations/reveal', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   const { channel, totp } = req.body;
   if (!totp) return res.status(401).json({ error: '2FA OTP required to reveal' });
-  // In production verify TOTP
+  // NOTE: totp presence is checked but not cryptographically verified yet (no TOTP
+  // secret is stored anywhere for a user) — this is a real gap, not simulated here.
+  const key = process.env[`${(channel || '').toUpperCase()}_API_KEY`];
+  if (!key) return res.status(404).json({ error: `No API key configured for channel: ${channel}` });
   await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
-  // Return full key for 30s, then auto-mask via frontend
-  res.json({ channel, api_key: `FULL_KEY_${channel}_WILL_AUTO_MASK_IN_30S`, webhook_url: `https://api.yourdomain.com/webhooks/${channel}`, expires_in: 30 });
+  const domain = process.env.API_DOMAIN ? `https://${process.env.API_DOMAIN}` : '';
+  res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
 });
 
 app.post('/integrations/toggle', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
@@ -345,22 +448,13 @@ app.post('/webhooks/:channel', async (req, res) => {
 });
 
 // Hermes Agents status - Premium multiagent
+// Reports real rows only. An empty list is an honest "no agents registered yet",
+// not backfilled with a fabricated status list.
 app.get('/hermes/agents', authMiddleware, async (req, res) => {
   try {
     await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
     const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
-    res.json({
-      mode: process.env.HERMES_MODE || 'premium_multiagent',
-      agents: rows.length ? rows : [
-        { agent_type: 'scout', status: 'IDLE', description: 'Fetches brief from Drive/Slack' },
-        { agent_type: 'transformer', status: 'IDLE', description: 'Paperclip media pipeline auto-crop resize transcode thumbnail captions 12 langs' },
-        { agent_type: 'compliance', status: 'IDLE', description: 'Checks brand tone CTA' },
-        { agent_type: 'publisher', status: 'IDLE', description: 'Publishes after approval' },
-        { agent_type: 'lead_intake', status: 'ACTIVE', description: 'Watches CSV dedup enrich' },
-        { agent_type: 'enrichment', status: 'IDLE', description: 'Enriches GSTIN company data' }
-      ],
-      transformation: { before: '5 humans: upload, edit, compliance, publish, lead import', after: '5 autonomous agents, humans approve only, 83% automated' }
-    });
+    res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

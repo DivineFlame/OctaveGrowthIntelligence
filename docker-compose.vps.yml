@@ -1,0 +1,175 @@
+version: '3.8'
+networks:
+  frontend:
+  backend:
+    internal: true
+  db:
+    internal: true
+volumes:
+  pgdata:
+  redisdata:
+  recordings:
+  clamav_data:
+  paperclip_cache:
+services:
+  clamav:
+    image: clamav/clamav:latest
+    container_name: orgcomms-clamav
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - clamav_data:/var/lib/clamav
+  postgres:
+    image: postgres:15-alpine
+    container_name: orgcomms-postgres
+    restart: unless-stopped
+    networks: [db]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orgcomms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-orgcomms_prod}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+  redis:
+    image: redis:7-alpine
+    container_name: orgcomms-redis
+    restart: unless-stopped
+    networks: [db]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 127.0.0.1 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: orgcomms-api
+    restart: unless-stopped
+    networks: [frontend, backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+      - /app/logs:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    depends_on: [postgres, redis, clamav]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      CLAMAV_HOST: clamav
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      HERMES_MODE: premium_multiagent
+    volumes:
+      - recordings:/app/recordings
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+  hermes-orchestrator:
+    build:
+      context: ./hermes
+      dockerfile: Dockerfile
+    container_name: orgcomms-hermes
+    restart: unless-stopped
+    networks: [backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+    depends_on: [redis, postgres]
+  paperclip-transformer:
+    build:
+      context: ./paperclip
+      dockerfile: Dockerfile
+    container_name: orgcomms-paperclip
+    restart: unless-stopped
+    networks: [backend]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+      - /app/cache:size=500M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - recordings:/app/recordings
+      - paperclip_cache:/app/cache
+  csv-handler:
+    build:
+      context: ./csv-handler
+      dockerfile: Dockerfile
+    container_name: orgcomms-csv
+    restart: unless-stopped
+    networks: [backend, db]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      CLAMAV_HOST: clamav
+  transformer-worker:
+    build:
+      context: ./transformer
+      dockerfile: Dockerfile
+    container_name: orgcomms-transformer-worker
+    restart: unless-stopped
+    networks: [backend]
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+    depends_on: [redis]
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: orgcomms-frontend
+    restart: unless-stopped
+    networks: [frontend]
+    ports:
+      - "127.0.0.1:3005:80"

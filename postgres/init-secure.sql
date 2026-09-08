@@ -1,0 +1,26 @@
+-- Secure Postgres Multitenant RLS + Audit
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE TABLE IF NOT EXISTS tenants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(200), subdomain VARCHAR(100) UNIQUE, plan VARCHAR(20) DEFAULT 'starter', is_premium BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, email VARCHAR(255) UNIQUE, password_hash TEXT, role VARCHAR(50), max_history_days INT, can_view_revenue BOOLEAN DEFAULT false, can_view_integrations BOOLEAN DEFAULT false, can_approve_content BOOLEAN DEFAULT false, two_fa_enabled BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS roles (name VARCHAR(50) PRIMARY KEY, max_history_days INT, can_view_revenue BOOLEAN, can_view_integrations BOOLEAN, can_approve_content BOOLEAN, can_publish BOOLEAN, can_manage_users BOOLEAN);
+INSERT INTO roles VALUES ('HR_ADMIN',7,false,false,false,false,false),('SALES_LEAD',30,true,false,false,false,false),('CONTENT_CREATOR',30,false,false,false,false,false),('APPROVER',90,true,false,true,false,false),('DEPT_ADMIN',90,true,false,true,true,true),('IT_ADMIN',NULL,true,true,true,true,true),('SUPER_ADMIN',NULL,true,true,true,true,true) ON CONFLICT (name) DO NOTHING;
+CREATE TABLE IF NOT EXISTS leads (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, source_channel VARCHAR(20), company_name VARCHAR(200), contact_name VARCHAR(200), phone VARCHAR(50), email VARCHAR(255), language_pref VARCHAR(20), value_inr INT, status VARCHAR(20) DEFAULT 'NEW', is_duplicate BOOLEAN DEFAULT false, csv_upload_id UUID, created_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
+CREATE POLICY tenant_isolation_leads ON leads USING (tenant_id = current_setting('app.tenant_id')::UUID);
+CREATE TABLE IF NOT EXISTS content_assets (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, uploaded_by UUID REFERENCES users(id), file_name VARCHAR(500), file_size BIGINT, mime_type VARCHAR(100), s3_key TEXT, virus_scan_status VARCHAR(20) DEFAULT 'PENDING', brand_kit JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE content_assets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_assets ON content_assets USING (tenant_id = current_setting('app.tenant_id')::UUID);
+CREATE TABLE IF NOT EXISTS content_variants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), asset_id UUID REFERENCES content_assets(id) ON DELETE CASCADE, tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, channel VARCHAR(30), spec VARCHAR(100), s3_key TEXT, title VARCHAR(200), status VARCHAR(20) DEFAULT 'DRAFT', approved_by UUID REFERENCES users(id), published_url TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE content_variants ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_variants ON content_variants USING (tenant_id = current_setting('app.tenant_id')::UUID);
+CREATE TABLE IF NOT EXISTS approvals (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, variant_id UUID REFERENCES content_variants(id) ON DELETE CASCADE, requested_by UUID REFERENCES users(id), approved_by UUID REFERENCES users(id), status VARCHAR(20) DEFAULT 'PENDING', comment TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS csv_uploads (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, uploaded_by UUID REFERENCES users(id), file_name VARCHAR(500), file_size BIGINT, rows_total INT, rows_valid INT, rows_duplicate INT, rows_invalid INT, virus_scan_status VARCHAR(20) DEFAULT 'PENDING', status VARCHAR(20) DEFAULT 'PROCESSING', created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS audit_logs (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id), user_id UUID REFERENCES users(id), action VARCHAR(100) NOT NULL, resource_type VARCHAR(100), resource_id UUID, ip_address INET, user_agent TEXT, result VARCHAR(20), details JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE OR REPLACE FUNCTION prevent_audit_update_delete() RETURNS TRIGGER AS $$ BEGIN RAISE EXCEPTION 'Audit logs immutable'; END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS no_update_audit ON audit_logs;
+CREATE TRIGGER no_update_audit BEFORE UPDATE OR DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION prevent_audit_update_delete();
+CREATE TABLE IF NOT EXISTS hermes_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, agent_type VARCHAR(50), status VARCHAR(20) DEFAULT 'IDLE', last_run TIMESTAMPTZ, config JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_content_tenant ON content_assets(tenant_id);

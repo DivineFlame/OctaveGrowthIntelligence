@@ -1,0 +1,18 @@
+# Hardening Checklist
+- [ ] Generate strong secrets openssl rand -base64 48
+- [ ] .env.production gitignored, Docploy Secrets UI
+- [ ] UFW 22,80,443 only, office IP SSH
+- [ ] Fail2ban enabled
+- [ ] Nginx CSP HSTS rate limiting
+- [ ] Docker user 1001 read_only no-new-privileges
+- [ ] Postgres RLS encrypted backup S3 daily test restore
+- [ ] Redis requirepass bind 127.0.0.1
+- [ ] ClamAV sidecar freshclam
+- [ ] CSV max 10MB 5000 rows sanitize = + - @ validate email
+- [ ] Content MIME libmagic max 100MB virus scan Paperclip isolated
+- [ ] 2FA Super Admin Integrations OTP auto-mask 30s
+- [ ] Audit logs append-only 1 year alert failed reveal
+- [ ] TLS LetsEncrypt auto-renew internal TLS DB
+- [ ] Multitenant cross-tenant blocked tenant_id JWT RLS
+- [ ] Approval workflow no direct publish only Publisher Agent
+- [ ] Docploy healthcheck /health resource limits restart

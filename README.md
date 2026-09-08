@@ -1,0 +1,1 @@
+# OrgComms v4 REAL APP KIT - VPS - No Fake ghcr.io - Builds Locally\n\nFixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./csv-handler, ./transformer locally, no external registry. Real source code included.\n

@@ -18,10 +18,11 @@ once against the running Postgres container to create the first tenant and a
 SUPER_ADMIN login (edit the EMAIL/PASSWORD placeholders in that file first).
 See the comments in that file for the exact `docker exec` command.
 
-Then open the frontend and sign in. The login screen asks for:
-- **API Base URL** — the public URL of the `api` service (e.g.
-  `https://api.yourdomain.com`), cached in the browser after first entry
-- **Email** / **Password** — the credentials from the bootstrap step above
+Then open the frontend and sign in with the email/password from the
+bootstrap step above. The API base URL is no longer a visible field — it's
+hardcoded in `frontend/index.html` as `API_BASE` (currently
+`https://api.octaveaiautomation.com`). If the API's domain ever changes,
+update that one constant and redeploy the frontend.
 
 ## Tenants and users
 
@@ -119,7 +120,25 @@ health checks) aren't browser requests and are unaffected either way.
 same commit — it feeds the webhook URLs (`GET /integrations/webhook-urls`)
 and `POST /integrations/reveal`'s webhook URL, both of which were silently
 building relative URLs with no domain in front of them until now. Set it
-too (e.g. `api.yourdomain.com`).
+too.
+
+This deployment's actual values:
+```
+APP_DOMAIN=app.octaveaiautomation.com
+API_DOMAIN=api.octaveaiautomation.com
+```
+
+## Branding
+
+`frontend/octave-logo.png` (full lockup) and `frontend/octave-icon.png`
+(icon mark only, cropped from the same source since the full lockup's text
+isn't legible at favicon/badge sizes) are both copied into the nginx image
+by `frontend/Dockerfile` — served at `/octave-logo.png` and
+`/octave-icon.png`. Used for: the browser tab favicon, the header badge and
+wordmark inside the main app bundle, and the login screen/session
+bar/admin panel (the parts of the frontend outside that bundle). Replace
+either file and redeploy to update the brand everywhere at once — nothing
+else references the old placeholder "O" badge or "OrgComms" text anymore.
 
 Set `CLAMAV_REQUIRED=false` to disable scanning entirely (local dev without
 a `clamav` container running) — don't set this in production.

@@ -95,5 +95,31 @@ connected: <version>` if the connection works, or a clear warning if not.
 An infected file is rejected with `400` and the matched signature name(s),
 and is deleted rather than kept around.
 
+## CORS (locked to your real frontend domain)
+
+**You must set `APP_DOMAIN` in Dokploy's Environment tab now** (e.g.
+`app.yourdomain.com`, no scheme) — this was already listed in
+`.env.vps.example` but, until this fix, was never actually forwarded into
+the `api` container, so it silently did nothing. It's now load-bearing: the
+API only answers browser cross-origin requests from `https://<APP_DOMAIN>`
+by default and rejects everything else. With `APP_DOMAIN` unset, **every**
+browser request to the API — including from your own frontend — is
+rejected, and the `api` container logs a warning saying so on startup.
+
+Need more than one allowed frontend origin (staging, local dev)? Set
+`CORS_ALLOWED_ORIGINS` to a comma-separated list of full origins (scheme +
+host, e.g. `https://staging.yourdomain.com,http://localhost:5173`) — it
+adds to `APP_DOMAIN` rather than replacing it.
+
+Note: this only affects requests carrying a browser `Origin` header.
+Server-to-server calls (`curl`, the webhook endpoints, `docker exec`,
+health checks) aren't browser requests and are unaffected either way.
+
+`API_DOMAIN` has the same "listed but never forwarded" bug fixed in the
+same commit — it feeds the webhook URLs (`GET /integrations/webhook-urls`)
+and `POST /integrations/reveal`'s webhook URL, both of which were silently
+building relative URLs with no domain in front of them until now. Set it
+too (e.g. `api.yourdomain.com`).
+
 Set `CLAMAV_REQUIRED=false` to disable scanning entirely (local dev without
 a `clamav` container running) — don't set this in production.

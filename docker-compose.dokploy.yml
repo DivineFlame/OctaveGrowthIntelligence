@@ -106,6 +106,12 @@ services:
       SARVAM_API_KEY: ${SARVAM_API_KEY}
       PAPERCLIP_SERVICE: paperclip-transformer:8000
       HERMES_MODE: premium_multiagent
+      # Both were listed in .env.vps.example but never actually forwarded into
+      # this container - API_DOMAIN feeds webhook/integration URL building,
+      # APP_DOMAIN is what CORS locks the API to. Set both in Dokploy's
+      # Environment tab to your real domains (no scheme, e.g. app.example.com).
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
     volumes:
       - recordings:/app/recordings
     expose:

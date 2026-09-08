@@ -85,7 +85,26 @@ app.use(helmet({
     }
   }
 }));
-app.use(cors());
+// CORS - locked to this tenant's actual frontend domain(s), not left open to
+// any origin. APP_DOMAIN covers the common case (one frontend); set
+// CORS_ALLOWED_ORIGINS (comma-separated, full origins incl. scheme) for
+// anything extra, e.g. a staging frontend or local dev.
+// Requests with no Origin header (curl, server-to-server, the webhook
+// endpoints) are never browser cross-origin requests, so they're unaffected
+// by CORS either way and are passed through here.
+const CORS_ALLOWED_ORIGINS = [
+  ...(process.env.APP_DOMAIN ? [`https://${process.env.APP_DOMAIN}`] : []),
+  ...(process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean) : [])
+];
+if (CORS_ALLOWED_ORIGINS.length === 0) {
+  console.warn('CORS: no APP_DOMAIN or CORS_ALLOWED_ORIGINS set — every browser cross-origin request will be rejected until one is configured.');
+}
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || CORS_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error(`Origin ${origin} not allowed by CORS`));
+  }
+}));
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));

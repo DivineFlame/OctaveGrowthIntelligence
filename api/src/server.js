@@ -272,6 +272,10 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       await auditLog(user.tenant_id, user.id, 'LOGIN_FAILED', 'auth', null, req, 'FAILED');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+    if (user.disabled) {
+      await auditLog(user.tenant_id, user.id, 'LOGIN_DISABLED', 'auth', null, req, 'BLOCKED');
+      return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
+    }
     // Applies to any user with 2FA enabled, not just Super Admin/IT Admin -
     // enrollment (POST /auth/2fa/setup) is available to every role, so
     // enforcement can't be narrower than enrollment without silently
@@ -493,7 +497,7 @@ const USER_MANAGER_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
 app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   try {
     const targetTenant = (req.user.role === 'SUPER_ADMIN' && req.query.tenant_id) ? req.query.tenant_id : req.user.tenant_id;
-    const { rows } = await pool.query('SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at FROM users WHERE tenant_id=$1 ORDER BY created_at DESC', [targetTenant]);
+    const { rows } = await pool.query('SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE tenant_id=$1 ORDER BY created_at DESC', [targetTenant]);
     res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
@@ -514,7 +518,7 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (re
     const { rows } = await pool.query(
       `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at`,
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
       [targetTenant, email, password_hash, r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name, tenant_id: targetTenant });
@@ -537,12 +541,53 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     const { rows } = await pool.query(
       `UPDATE users SET role=$1, max_history_days=$2, can_view_revenue=$3, can_view_integrations=$4, can_approve_content=$5
        WHERE id=$6 AND tenant_id=$7
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, created_at`,
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
       [r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content, userId, req.user.tenant_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
     await auditLog(req.user.tenant_id, req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
     res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Users - Enable/disable an account (own tenant only). A disabled user is
+// rejected at POST /auth/login regardless of correct credentials/2FA. A
+// manager can't disable their own account (would lock a tenant with a
+// single admin out with no recovery path).
+app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  const { userId } = req.params;
+  const { disabled } = req.body;
+  if (typeof disabled !== 'boolean') return res.status(400).json({ error: 'disabled (boolean) is required' });
+  if (userId === req.user.id) return res.status(400).json({ error: 'You cannot disable your own account' });
+  try {
+    const { rows } = await pool.query(
+      `UPDATE users SET disabled=$1 WHERE id=$2 AND tenant_id=$3
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [disabled, userId, req.user.tenant_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
+    await auditLog(req.user.tenant_id, req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS');
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Users - Admin-driven password reset (own tenant only). There is no email
+// infrastructure in this system for a self-service "forgot password" flow,
+// so a tenant admin sets a new password directly on the user's behalf; the
+// user should be told to change it again after logging in.
+app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  const { userId } = req.params;
+  const { new_password } = req.body;
+  if (!new_password || new_password.length < 12) return res.status(400).json({ error: 'new_password must be at least 12 characters' });
+  try {
+    const password_hash = await bcrypt.hash(new_password, 12);
+    const { rows } = await pool.query(
+      'UPDATE users SET password_hash=$1 WHERE id=$2 AND tenant_id=$3 RETURNING id, email',
+      [password_hash, userId, req.user.tenant_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
+    await auditLog(req.user.tenant_id, req.user.id, 'RESET_USER_PASSWORD', 'user', userId, req, 'SUCCESS');
+    res.json({ success: true, email: rows[0].email });
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
@@ -982,7 +1027,7 @@ app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(
 // Audit log - real rows only, scoped to the caller's own tenant. There was
 // no read route for this at all before (only INSERTs via auditLog()) - the
 // frontend was showing four entirely fabricated log lines instead.
-app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN', 'IT_ADMIN']), async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const { rows } = await pool.query(
@@ -1008,16 +1053,28 @@ app.get('/integrations', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN
   res.json({ channels });
 });
 
-app.post('/integrations/reveal', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+app.post('/integrations/reveal', authMiddleware, authLimiter, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   const { channel, totp } = req.body;
-  if (!totp) return res.status(401).json({ error: '2FA OTP required to reveal' });
-  // NOTE: totp presence is checked but not cryptographically verified yet (no TOTP
-  // secret is stored anywhere for a user) — this is a real gap, not simulated here.
-  const key = process.env[`${(channel || '').toUpperCase()}_API_KEY`];
-  if (!key) return res.status(404).json({ error: `No API key configured for channel: ${channel}` });
-  await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
-  const domain = API_DOMAIN ? `https://${API_DOMAIN}` : '';
-  res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
+  try {
+    // Real verification now (POST /auth/2fa/setup|verify added real 2FA
+    // later than this route did) - the caller must have 2FA enabled on
+    // their own account and supply a valid code, not just a non-empty field.
+    const { rows } = await pool.query('SELECT two_fa_enabled, two_fa_secret FROM users WHERE id=$1', [req.user.id]);
+    if (!rows.length || !rows[0].two_fa_enabled) {
+      return res.status(403).json({ error: '2FA must be enabled on your account to reveal integration keys — enable it from the Security button first' });
+    }
+    if (!totp) return res.status(401).json({ error: '2FA code required', need_2fa: true });
+    const valid = authenticator.check(String(totp).replace(/\s+/g, ''), rows[0].two_fa_secret);
+    if (!valid) {
+      await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY_2FA_FAILED', 'integration', null, req, 'FAILED', { channel });
+      return res.status(401).json({ error: 'Invalid 2FA code' });
+    }
+    const key = process.env[`${(channel || '').toUpperCase()}_API_KEY`];
+    if (!key) return res.status(404).json({ error: `No API key configured for channel: ${channel}` });
+    await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
+    const domain = API_DOMAIN ? `https://${API_DOMAIN}` : '';
+    res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
+  } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
 app.post('/integrations/toggle', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
@@ -1103,20 +1160,6 @@ app.get('/hermes/agents', authMiddleware, async (req, res) => {
     await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
     const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
     res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
-  } catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-// Audit Log - real rows only, tenant-scoped, most recent first. audit_logs
-// has been written to since day one (every login, upload, approval, role
-// change, etc.) but nothing ever exposed a way to read it back until now.
-app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-    const { rows } = await pool.query(
-      'SELECT id, action, resource_type, resource_id, ip_address, result, details, created_at FROM audit_logs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2',
-      [req.user.tenant_id, limit]
-    );
-    res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

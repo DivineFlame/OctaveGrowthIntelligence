@@ -327,9 +327,54 @@ for their own account from the **Security** button next to Logout:
 If your database predates this feature, run `postgres/migrate-2fa-secret.sql`
 once first (same pattern as the other migrations).
 
+## User lifecycle: disable and admin-driven password reset
+
+Two gaps that any real deployment with actual employees needs day one:
+there was no way to lock a departed/compromised user out, and no way to
+recover a forgotten password.
+
+- **Disable/enable**: `PATCH /users/:userId/status { disabled: true|false }`
+  (Tenant Admin roles only, own tenant). A disabled user is rejected at
+  `POST /auth/login` with a 403, even with the correct password and 2FA
+  code — no partial session is ever issued. A manager can't disable their
+  own account (prevents a single-admin tenant from locking itself out with
+  no recovery path). Wired up in the Admin panel's **Users** tab as a
+  per-row Disable/Enable button with a `disabled` badge next to the email.
+- **Password reset**: `POST /users/:userId/reset-password { new_password }`
+  (Tenant Admin roles only, own tenant). There's no email/SMS
+  infrastructure in this system for a self-service "forgot password" link,
+  so an admin sets a new password directly; tell the user to change it
+  again after they log in. Wired up as a **Reset Password** button per row
+  (prompts for the new password client-side, never displays or stores it
+  anywhere but the one request).
+
+If your database predates this feature, run
+`postgres/migrate-user-disabled.sql` once first (same pattern as the other
+migrations — adds `users.disabled BOOLEAN DEFAULT false`).
+
 ## Dependency note
 
 `multer` was on the vulnerable 1.x line (`npm` flags known CVEs on install);
 upgraded to 2.3.0. The upgrade is drop-in for how this app uses it
 (`diskStorage`, `.single(fieldname)`, `limits`, `fileFilter`) — no other
 code changes were needed.
+
+## Hardening notes from a completeness audit
+
+- **`/integrations/reveal` now actually verifies 2FA.** It previously only
+  checked that a `totp` field was present (any value passed) — the same
+  class of bug `/auth/login` had before real TOTP was added, just missed
+  on this sibling route. It now requires the *caller's own* 2FA to be
+  enabled (403 if not — reveal a raw integration API key without 2FA at
+  all isn't acceptable) and verifies the code for real, logging
+  `REVEAL_KEY_2FA_FAILED` on a bad attempt.
+- **Removed a duplicate `/audit-logs` route.** Two near-identical handlers
+  existed; Express only ever ran the first (Super-Admin-only, no `user_id`
+  column), silently shadowing the second (which also allowed `IT_ADMIN`).
+  Consolidated into one route that allows both roles and returns
+  `user_id`.
+- **Added `.dockerignore` to every service that does `COPY . .`** (`api`,
+  `hermes`, `transformer`, `csv-handler`, `paperclip`) — without one, local
+  `node_modules`/`.venv`/`.env` files could get baked into an image if
+  someone builds from an unclean working tree. `frontend`'s Dockerfile
+  copies only three named files, so it doesn't need one.

@@ -692,6 +692,20 @@ app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
+// Audit log - real rows only, scoped to the caller's own tenant. There was
+// no read route for this at all before (only INSERTs via auditLog()) - the
+// frontend was showing four entirely fabricated log lines instead.
+app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const { rows } = await pool.query(
+      'SELECT id, user_id, action, resource_type, resource_id, ip_address, result, details, created_at FROM audit_logs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2',
+      [req.user.tenant_id, limit]
+    );
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
 // Status/keys are read from this tenant's actual environment config — nothing here is simulated.
 // A channel with no <CHANNEL>_API_KEY env var set is honestly reported as not_configured.
@@ -802,6 +816,20 @@ app.get('/hermes/agents', authMiddleware, async (req, res) => {
     await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
     const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
     res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Audit Log - real rows only, tenant-scoped, most recent first. audit_logs
+// has been written to since day one (every login, upload, approval, role
+// change, etc.) but nothing ever exposed a way to read it back until now.
+app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const { rows } = await pool.query(
+      'SELECT id, action, resource_type, resource_id, ip_address, result, details, created_at FROM audit_logs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2',
+      [req.user.tenant_id, limit]
+    );
+    res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

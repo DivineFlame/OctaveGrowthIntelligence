@@ -93,6 +93,17 @@ app.use(helmet({
     }
   }
 }));
+// APP_DOMAIN/API_DOMAIN are documented as bare domains (e.g. "app.example.com"),
+// but it's an easy mistake to set them with a scheme already included (e.g.
+// "https://app.example.com"), which would silently double up to
+// "https://https://app.example.com" wherever we prepend one ourselves.
+// Strip any accidental scheme/trailing-slash so both forms work correctly.
+function normalizeDomain(d) {
+  return (d || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+const APP_DOMAIN = normalizeDomain(process.env.APP_DOMAIN);
+const API_DOMAIN = normalizeDomain(process.env.API_DOMAIN);
+
 // CORS - locked to this tenant's actual frontend domain(s), not left open to
 // any origin. APP_DOMAIN covers the common case (one frontend); set
 // CORS_ALLOWED_ORIGINS (comma-separated, full origins incl. scheme) for
@@ -101,11 +112,13 @@ app.use(helmet({
 // endpoints) are never browser cross-origin requests, so they're unaffected
 // by CORS either way and are passed through here.
 const CORS_ALLOWED_ORIGINS = [
-  ...(process.env.APP_DOMAIN ? [`https://${process.env.APP_DOMAIN}`] : []),
+  ...(APP_DOMAIN ? [`https://${APP_DOMAIN}`] : []),
   ...(process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean) : [])
 ];
 if (CORS_ALLOWED_ORIGINS.length === 0) {
   console.warn('CORS: no APP_DOMAIN or CORS_ALLOWED_ORIGINS set — every browser cross-origin request will be rejected until one is configured.');
+} else {
+  console.log('CORS: allowing browser origins:', CORS_ALLOWED_ORIGINS.join(', '));
 }
 app.use(cors({
   origin(origin, callback) {
@@ -702,7 +715,7 @@ app.post('/integrations/reveal', authMiddleware, rbacMiddleware(['SUPER_ADMIN','
   const key = process.env[`${(channel || '').toUpperCase()}_API_KEY`];
   if (!key) return res.status(404).json({ error: `No API key configured for channel: ${channel}` });
   await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
-  const domain = process.env.API_DOMAIN ? `https://${process.env.API_DOMAIN}` : '';
+  const domain = API_DOMAIN ? `https://${API_DOMAIN}` : '';
   res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
 });
 
@@ -720,7 +733,7 @@ app.get('/integrations/webhook-urls', authMiddleware, rbacMiddleware(['SUPER_ADM
   try {
     const { rows } = await pool.query('SELECT webhook_secret FROM tenants WHERE id=$1', [req.user.tenant_id]);
     if (!rows.length || !rows[0].webhook_secret) return res.status(404).json({ error: 'No webhook secret provisioned for this tenant yet — rotate one first' });
-    const base = process.env.API_DOMAIN ? `https://${process.env.API_DOMAIN}` : '';
+    const base = API_DOMAIN ? `https://${API_DOMAIN}` : '';
     const secret = rows[0].webhook_secret;
     const urls = INTEGRATION_CHANNELS.map(channel => ({ channel, url: `${base}/webhooks/${req.user.tenant_id}/${secret}/${channel}` }));
     res.json({ urls });

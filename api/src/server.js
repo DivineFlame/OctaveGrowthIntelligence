@@ -14,9 +14,17 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const NodeClam = require('clamscan');
+const { rateLimit } = require('express-rate-limit');
+const { authenticator } = require('otplib');
+const QRCode = require('qrcode');
 require('dotenv').config({ path: '../.env.production' });
 
 const app = express();
+// Behind Dokploy's Traefik (one reverse-proxy hop) - without this, every
+// request looks like it comes from Traefik's own address, which breaks
+// per-IP rate limiting (one shared bucket for all clients) and makes
+// audit_logs.ip_address record the proxy, not the real client.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 3001;
 
@@ -109,6 +117,39 @@ app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Rate limiting - nothing enforced this before; the original security docs
+// assumed an nginx layer that doesn't exist under Dokploy. Applied per
+// route below, not globally, so limits can differ by sensitivity.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many attempts, try again later' }
+});
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many uploads, slow down' }
+});
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many requests' }
+});
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many requests' }
+});
+app.use(generalLimiter);
+
 // Storage for uploads - VPS local
 const uploadDir = process.env.UPLOAD_DIR || '/app/recordings';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -184,7 +225,7 @@ app.get('/health', async (req, res) => {
 });
 
 // Auth - Login (with 2FA check for Super Admin)
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/login', authLimiter, async (req, res) => {
   const { email, password, totp } = req.body;
   try {
     const { rows } = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
@@ -195,9 +236,17 @@ app.post('/auth/login', async (req, res) => {
       await auditLog(user.tenant_id, user.id, 'LOGIN_FAILED', 'auth', null, req, 'FAILED');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    if ((user.role === 'SUPER_ADMIN' || user.role === 'IT_ADMIN') && user.two_fa_enabled) {
-      // In production verify TOTP - here mock check totp present
+    // Applies to any user with 2FA enabled, not just Super Admin/IT Admin -
+    // enrollment (POST /auth/2fa/setup) is available to every role, so
+    // enforcement can't be narrower than enrollment without silently
+    // ignoring some users' 2FA.
+    if (user.two_fa_enabled) {
       if (!totp) return res.status(401).json({ error: '2FA required', need_2fa: true });
+      const totpValid = user.two_fa_secret && authenticator.check(String(totp).replace(/\s+/g, ''), user.two_fa_secret);
+      if (!totpValid) {
+        await auditLog(user.tenant_id, user.id, 'LOGIN_2FA_FAILED', 'auth', null, req, 'FAILED');
+        return res.status(401).json({ error: 'Invalid 2FA code' });
+      }
     }
     const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
     const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
@@ -223,7 +272,7 @@ app.get('/auth/signup-status', async (req, res) => {
 //      INSERT ... ON CONFLICT DO NOTHING - only the first request to win
 //      that race can ever create an account here, so forgetting to flip
 //      SIGNUP_ENABLED off can't mint a second Super Admin.
-app.post('/auth/signup', async (req, res) => {
+app.post('/auth/signup', authLimiter, async (req, res) => {
   if (process.env.SIGNUP_ENABLED === 'false') {
     return res.status(403).json({ error: 'Signup is disabled' });
   }
@@ -285,7 +334,7 @@ app.post('/auth/signup', async (req, res) => {
 // Auth - Refresh (exchange a 7-day refresh token for a new 15-minute access token)
 // Without this, the access token issued at login has no way to be renewed and
 // every session silently dies 15 minutes after login.
-app.post('/auth/refresh', async (req, res) => {
+app.post('/auth/refresh', authLimiter, async (req, res) => {
   const { refresh } = req.body;
   if (!refresh) return res.status(400).json({ error: 'refresh token required' });
   try {
@@ -297,6 +346,62 @@ app.post('/auth/refresh', async (req, res) => {
     const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
     res.json({ token, user: { id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email } });
   } catch(e){ return res.status(401).json({ error: 'Invalid or expired refresh token' }); }
+});
+
+// 2FA - Setup: generates a secret + QR code, but does NOT enable enforcement
+// yet. two_fa_enabled only flips on in /auth/2fa/verify, once the user has
+// proven they actually scanned it and their app produces valid codes -
+// otherwise a typo or a QR that never got scanned would lock them out on
+// their very next login.
+app.post('/auth/2fa/setup', authMiddleware, async (req, res) => {
+  try {
+    const secret = authenticator.generateSecret();
+    await pool.query('UPDATE users SET two_fa_secret=$1, two_fa_enabled=false WHERE id=$2', [secret, req.user.id]);
+    const otpauth = authenticator.keyuri(req.user.email, 'OctaveGrowthIntelligence', secret);
+    const qrDataUrl = await QRCode.toDataURL(otpauth);
+    res.json({ secret, otpauth, qr: qrDataUrl });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// 2FA - Verify: confirms the code from the authenticator app matches, then
+// (and only then) turns enforcement on.
+app.post('/auth/2fa/verify', authMiddleware, authLimiter, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'token is required' });
+  try {
+    const { rows } = await pool.query('SELECT two_fa_secret FROM users WHERE id=$1', [req.user.id]);
+    if (!rows.length || !rows[0].two_fa_secret) return res.status(400).json({ error: 'Run /auth/2fa/setup first' });
+    const valid = authenticator.check(String(token).replace(/\s+/g, ''), rows[0].two_fa_secret);
+    if (!valid) return res.status(401).json({ error: 'Invalid code' });
+    await pool.query('UPDATE users SET two_fa_enabled=true WHERE id=$1', [req.user.id]);
+    await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
+    res.json({ message: '2FA enabled' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// 2FA - Disable: requires the current password so a hijacked but
+// still-logged-in session (e.g. a stolen access token, 15 min TTL) can't
+// silently strip 2FA off the account.
+app.post('/auth/2fa/disable', authMiddleware, authLimiter, async (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: 'Current password is required to disable 2FA' });
+  try {
+    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    const ok = await bcrypt.compare(password, rows[0].password_hash);
+    if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+    await pool.query('UPDATE users SET two_fa_enabled=false, two_fa_secret=NULL WHERE id=$1', [req.user.id]);
+    await auditLog(req.user.tenant_id, req.user.id, 'DISABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
+    res.json({ message: '2FA disabled' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// 2FA - Status: lets the frontend show enabled/disabled without guessing from the JWT
+app.get('/auth/2fa/status', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT two_fa_enabled FROM users WHERE id=$1', [req.user.id]);
+    res.json({ enabled: !!(rows.length && rows[0].two_fa_enabled) });
+  } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
 // Tenant columns safe to return to any authenticated user. webhook_secret is
@@ -415,7 +520,7 @@ app.get('/leads', authMiddleware, async (req, res) => {
 });
 
 // Leads - CSV Upload (Secure: 10MB, 5000 rows, sanitize, dedup, ClamAV)
-app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (req, res) => {
+app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   try {
     let scan;
@@ -480,7 +585,7 @@ app.post('/leads/upload-csv', authMiddleware, csvUpload.single('file'), async (r
 });
 
 // Content - Upload raw asset (100MB max, ClamAV scan, MIME check)
-app.post('/content/upload', authMiddleware, upload.single('file'), async (req, res) => {
+app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   try {
     let scan;
@@ -674,7 +779,7 @@ async function handleInboundWebhook(req, res) {
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 }
 
-app.post('/webhooks/:tenantId/:webhookSecret/:channel', handleInboundWebhook);
+app.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 
 // Hermes Agents status - Premium multiagent
 // Reports real rows only. An empty list is an honest "no agents registered yet",
@@ -691,7 +796,8 @@ app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT
 
 // Webhook server separate
 const webhookApp = express();
+webhookApp.set('trust proxy', 1);
 webhookApp.use(express.json());
-webhookApp.post('/webhooks/:tenantId/:webhookSecret/:channel', handleInboundWebhook);
+webhookApp.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));

@@ -115,6 +115,9 @@ connected: <version>` if the connection works, or a clear warning if not.
 An infected file is rejected with `400` and the matched signature name(s),
 and is deleted rather than kept around.
 
+Set `CLAMAV_REQUIRED=false` to disable scanning entirely (local dev without
+a `clamav` container running) — don't set this in production.
+
 ## CORS (locked to your real frontend domain)
 
 **You must set `APP_DOMAIN` in Dokploy's Environment tab now** (e.g.
@@ -159,5 +162,48 @@ bar/admin panel (the parts of the frontend outside that bundle). Replace
 either file and redeploy to update the brand everywhere at once — nothing
 else references the old placeholder "O" badge or "OrgComms" text anymore.
 
-Set `CLAMAV_REQUIRED=false` to disable scanning entirely (local dev without
-a `clamav` container running) — don't set this in production.
+## Rate limiting
+
+Nothing enforced this before — the original security docs assumed an nginx
+layer that doesn't exist under Dokploy. Per-route limits (`express-rate-limit`,
+keyed by client IP):
+
+| Routes | Limit |
+| --- | --- |
+| `/auth/login`, `/auth/signup`, `/auth/refresh`, `/auth/2fa/verify`, `/auth/2fa/disable` | 10 / 15 min |
+| `/leads/upload-csv`, `/content/upload` | 10 / min |
+| `/webhooks/:tenantId/:webhookSecret/:channel` (both the main app and the separate webhook server) | 120 / min |
+| everything else | 300 / min (global baseline) |
+
+This requires `app.set('trust proxy', 1)`, also added — without it, every
+request looks like it comes from Dokploy's Traefik (one shared IP for all
+clients), which would make per-IP limiting useless and also make
+`audit_logs.ip_address` record the proxy instead of the real client.
+Already set on both the main app and the separate webhook server.
+
+## Two-factor authentication (real TOTP, not a presence check)
+
+Previously `/auth/login` only checked that a `totp` field was non-empty —
+any value at all "passed". Now it's verified against a real per-user secret
+(`otplib`, standard 30-second/6-digit TOTP, compatible with Google
+Authenticator, Authy, 1Password, etc.).
+
+2FA is opt-in for every role (not just Super Admin) — anyone can turn it on
+for their own account from the **Security** button next to Logout:
+1. **Enable 2FA** generates a secret and shows a QR code.
+2. Scan it, then enter the 6-digit code to confirm — `two_fa_enabled` only
+   flips on here, after the code checks out, so a QR that never got
+   scanned (or was scanned wrong) can't lock you out on your next login.
+3. Disabling requires your current password, so a hijacked but
+   still-valid access token (15 min TTL) can't silently strip 2FA off the
+   account.
+
+If your database predates this feature, run `postgres/migrate-2fa-secret.sql`
+once first (same pattern as the other migrations).
+
+## Dependency note
+
+`multer` was on the vulnerable 1.x line (`npm` flags known CVEs on install);
+upgraded to 2.3.0. The upgrade is drop-in for how this app uses it
+(`diskStorage`, `.single(fieldname)`, `limits`, `fileFilter`) — no other
+code changes were needed.

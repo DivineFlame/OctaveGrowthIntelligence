@@ -74,6 +74,14 @@ Error generating stack: `+u.message+`
     #oc-admin .oc-msg{font-size:12px;margin-top:8px}
     #oc-admin .oc-msg.oc-ok{color:#00d19a}
     #oc-admin .oc-msg.oc-bad{color:#ff6b6b}
+    #oc-security{position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-security .oc-panel{position:relative;width:100%;max-width:400px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:24px;font-family:Inter,system-ui,sans-serif}
+    #oc-security .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
+    #oc-security label{display:block;font-size:11px;text-transform:uppercase;color:rgba(255,255,255,.5);margin:12px 0 6px}
+    #oc-security input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
+    #oc-security .oc-submit{width:100%;padding:10px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;cursor:pointer}
+    #oc-security .oc-msg{font-size:12px;margin-top:8px}
+    #oc-security .oc-msg.oc-bad{color:#ff6b6b}
   </style>
   <script>
   (function(){
@@ -229,6 +237,7 @@ Error generating stack: `+u.message+`
       bar.innerHTML =
         '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
         '<span class="oc-who">' + session.user.email + ' &middot; ' + session.user.role + (session.tenant ? ' &middot; ' + session.tenant.name : '') + '</span>' +
+        '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
         '<button class="oc-logout-btn" id="oc-logout">Logout</button>';
       document.body.appendChild(bar);
@@ -240,6 +249,74 @@ Error generating stack: `+u.message+`
       if (canManageUsers) {
         document.getElementById('oc-open-admin').addEventListener('click', function(){ renderAdmin(session); });
       }
+      document.getElementById('oc-open-security').addEventListener('click', function(){ renderSecurity(session); });
+    }
+
+    function renderSecurity(session){
+      var existing = document.getElementById('oc-security');
+      if (existing) existing.remove();
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-security';
+      wrap.className = 'oc-admin-overlay';
+      wrap.innerHTML =
+        '<div class="oc-panel" style="max-width:400px">' +
+          '<button class="oc-close" id="oc-security-close">&times;</button>' +
+          '<h2 style="margin:0 0 16px">Two-Factor Authentication</h2>' +
+          '<div id="oc-2fa-body">Loading&hellip;</div>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      document.getElementById('oc-security-close').addEventListener('click', function(){ wrap.remove(); });
+
+      async function loadStatus(){
+        var body = document.getElementById('oc-2fa-body');
+        try {
+          var status = await api(session, '/auth/2fa/status');
+          if (status.enabled) {
+            body.innerHTML =
+              '<p style="font-size:13px">2FA is <strong style="color:#00d19a">enabled</strong> on your account.</p>' +
+              '<label>Current Password</label><input id="oc-2fa-password" type="password">' +
+              '<button class="oc-submit" id="oc-2fa-disable" style="margin-top:10px">Disable 2FA</button>' +
+              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+            document.getElementById('oc-2fa-disable').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                await api(session, '/auth/2fa/disable', { method: 'POST', body: { password: document.getElementById('oc-2fa-password').value } });
+                loadStatus();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          } else {
+            body.innerHTML =
+              '<p style="font-size:13px">2FA is <strong style="color:rgba(255,255,255,.6)">disabled</strong>.</p>' +
+              '<button class="oc-submit" id="oc-2fa-start">Enable 2FA</button>' +
+              '<div id="oc-2fa-setup" style="display:none;margin-top:12px">' +
+                '<p style="font-size:12px;color:rgba(255,255,255,.6)">Scan with your authenticator app:</p>' +
+                '<img id="oc-2fa-qr" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
+                '<p style="font-size:11px;color:rgba(255,255,255,.5);word-break:break-all" id="oc-2fa-secret"></p>' +
+                '<label>Enter the 6-digit code to confirm</label>' +
+                '<input id="oc-2fa-code" maxlength="6">' +
+                '<button class="oc-submit" id="oc-2fa-confirm" style="margin-top:10px">Verify &amp; Enable</button>' +
+              '</div>' +
+              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+            document.getElementById('oc-2fa-start').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                var setup = await api(session, '/auth/2fa/setup', { method: 'POST' });
+                document.getElementById('oc-2fa-qr').src = setup.qr;
+                document.getElementById('oc-2fa-secret').textContent = 'Manual entry key: ' + setup.secret;
+                document.getElementById('oc-2fa-setup').style.display = 'block';
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+            document.getElementById('oc-2fa-confirm').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                await api(session, '/auth/2fa/verify', { method: 'POST', body: { token: document.getElementById('oc-2fa-code').value } });
+                loadStatus();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          }
+        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+      }
+      loadStatus();
     }
 
     function renderAdmin(session){

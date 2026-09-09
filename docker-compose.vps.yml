@@ -1,4 +1,3 @@
-version: '3.8'
 networks:
   frontend:
   backend:
@@ -43,6 +42,12 @@ services:
       - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
     ports:
       - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
   redis:
     image: redis:7-alpine
     container_name: orgcomms-redis
@@ -59,6 +64,12 @@ services:
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 127.0.0.1 --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a ${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
   api:
     build:
       context: ./api
@@ -75,7 +86,10 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
-    depends_on: [postgres, redis, clamav]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clamav: { condition: service_healthy }
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -109,7 +123,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis, postgres]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
   paperclip-transformer:
     build:
       context: ./paperclip
@@ -121,31 +137,30 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=200M
-      - /app/cache:size=500M
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     volumes:
       - recordings:/app/recordings
+      # persistent cache — this used to also be tmpfs-mounted at the same
+      # path, which Docker Compose rejects (same bug already fixed in
+      # docker-compose.dokploy.yml; this file just hadn't been updated to
+      # match)
       - paperclip_cache:/app/cache
-  csv-handler:
-    build:
-      context: ./csv-handler
-      dockerfile: Dockerfile
-    container_name: orgcomms-csv
-    restart: unless-stopped
-    networks: [backend, db]
-    user: "1001:1001"
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      CLAMAV_HOST: clamav
+    # python:3.11-slim has no curl/wget by default, but does have python
+    # itself, so use that to hit the real GET /health FastAPI already exposes.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+  # csv-handler service removed: csv-handler.js only defined/exported
+  # functions, never started a server or consumer loop, so it crash-looped
+  # in production. That logic already lives inline in POST
+  # /leads/upload-csv in api/src/server.js - the csv-handler/ directory
+  # itself has been deleted (see docker-compose.dokploy.yml for the same
+  # note, and the README's production audit section).
   transformer-worker:
     build:
       context: ./transformer
@@ -163,7 +178,8 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis]
+    depends_on:
+      redis: { condition: service_healthy }
   frontend:
     build:
       context: ./frontend
@@ -173,3 +189,9 @@ services:
     networks: [frontend]
     ports:
       - "127.0.0.1:3005:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

@@ -9,7 +9,7 @@
 ![Nginx](https://img.shields.io/badge/Nginx-reverse%20proxy-009639?logo=nginx&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./csv-handler, ./transformer locally, no external registry. Real source code included.
+Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./transformer locally, no external registry. Real source code included.
 
 ## First login
 
@@ -374,7 +374,66 @@ code changes were needed.
   Consolidated into one route that allows both roles and returns
   `user_id`.
 - **Added `.dockerignore` to every service that does `COPY . .`** (`api`,
-  `hermes`, `transformer`, `csv-handler`, `paperclip`) — without one, local
+  `hermes`, `transformer`, `paperclip`) — without one, local
   `node_modules`/`.venv`/`.env` files could get baked into an image if
   someone builds from an unclean working tree. `frontend`'s Dockerfile
   copies only three named files, so it doesn't need one.
+- **Deleted the orphaned `csv-handler/` service directory.** It was
+  already removed from both compose files earlier (it never started a
+  server or consumer loop, so it crash-looped in production — the CSV
+  logic it duplicated already lives inline in `POST /leads/upload-csv`),
+  but the unused source directory itself was left behind. Removed to stop
+  it from being audited/patched as if it were live code.
+- **Real dependency vulnerabilities fixed, not just flagged:**
+  - `csv-parse` bumped 5.x → 7.0.2 in `api` — the 5.x line has a known
+    prototype-pollution issue reachable through the `columns` option
+    (GHSA-8cw4-87c7-c6xx), and `POST /leads/upload-csv` parses
+    user-uploaded CSVs with exactly that option (`columns: true`) to turn
+    header rows into object keys. Verified the sync API and `columns: true`
+    behavior are unchanged in 7.0.2 (including that a header literally
+    named `__proto__` parses to a plain data key, not a prototype write).
+  - `qs` (pulled in transitively by `express`) pinned to `^6.16.0` via a
+    `package.json` `overrides` entry — `npm audit fix` alone can't move it
+    because `express` itself declares a narrower `~6.15.1` range.
+  - `uuid` bumped 9 → 11 (only the `v4()` export is used here, which is
+    unaffected by the underlying advisory, but the upgrade was a drop-in
+    no-op so there was no reason not to take it).
+  - `npm audit` is clean (0 vulnerabilities) across `api`, `hermes`, and
+    `transformer` as of this pass.
+- **Removed the orphaned `csv-handler/` directory outright** (see above)
+  rather than just patching its `csv-parse` too, since it was already dead
+  weight not built by either compose file.
+- **Checked in `package-lock.json` for `api`, `hermes`, and `transformer`.**
+  None of the three had one — every deploy was resolving each dependency's
+  latest matching version fresh at build time, so a build today could pull
+  different transitive versions than a build tomorrow with zero code
+  changes (or a build that worked yesterday could break tomorrow). Also
+  switched their Dockerfiles from `npm install --omit=dev` to
+  `npm ci --omit=dev`, which fails loudly if `package.json` and the
+  lockfile ever drift apart instead of silently resolving around it.
+- **Pinned `paperclip/requirements.txt`** — `fastapi`, `uvicorn`, `Pillow`,
+  and `python-multipart` had no version constraints at all, so every image
+  build re-resolved to whatever was current on PyPI that day. Pinned to
+  the versions actually verified against this build (`fastapi==0.141.1`,
+  `uvicorn==0.52.4`, `Pillow==12.3.0`, `python-multipart==0.0.32`).
+- **Fixed a real double-tmpfs-mount bug in `docker-compose.vps.yml`.**
+  `paperclip-transformer` mounted `/app/cache` as both a `tmpfs` entry and
+  the persistent `paperclip_cache` volume — Docker Compose rejects that
+  outright (`target already mounted`). This exact bug had already been
+  found and fixed in `docker-compose.dokploy.yml` earlier, but the fix was
+  never carried over to this file; anyone deploying straight from
+  `docker-compose.vps.yml` (bypassing Dokploy) would have hit it. Verified
+  both compose files now parse cleanly with `docker compose config`.
+- **Added healthchecks so `depends_on` means something.** Neither
+  `postgres` nor `redis`'s official images ship a built-in `HEALTHCHECK`,
+  so `depends_on: [postgres, redis, clamav]` was only ever waiting for
+  those containers to *start*, not for Postgres/Redis to actually be
+  accepting connections — `api` could come up and start serving requests
+  during that gap. Added real healthchecks (`pg_isready`, `redis-cli
+  ping`, plus one for `frontend` and `paperclip-transformer`, which had
+  none) and switched every `depends_on` to
+  `condition: service_healthy` where a healthcheck now backs it. `clamav`
+  already ships its own healthcheck (`clamdcheck.sh`, confirmed by
+  inspecting the actual image config) so it needed no override, just the
+  `condition: service_healthy` wiring on the services that depend on it.
+  Applied identically to both compose files.

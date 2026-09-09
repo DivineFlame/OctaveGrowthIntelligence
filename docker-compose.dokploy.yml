@@ -38,6 +38,9 @@ services:
     networks: [backend]
     volumes:
       - clamav_data:/var/lib/clamav
+    # No healthcheck override: this image ships its own (clamdcheck.sh,
+    # 360s start_period to allow the first freshclam signature download) -
+    # `depends_on: condition: service_healthy` below relies on it directly.
 
   postgres:
     image: postgres:15-alpine
@@ -63,6 +66,16 @@ services:
     # No ports: published — reachable internally as postgres:5432 only.
     # Need a one-off psql session? Use Dokploy's container terminal, or
     # `docker exec -it <postgres-container> psql -U orgcomms` on the host.
+    # Neither the postgres nor redis official images ship a HEALTHCHECK -
+    # without one, `depends_on` below only waits for the container to
+    # start, not for Postgres to actually accept connections, so api could
+    # start (and serve requests that hit the DB) during that gap.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   redis:
     image: redis:7-alpine
@@ -79,6 +92,16 @@ services:
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 0.0.0.0 --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
+    # No REDIS_PASSWORD in `environment:` here (only baked into `command:`
+    # above, compose-side) - so the healthcheck interpolates it the same
+    # way `command:` does, at compose-parse time, rather than $$-escaping
+    # for a container env var that doesn't exist.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a ${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   api:
     build:
@@ -95,7 +118,10 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
-    depends_on: [postgres, redis, clamav]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clamav: { condition: service_healthy }
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -142,7 +168,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis, postgres]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
 
   paperclip-transformer:
     build:
@@ -162,6 +190,14 @@ services:
       # persistent cache — was previously double-mounted with a tmpfs entry
       # at the same path, which Docker Compose rejects
       - paperclip_cache:/app/cache
+    # python:3.11-slim has no curl/wget by default, but does have python
+    # itself, so use that to hit the real GET /health FastAPI already exposes.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   # csv-handler service removed: csv-handler/csv-handler.js only defines and
   # exports functions — it never opens a server or a Redis consumer loop, so
@@ -187,7 +223,8 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis]
+    depends_on:
+      redis: { condition: service_healthy }
 
   frontend:
     build:
@@ -198,3 +235,9 @@ services:
     expose:
       - "80"
     # Give this service a domain in Dokploy's Domains tab (container port 80).
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

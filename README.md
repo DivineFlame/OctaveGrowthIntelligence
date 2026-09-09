@@ -109,12 +109,30 @@ without needing any tenant-wide role.
   channel-posting mention elsewhere in this README/app is aspirational until
   specific platforms are integrated one at a time (each needs its own app
   registration/API credentials from you).
-- **No frontend UI for any of this yet.** The API is real and usable
-  (curl/Postman today), but wiring it into the compiled frontend bundle is
-  deliberately a separate follow-up - editing that 260KB+ file directly has
-  already caused one real syntax-breaking mistake this session, caught only
-  by parsing it three independent ways before trusting it. Doing the backend
-  first means the API shape can be sanity-checked before touching that file.
+
+### Frontend UI
+
+Deliberately built as new panels in the hand-written login/session-bar/admin
+script (the same one behind Sign In, the Security button, and the existing
+Admin panel) rather than by editing the compiled React bundle - that bundle
+already caused one real syntax-breaking mistake earlier this session, and
+this whole feature area has more moving parts than a single safe edit.
+
+- **Products** button (session bar, next to Security - visible to everyone,
+  since even a plain Member should see products they belong to) opens a
+  list: Tenant Admins see every product in the tenant and can create new
+  ones; everyone else sees only products they're a member of. Selecting one
+  opens tabs for **Members** (add/remove, with a role picker - Tenant Admins
+  get a dropdown of real tenant users via `GET /users`; a Product Admin
+  without a tenant-wide role has to type a user's ID directly, since
+  `GET /users` is gated to tenant-wide admin roles and a Product Admin
+  usually isn't one), **Channels** (per-channel status + a config note - no
+  real platform config UI yet, matching the backend), and **Agents** (enable/
+  disable already-created agents - shows "Premium plan only" messaging when
+  none are enabled rather than pretending it works on Standard).
+- **Agents** tab added to the existing Super Admin panel (Admin button):
+  create LLM connections (provider + API key, never redisplayed once saved)
+  and Agents (name, connection, model, system prompt).
 
 ## Studio, Leads, and Inbox (real data, not the original mockup)
 

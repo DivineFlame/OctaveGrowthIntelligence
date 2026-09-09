@@ -63,9 +63,46 @@ the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
 stays usable without re-entering a password until the refresh token itself
 expires.
 
-Note: the Studio/Leads/Inbox panels elsewhere in the frontend still show
-illustrative example content (sample leads, sample inbox messages) — only
-the login and tenant/user administration are wired to the real API so far.
+## Studio, Leads, and Inbox (real data, not the original mockup)
+
+These three panels were originally a fully client-side simulation — no
+network calls, hardcoded sample leads/messages, a fake progress bar, and a
+fake "Fetch from Team Drive/Slack" button with invented brand-kit data.
+All of that's gone:
+
+- **Leads**: uploading a CSV calls `POST /leads/upload-csv` for real; the
+  shown totals (rows/valid/duplicate/invalid) are the actual response, and
+  "Recent Leads" is `GET /leads`. The old fake CSV-to-CRM field-mapping
+  table and language-distribution chart were removed rather than left
+  fake — the real API doesn't return per-field mapping suggestions or a
+  language breakdown, so there was no honest way to populate them.
+- **Inbox**: there's no dedicated messaging/inbox endpoint in this API, so
+  this reuses `GET /leads` (which is what the inbox conceptually
+  represented anyway — leads arriving from every channel + CSV).
+- **Studio**: uploading calls `POST /content/upload`; "Transform with
+  Agent" calls `POST /content/:assetId/transform` with the channels you
+  selected and shows the real variants it created (channel, spec, status)
+  instead of fabricated thumbnails/sizes/durations — Paperclip doesn't
+  generate real preview images accessible to the frontend, so there was no
+  honest way to show those either. Approve/Reject/Request Change call
+  `POST /content/variants/:variantId/approve` for real, looping over every
+  variant from that transform. The "Fetch Client Details" button is
+  disabled and labeled accordingly — there's no Slack/Drive/Notion
+  integration in this codebase to honestly back it. The tenant switcher
+  (previously "Sharma Industries" / "Gupta Tools") now shows your one real
+  tenant, non-interactively — a JWT is scoped to exactly one tenant, so
+  there was never anything to actually switch between.
+
+The Premium "Multiuser → Multiagent" comparison panel is unchanged — it's
+informational/marketing copy describing what the toggle does, not a data
+display, so it was never "fake data" in the same sense as the rest.
+
+The bundle's own event handlers reach the real API via
+`window.__ORGCOMMS_API__` (path, opts) — exposed by the login/session
+script for exactly this purpose — and `window.__ORGCOMMS_SESSION__`,
+populated by the same pre-bundle script that seeds the initial tenant
+state. Neither existed before this pass; the compiled bundle previously
+had zero knowledge of the login gate's session.
 
 ## Webhooks (per-tenant, so leads actually persist)
 

@@ -106,6 +106,21 @@ Error generating stack: `+u.message+`
     #oc-products .oc-msg.oc-bad{color:#ff6b6b}
     #oc-products .oc-back{background:none;border:none;color:#00a884;font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
     #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:rgba(255,255,255,.1);color:#fff}
+    #oc-onboarding{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-onboarding .oc-steps{display:flex;gap:6px;margin-bottom:18px}
+    #oc-onboarding .oc-step-dot{flex:1;height:3px;border-radius:2px;background:rgba(255,255,255,.12)}
+    #oc-onboarding .oc-step-dot.oc-done{background:#00a884}
+    #oc-onboarding h2{font-size:16px;margin:0 0 4px}
+    #oc-onboarding p.oc-sub{font-size:12px;color:rgba(255,255,255,.5);margin:0 0 18px}
+    #oc-onboarding label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:12px 0 6px}
+    #oc-onboarding input,#oc-onboarding select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
+    #oc-onboarding .oc-row{display:flex;gap:8px;margin-top:20px}
+    #oc-onboarding .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:rgba(255,255,255,.4);background:none;border:none;cursor:pointer;width:100%}
+    #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:#ff6b6b}
+    #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:#00a884;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
   </style>
   <script>
   (function(){
@@ -344,6 +359,165 @@ Error generating stack: `+u.message+`
         } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
       }
       loadStatus();
+    }
+
+    function dismissOnboarding(session){
+      try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+      var el = document.getElementById('oc-onboarding');
+      if (el) el.remove();
+    }
+
+    function renderOnboarding(session){
+      var existing = document.getElementById('oc-onboarding');
+      if (existing) existing.remove();
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-onboarding';
+      document.body.appendChild(wrap);
+
+      var state = { productId: null, productName: '' };
+
+      function steps(activeIndex){
+        var dots = '';
+        for (var i = 0; i < 4; i++) dots += '<div class="oc-step-dot' + (i < activeIndex ? ' oc-done' : '') + '"></div>';
+        return '<div class="oc-steps">' + dots + '</div>';
+      }
+
+      function renderStep1(){
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(0) +
+            '<h2>Welcome — let\'s set up your first Product</h2>' +
+            '<p class="oc-sub">A Product/Service is what your channels, leads, and content get organized under. You can create more later.</p>' +
+            '<form id="oc-ob-product">' +
+              '<label>Product/Service Name</label>' +
+              '<input name="name" placeholder="e.g. Acme Marketing" required>' +
+              '<label>Description (optional)</label>' +
+              '<input name="description" placeholder="What is this product/service for?">' +
+              '<div class="oc-row"><button type="submit" class="oc-primary">Create &amp; Continue</button></div>' +
+              '<div class="oc-err" id="oc-ob-err1" style="display:none"></div>' +
+            '</form>' +
+            '<button class="oc-skip" id="oc-ob-skip1">Skip setup for now</button>' +
+          '</div>';
+        document.getElementById('oc-ob-skip1').addEventListener('click', function(){ dismissOnboarding(session); });
+        document.getElementById('oc-ob-product').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var err = document.getElementById('oc-ob-err1');
+          err.style.display = 'none';
+          var fd = new FormData(ev.target);
+          try {
+            var product = await api(session, '/products', { method: 'POST', body: { name: fd.get('name'), description: fd.get('description') } });
+            state.productId = product.id;
+            state.productName = product.name;
+            renderStep2();
+          } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+        });
+      }
+
+      function renderStep2(){
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(1) +
+            '<h2>Assign a Product Admin</h2>' +
+            '<p class="oc-sub">"' + state.productName + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your tenant.</p>' +
+            '<div id="oc-ob-step2-body">Loading&hellip;</div>' +
+          '</div>';
+
+        (async function(){
+          var body = document.getElementById('oc-ob-step2-body');
+          try {
+            var users = await api(session, '/users');
+            var options = users.map(function(u){ return '<option value="' + u.id + '"' + (u.id === session.user.id ? ' selected' : '') + '>' + u.email + ' (' + u.role + ')</option>'; }).join('');
+            body.innerHTML =
+              '<form id="oc-ob-member">' +
+                '<label>Product Admin</label>' +
+                '<select name="user_id">' + options + '</select>' +
+                '<div class="oc-row">' +
+                  '<button type="button" class="oc-secondary" id="oc-ob-back2">Back</button>' +
+                  '<button type="submit" class="oc-primary">Assign &amp; Continue</button>' +
+                '</div>' +
+                '<div class="oc-err" id="oc-ob-err2" style="display:none"></div>' +
+              '</form>' +
+              '<button class="oc-skip" id="oc-ob-skip2">Skip setup for now</button>';
+            document.getElementById('oc-ob-skip2').addEventListener('click', function(){ dismissOnboarding(session); });
+            document.getElementById('oc-ob-back2').addEventListener('click', renderStep1);
+            document.getElementById('oc-ob-member').addEventListener('submit', async function(ev){
+              ev.preventDefault();
+              var err = document.getElementById('oc-ob-err2');
+              err.style.display = 'none';
+              var fd = new FormData(ev.target);
+              try {
+                await api(session, '/products/' + state.productId + '/members', { method: 'POST', body: { user_id: fd.get('user_id'), role: 'ADMIN' } });
+                renderStep3();
+              } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+            });
+          } catch(e){ body.innerHTML = '<div class="oc-err" style="display:block">' + e.message + '</div>'; }
+        })();
+      }
+
+      function renderStep3(){
+        var channels = ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'];
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(2) +
+            '<h2>Configure your first channel</h2>' +
+            '<p class="oc-sub">Optional — every channel already exists for this product and can be configured anytime from the Products panel. Do one now if you want.</p>' +
+            '<form id="oc-ob-channel">' +
+              '<label>Channel</label>' +
+              '<select name="channel">' + channels.map(function(c){ return '<option value="' + c + '">' + c + '</option>'; }).join('') + '</select>' +
+              '<label>Note (optional)</label>' +
+              '<input name="note" placeholder="No real platform integration yet — this is a placeholder">' +
+              '<div class="oc-row">' +
+                '<button type="button" class="oc-secondary" id="oc-ob-skip3">Skip</button>' +
+                '<button type="submit" class="oc-primary">Save &amp; Finish</button>' +
+              '</div>' +
+              '<div class="oc-err" id="oc-ob-err3" style="display:none"></div>' +
+            '</form>' +
+          '</div>';
+        document.getElementById('oc-ob-skip3').addEventListener('click', renderStep4);
+        document.getElementById('oc-ob-channel').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var err = document.getElementById('oc-ob-err3');
+          err.style.display = 'none';
+          var fd = new FormData(ev.target);
+          try {
+            await api(session, '/products/' + state.productId + '/channels', { method: 'POST', body: { channel: fd.get('channel'), config: { note: fd.get('note') } } });
+            renderStep4();
+          } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+        });
+      }
+
+      function renderStep4(){
+        wrap.innerHTML =
+          '<div class="oc-panel" style="text-align:center">' +
+            steps(4) +
+            '<div class="oc-done-icon">&#10003;</div>' +
+            '<h2>You\'re all set</h2>' +
+            '<p class="oc-sub">"' + state.productName + '" is ready. Add more users, configure the rest of its channels, or enable Agents (Premium plans) from the Products panel anytime.</p>' +
+            '<div class="oc-row">' +
+              '<button class="oc-primary" id="oc-ob-open-products">Open Products</button>' +
+            '</div>' +
+          '</div>';
+        try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+        document.getElementById('oc-ob-open-products').addEventListener('click', function(){
+          wrap.remove();
+          renderProducts(session);
+        });
+      }
+
+      renderStep1();
+    }
+
+    // Auto-triggers once for a Tenant Admin whose tenant has no products yet.
+    // Dismissible at any step; never nags again for that tenant once
+    // dismissed or once a product exists.
+    async function maybeShowOnboarding(session){
+      if (MANAGER_ROLES.indexOf(session.user.role) === -1) return;
+      var dismissKey = 'orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x');
+      try { if (localStorage.getItem(dismissKey)) return; } catch(e){}
+      try {
+        var products = await api(session, '/products');
+        if (Array.isArray(products) && products.length === 0) renderOnboarding(session);
+      } catch(e){}
     }
 
     function renderProducts(session){
@@ -778,6 +952,7 @@ Error generating stack: `+u.message+`
         renderLoginGate();
       } else {
         renderBar(session);
+        maybeShowOnboarding(session);
       }
     }
 

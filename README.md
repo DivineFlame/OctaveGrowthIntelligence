@@ -140,6 +140,18 @@ this whole feature area has more moving parts than a single safe edit.
   create LLM connections (provider + API key, never redisplayed once saved)
   and Agents (name, connection, model, system prompt).
 
+### New-tenant onboarding wizard
+
+Auto-triggers once, right after login, for a Tenant Admin whose tenant has
+zero products yet (`GET /products` empty) — a 4-step modal: create the
+first Product/Service &rarr; assign its Product Admin (dropdown of real
+tenant users) &rarr; optionally configure one channel &rarr; done, with a
+button straight into the Products panel. Skippable at every step; once
+skipped or once a product exists, it never appears again for that tenant
+(tracked in `localStorage`, keyed by tenant ID — clearing site data or
+switching browsers will show it again, which is harmless since it no-ops
+the moment a product already exists).
+
 ## Studio, Leads, and Inbox (real data, not the original mockup)
 
 These three panels were originally a fully client-side simulation — no

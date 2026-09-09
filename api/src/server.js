@@ -104,6 +104,29 @@ function normalizeDomain(d) {
 const APP_DOMAIN = normalizeDomain(process.env.APP_DOMAIN);
 const API_DOMAIN = normalizeDomain(process.env.API_DOMAIN);
 
+// ENCRYPTION_KEY has been provisioned since the very first deploy (it's in
+// .env.vps.example and docker-compose.dokploy.yml) but nothing ever used it
+// until now: LLM provider API keys (llm_connections.api_key_encrypted) are
+// encrypted at rest with it, AES-256-GCM, and only decrypted in memory at
+// the point an agent actually calls the provider.
+const ENCRYPTION_KEY_BUF = crypto.createHash('sha256').update(process.env.ENCRYPTION_KEY || 'dev-encryption-key-change-me').digest();
+function encryptSecret(plaintext) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY_BUF, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([iv, authTag, ciphertext]).toString('base64');
+}
+function decryptSecret(encoded) {
+  const raw = Buffer.from(encoded, 'base64');
+  const iv = raw.subarray(0, 12);
+  const authTag = raw.subarray(12, 28);
+  const ciphertext = raw.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY_BUF, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+}
+
 // CORS - locked to this tenant's actual frontend domain(s), not left open to
 // any origin. APP_DOMAIN covers the common case (one frontend); set
 // CORS_ALLOWED_ORIGINS (comma-separated, full origins incl. scheme) for
@@ -520,6 +543,252 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
     await auditLog(req.user.tenant_id, req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
     res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// ===== Products/Services, per-product membership, channels, and Agents =====
+// Hierarchy: Super Admin creates Tenants (Standard/Premium, already existed
+// via POST /tenants). A Tenant Admin (SUPER_ADMIN/IT_ADMIN/DEPT_ADMIN - the
+// existing tenant-management roles) creates Products/Services and assigns a
+// user as that product's Admin. A Product Admin configures the product's
+// social channels and adds MEMBER users to run them (Standard plan) or
+// enables Agents (Premium plan only). Agent/LLM-connection definitions
+// themselves are Super-Admin-only, platform-wide, not tenant-scoped.
+
+const PRODUCT_TENANT_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+
+async function getProductMembership(productId, userId) {
+  const { rows } = await pool.query('SELECT role FROM product_members WHERE product_id=$1 AND user_id=$2', [productId, userId]);
+  return rows.length ? rows[0].role : null;
+}
+// A tenant-wide admin role can administer any product in their tenant; a
+// product's own ADMIN member can administer just that one product.
+async function canAdminProduct(req, productId) {
+  if (PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role)) return true;
+  return (await getProductMembership(productId, req.user.id)) === 'ADMIN';
+}
+
+// Products - Create (Tenant Admin only)
+app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES), async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO products (tenant_id, name, description, created_by) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user.tenant_id, name, description || null, req.user.id]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_PRODUCT', 'product', rows[0].id, req, 'SUCCESS', { name });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Products - List: Tenant Admin roles see every product in the tenant;
+// everyone else sees only products they're a member of.
+app.get('/products', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role)
+      ? await pool.query('SELECT * FROM products WHERE tenant_id=$1 ORDER BY created_at DESC', [req.user.tenant_id])
+      : await pool.query('SELECT p.* FROM products p JOIN product_members pm ON pm.product_id=p.id WHERE p.tenant_id=$1 AND pm.user_id=$2 ORDER BY p.created_at DESC', [req.user.tenant_id, req.user.id]);
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.get('/products/:id', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    const membershipRole = await getProductMembership(req.params.id, req.user.id);
+    if (!isTenantAdmin && !membershipRole) return res.status(403).json({ error: 'Not a member of this product' });
+    res.json(Object.assign({}, rows[0], { your_role: isTenantAdmin ? 'TENANT_ADMIN' : membershipRole }));
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Product members - list (Tenant Admin or any member of the product)
+app.get('/products/:id/members', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const { rows } = await pool.query(
+      `SELECT pm.id, pm.role, pm.created_at, u.id as user_id, u.email, u.role as tenant_role
+       FROM product_members pm JOIN users u ON u.id=pm.user_id WHERE pm.product_id=$1 ORDER BY pm.created_at`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Product members - add/assign (Tenant Admin, to assign the first Product
+// Admin; or that product's existing Admin, to add MEMBER users)
+app.post('/products/:id/members', authMiddleware, async (req, res) => {
+  const { user_id, role } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+  const memberRole = role === 'ADMIN' ? 'ADMIN' : 'MEMBER';
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can add members" });
+    const targetUser = await pool.query('SELECT id FROM users WHERE id=$1 AND tenant_id=$2', [user_id, req.user.tenant_id]);
+    if (!targetUser.rows.length) return res.status(400).json({ error: 'User not found in your tenant' });
+    const { rows } = await pool.query(
+      `INSERT INTO product_members (product_id, user_id, role) VALUES ($1,$2,$3)
+       ON CONFLICT (product_id, user_id) DO UPDATE SET role=EXCLUDED.role RETURNING *`,
+      [req.params.id, user_id, memberRole]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'ADD_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id, role: memberRole });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can remove members" });
+    await pool.query('DELETE FROM product_members WHERE product_id=$1 AND user_id=$2', [req.params.id, req.params.userId]);
+    await auditLog(req.user.tenant_id, req.user.id, 'REMOVE_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id: req.params.userId });
+    res.json({ message: 'Removed' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Product channels - config storage only (no real per-platform posting yet -
+// see README). Product Admin (or Tenant Admin) manages these.
+app.get('/products/:id/channels', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const { rows } = await pool.query('SELECT channel, status, config, updated_at FROM product_channels WHERE product_id=$1', [req.params.id]);
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.post('/products/:id/channels', authMiddleware, async (req, res) => {
+  const { channel, config } = req.body;
+  if (!PRODUCT_CHANNELS.includes(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can configure channels" });
+    const { rows } = await pool.query(
+      `INSERT INTO product_channels (product_id, channel, config, status, updated_at) VALUES ($1,$2,$3,'configured',NOW())
+       ON CONFLICT (product_id, channel) DO UPDATE SET config=EXCLUDED.config, status='configured', updated_at=NOW() RETURNING *`,
+      [req.params.id, channel, JSON.stringify(config || {})]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// LLM connections - Super Admin only, platform-wide. api_key is encrypted at
+// rest (encryptSecret) and never returned once stored.
+app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  const { name, provider, api_key } = req.body;
+  if (!name || !provider || !api_key) return res.status(400).json({ error: 'name, provider and api_key are required' });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO llm_connections (name, provider, api_key_encrypted, created_by) VALUES ($1,$2,$3,$4) RETURNING id, name, provider, created_at',
+      [name, provider, encryptSecret(api_key), req.user.id]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_LLM_CONNECTION', 'llm_connection', rows[0].id, req, 'SUCCESS', { provider });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.get('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, name, provider, created_at FROM llm_connections ORDER BY created_at DESC');
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/llm-connections/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const inUse = await pool.query('SELECT id FROM agents WHERE llm_connection_id=$1 LIMIT 1', [req.params.id]);
+    if (inUse.rows.length) return res.status(409).json({ error: 'This LLM connection is still used by one or more agents' });
+    await pool.query('DELETE FROM llm_connections WHERE id=$1', [req.params.id]);
+    res.json({ message: 'Deleted' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Agents - Super Admin creates/edits; any authenticated user can list (so a
+// Product Admin can pick one to enable on their Premium product).
+app.post('/agents', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  const { name, llm_connection_id, model, system_prompt, config } = req.body;
+  if (!name || !llm_connection_id) return res.status(400).json({ error: 'name and llm_connection_id are required' });
+  try {
+    const conn = await pool.query('SELECT id FROM llm_connections WHERE id=$1', [llm_connection_id]);
+    if (!conn.rows.length) return res.status(400).json({ error: 'Unknown llm_connection_id' });
+    const { rows } = await pool.query(
+      'INSERT INTO agents (name, llm_connection_id, model, system_prompt, config, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [name, llm_connection_id, model || null, system_prompt || null, JSON.stringify(config || {}), req.user.id]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_AGENT', 'agent', rows[0].id, req, 'SUCCESS', { name });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.get('/agents', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, name, model, active, created_at FROM agents WHERE active=true ORDER BY created_at DESC');
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+  const { name, model, system_prompt, config, active } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE agents SET name=COALESCE($1,name), model=COALESCE($2,model), system_prompt=COALESCE($3,system_prompt), config=COALESCE($4,config), active=COALESCE($5,active) WHERE id=$6 RETURNING *`,
+      [name || null, model || null, system_prompt || null, config ? JSON.stringify(config) : null, typeof active === 'boolean' ? active : null, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Agent not found' });
+    res.json(rows[0]);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Product agents - which agents a (Premium-only) product has enabled.
+// Managed by that product's Admin or a Tenant Admin, same as channels/members.
+app.get('/products/:id/agents', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const { rows } = await pool.query('SELECT a.id, a.name, a.model FROM product_agents pa JOIN agents a ON a.id=pa.agent_id WHERE pa.product_id=$1', [req.params.id]);
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.post('/products/:id/agents', authMiddleware, async (req, res) => {
+  const { agent_id } = req.body;
+  if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+  try {
+    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [req.user.tenant_id]);
+    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature — Standard-plan products run through human users instead' });
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can enable agents" });
+    const agent = await pool.query('SELECT id FROM agents WHERE id=$1 AND active=true', [agent_id]);
+    if (!agent.rows.length) return res.status(400).json({ error: 'Unknown or inactive agent' });
+    const { rows } = await pool.query(
+      'INSERT INTO product_agents (product_id, agent_id) VALUES ($1,$2) ON CONFLICT (product_id, agent_id) DO NOTHING RETURNING *',
+      [req.params.id, agent_id]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_PRODUCT_AGENT', 'product', req.params.id, req, 'SUCCESS', { agent_id });
+    res.json(rows[0] || { message: 'Already enabled' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/products/:id/agents/:agentId', authMiddleware, async (req, res) => {
+  try {
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can disable agents" });
+    await pool.query('DELETE FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
+    res.json({ message: 'Disabled' });
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

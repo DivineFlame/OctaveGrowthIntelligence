@@ -29,3 +29,36 @@ CREATE TRIGGER no_update_audit BEFORE UPDATE OR DELETE ON audit_logs FOR EACH RO
 CREATE TABLE IF NOT EXISTS hermes_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, agent_type VARCHAR(50), status VARCHAR(20) DEFAULT 'IDLE', last_run TIMESTAMPTZ, config JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_content_tenant ON content_assets(tenant_id);
+
+-- Products/Services: tenant-scoped, created by a Tenant Admin (DEPT_ADMIN/
+-- IT_ADMIN/SUPER_ADMIN - the existing tenant-management roles).
+CREATE TABLE IF NOT EXISTS products (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, name VARCHAR(200) NOT NULL, description TEXT, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE INDEX IF NOT EXISTS idx_products_tenant ON products(tenant_id);
+
+-- Which tenant users work on which product, with a role scoped to that
+-- product only (separate from the user's tenant-wide role in `users.role`).
+-- 'ADMIN' = Product/Service Admin (assigned by a Tenant Admin, can then add
+-- MEMBERs themselves); 'MEMBER' = a regular user working the product.
+CREATE TABLE IF NOT EXISTS product_members (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, user_id UUID REFERENCES users(id) ON DELETE CASCADE, role VARCHAR(20) NOT NULL DEFAULT 'MEMBER', created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_product_members_product ON product_members(product_id);
+CREATE INDEX IF NOT EXISTS idx_product_members_user ON product_members(user_id);
+
+-- Per-product social channel configuration, managed by that product's Admin.
+CREATE TABLE IF NOT EXISTS product_channels (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, channel VARCHAR(30) NOT NULL, config JSONB DEFAULT '{}', status VARCHAR(20) DEFAULT 'not_configured', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, channel));
+
+-- Platform-level (Super Admin only, not tenant-scoped) LLM provider
+-- connections. api_key_encrypted is application-layer AES-256-GCM
+-- ciphertext (see encryptSecret()/decryptSecret() in api/src/server.js) -
+-- the raw key is never stored, and is only decrypted in memory when an
+-- agent actually needs to call the provider.
+CREATE TABLE IF NOT EXISTS llm_connections (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(100) NOT NULL, provider VARCHAR(30) NOT NULL, api_key_encrypted TEXT NOT NULL, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
+
+-- Platform-level (Super Admin only) agent definitions - which LLM
+-- connection/model/system prompt an agent uses. Assignable to individual
+-- (Premium) products via product_agents below.
+CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(100) NOT NULL, llm_connection_id UUID REFERENCES llm_connections(id), model VARCHAR(100), system_prompt TEXT, config JSONB DEFAULT '{}', active BOOLEAN DEFAULT true, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
+
+-- Which agents a given product has enabled (Premium tenants only, enforced
+-- in the API - a Standard-plan tenant's products run through product_members
+-- users instead).
+CREATE TABLE IF NOT EXISTS product_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, agent_id UUID REFERENCES agents(id) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, agent_id));

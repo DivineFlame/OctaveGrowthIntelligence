@@ -63,6 +63,59 @@ the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
 stays usable without re-entering a password until the refresh token itself
 expires.
 
+## Products/Services and Agents (backend only so far — see note at the end)
+
+Run `postgres/migrate-products-agents.sql` once if your database predates
+this (same `docker exec ... psql` pattern as the other migrations).
+
+Full hierarchy, matching what was asked for:
+
+- **Super Admin** creates Tenants with a Standard or Premium plan (already
+  existed - `POST /tenants`, the `plan`/`is_premium` fields). Also the only
+  role that can create **LLM connections** (`POST /llm-connections` -
+  provider + API key, encrypted at rest with `ENCRYPTION_KEY` via
+  `encryptSecret()`/`decryptSecret()`, which had been provisioned since the
+  very first deploy but never actually used until now) and **Agents**
+  (`POST /agents` - name, which LLM connection, model, system prompt).
+- **Tenant Admin** (`SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN` - the existing
+  tenant-management roles, now also called `PRODUCT_TENANT_ADMIN_ROLES` in
+  the code) creates **Products/Services** under their tenant
+  (`POST /products`) and assigns a tenant user as that product's Admin
+  (`POST /products/:id/members` with `role: "ADMIN"`).
+- **Product/Service Admin** configures that product's social channels
+  (`POST /products/:id/channels` - config storage only right now, see note
+  below) and adds `MEMBER` users to run them (`POST /products/:id/members`
+  with `role: "MEMBER"`) — a Tenant Admin can do all of this too, for any
+  product in their tenant.
+- **Agents on a product**: `POST /products/:id/agents` enables an
+  already-defined Agent on a product, gated to Premium tenants only (checks
+  `tenants.is_premium`) - a Standard-plan product can only ever be run by
+  human `MEMBER` users, matching what was asked for exactly.
+
+Permission model: every product-scoped write (members/channels/agents)
+accepts either a Tenant Admin role or that specific product's own `ADMIN`
+member (`canAdminProduct()`) - a Product Admin manages their own product
+without needing any tenant-wide role.
+
+**What this does NOT do yet, on purpose:**
+- **No agent execution.** Creating an Agent stores its LLM connection/model/
+  system prompt - nothing calls the LLM or does anything autonomously yet.
+  That's a real, separate feature (needs deciding exactly what an agent
+  *does* - generate content? Auto-reply to leads? Auto-post on a schedule? -
+  plus the actual provider SDK calls) and hasn't been started.
+- **No real social-media posting.** `product_channels.config` is just
+  storage; there's no OAuth flow or platform API integration behind any
+  channel for either Standard (human) or Premium (agent) products. Every
+  channel-posting mention elsewhere in this README/app is aspirational until
+  specific platforms are integrated one at a time (each needs its own app
+  registration/API credentials from you).
+- **No frontend UI for any of this yet.** The API is real and usable
+  (curl/Postman today), but wiring it into the compiled frontend bundle is
+  deliberately a separate follow-up - editing that 260KB+ file directly has
+  already caused one real syntax-breaking mistake this session, caught only
+  by parsing it three independent ways before trusting it. Doing the backend
+  first means the API shape can be sanity-checked before touching that file.
+
 ## Studio, Leads, and Inbox (real data, not the original mockup)
 
 These three panels were originally a fully client-side simulation — no

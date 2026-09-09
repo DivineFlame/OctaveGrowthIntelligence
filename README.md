@@ -63,7 +63,7 @@ the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
 stays usable without re-entering a password until the refresh token itself
 expires.
 
-## Products/Services and Agents (backend only so far — see note at the end)
+## Products/Services and Agents
 
 Run `postgres/migrate-products-agents.sql` once if your database predates
 this (same `docker exec ... psql` pattern as the other migrations).
@@ -86,7 +86,13 @@ Full hierarchy, matching what was asked for:
   (`POST /products/:id/channels` - config storage only right now, see note
   below) and adds `MEMBER` users to run them (`POST /products/:id/members`
   with `role: "MEMBER"`) — a Tenant Admin can do all of this too, for any
-  product in their tenant.
+  product in their tenant. Every product gets all 7 channels
+  (`whatsapp, facebook, instagram, linkedin, youtube, quora, email`)
+  pre-created as `not_configured` the moment it's created (`POST /products`
+  does this in the same transaction as the product insert) — they're
+  independent from every other product's channel rows (`UNIQUE(product_id,
+  channel)`), so configuring one product's WhatsApp settings never touches
+  another's.
 - **Agents on a product**: `POST /products/:id/agents` enables an
   already-defined Agent on a product, gated to Premium tenants only (checks
   `tenants.is_premium`) - a Standard-plan product can only ever be run by

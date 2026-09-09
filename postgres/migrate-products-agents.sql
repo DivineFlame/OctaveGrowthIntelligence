@@ -22,3 +22,13 @@ CREATE TABLE IF NOT EXISTS llm_connections (id UUID PRIMARY KEY DEFAULT uuid_gen
 CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(100) NOT NULL, llm_connection_id UUID REFERENCES llm_connections(id), model VARCHAR(100), system_prompt TEXT, config JSONB DEFAULT '{}', active BOOLEAN DEFAULT true, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
 
 CREATE TABLE IF NOT EXISTS product_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, agent_id UUID REFERENCES agents(id) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, agent_id));
+
+-- Backfill: POST /products now pre-creates all 7 channel rows for a new
+-- product; this catches any product created before that change (or by a
+-- version of this script run before it) so every product ends up with the
+-- same full channel set. Safe to re-run (ON CONFLICT DO NOTHING).
+INSERT INTO product_channels (product_id, channel, status)
+SELECT p.id, ch.channel, 'not_configured'
+FROM products p
+CROSS JOIN (VALUES ('whatsapp'),('facebook'),('instagram'),('linkedin'),('youtube'),('quora'),('email')) AS ch(channel)
+ON CONFLICT (product_id, channel) DO NOTHING;

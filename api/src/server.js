@@ -569,18 +569,36 @@ async function canAdminProduct(req, productId) {
   return (await getProductMembership(productId, req.user.id)) === 'ADMIN';
 }
 
-// Products - Create (Tenant Admin only)
+// Products - Create (Tenant Admin only). Pre-creates all 7 channel rows as
+// 'not_configured', in the same transaction, so a product's full channel
+// set exists from the moment it's created rather than materializing rows
+// lazily the first time each one is individually configured.
 app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    const { rows } = await client.query(
       'INSERT INTO products (tenant_id, name, description, created_by) VALUES ($1,$2,$3,$4) RETURNING *',
       [req.user.tenant_id, name, description || null, req.user.id]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_PRODUCT', 'product', rows[0].id, req, 'SUCCESS', { name });
-    res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+    const product = rows[0];
+    for (const channel of PRODUCT_CHANNELS) {
+      await client.query(
+        `INSERT INTO product_channels (product_id, channel, status) VALUES ($1,$2,'not_configured') ON CONFLICT (product_id, channel) DO NOTHING`,
+        [product.id, channel]
+      );
+    }
+    await client.query('COMMIT');
+    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_PRODUCT', 'product', product.id, req, 'SUCCESS', { name });
+    res.json(product);
+  } catch(e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
 
 // Products - List: Tenant Admin roles see every product in the tenant;

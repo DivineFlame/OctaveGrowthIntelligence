@@ -127,6 +127,119 @@ function decryptSecret(encoded) {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }
 
+// Real agent execution - actually calls the configured provider, rather than
+// storing a system_prompt nobody ever sends anywhere. Three providers,
+// chosen deliberately over "support anything": Anthropic and Sarvam both
+// have a fixed, real endpoint/auth shape (verified against Anthropic's
+// public API docs and Sarvam's own published SDK source respectively -
+// Sarvam in particular uses an `api-subscription-key` header, NOT
+// `Authorization: Bearer`, which is easy to get wrong), so those two are
+// hardcoded rather than guessed at through a generic base_url. Anything
+// else that speaks the OpenAI chat-completions shape (Groq, Together,
+// Fireworks, DeepSeek, a self-hosted vLLM, etc.) goes through
+// 'openai_compatible', which requires the connection's own base_url.
+const LLM_PROVIDERS = ['anthropic', 'sarvam', 'openai_compatible'];
+
+async function callLLM({ connection, model, systemPrompt, userMessage }) {
+  const apiKey = decryptSecret(connection.api_key_encrypted);
+  const provider = connection.provider;
+
+  if (provider === 'anthropic') {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model || 'claude-3-5-haiku-20241022',
+        max_tokens: 1024,
+        ...(systemPrompt ? { system: systemPrompt } : {}),
+        messages: [{ role: 'user', content: userMessage }]
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error?.message || `Anthropic API error (HTTP ${resp.status})`);
+    const text = data.content?.[0]?.text;
+    if (typeof text !== 'string') throw new Error('Anthropic response had no text content');
+    return { text, raw: data };
+  }
+
+  if (provider === 'sarvam' || provider === 'openai_compatible') {
+    let url, headers;
+    if (provider === 'sarvam') {
+      url = 'https://api.sarvam.ai/v1/chat/completions';
+      headers = { 'api-subscription-key': apiKey, 'Content-Type': 'application/json' };
+    } else {
+      const base = (connection.base_url || '').replace(/\/+$/, '');
+      if (!base) throw new Error('This connection has no base_url configured (required for openai_compatible)');
+      url = `${base}/chat/completions`;
+      headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    }
+    const messages = [];
+    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+    messages.push({ role: 'user', content: userMessage });
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: model || (provider === 'sarvam' ? 'sarvam-105b' : 'gpt-4o-mini'), messages })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error?.message || `${provider} API error (HTTP ${resp.status})`);
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') throw new Error(`${provider} response had no message content`);
+    return { text, raw: data };
+  }
+
+  throw new Error(`Unsupported provider: ${provider}`);
+}
+
+// Runs one agent for real and records the outcome (success or failure -
+// never silently swallowed) in agent_runs. Shared by the manual "Run Agent"
+// route and the internal auto-run-on-lead-intake route below.
+async function runAgentForProduct({ tenantId, productId, agentId, leadId, triggeredBy, triggerType, inputText }) {
+  const { rows: agentRows } = await pool.query(
+    `SELECT a.id, a.model, a.system_prompt, lc.provider, lc.base_url, lc.api_key_encrypted
+     FROM agents a JOIN llm_connections lc ON lc.id = a.llm_connection_id
+     WHERE a.id=$1 AND a.active=true`,
+    [agentId]
+  );
+  if (!agentRows.length) throw new Error('Agent not found, inactive, or missing its LLM connection');
+  const agent = agentRows[0];
+
+  let status = 'SUCCESS', outputText = null, errorMsg = null;
+  try {
+    const result = await callLLM({ connection: agent, model: agent.model, systemPrompt: agent.system_prompt, userMessage: inputText });
+    outputText = result.text;
+  } catch (e) {
+    status = 'FAILED';
+    errorMsg = e.message;
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO agent_runs (tenant_id, product_id, agent_id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [tenantId, productId, agentId, leadId || null, triggeredBy || null, triggerType, inputText, outputText, status, errorMsg]
+  );
+  return rows[0];
+}
+
+// Server-to-server auth for routes hermes/other backend containers call
+// directly (no user JWT exists in that context). Fails closed: an unset
+// INTERNAL_API_SECRET rejects every request rather than accepting none.
+// Note this is *not* network isolation - this app is one Express instance
+// on one port, and that port gets a public domain in Dokploy, so a route
+// behind this middleware is still internet-reachable in principle. What
+// actually protects it is the secret itself (random, only ever sent
+// container-to-container) checked in constant time, the same trust model
+// as a bearer token.
+function internalMiddleware(req, res, next) {
+  const expected = process.env.INTERNAL_API_SECRET;
+  if (!expected) return res.status(503).json({ error: 'INTERNAL_API_SECRET not configured' });
+  const provided = req.headers['x-internal-secret'] || '';
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Invalid internal secret' });
+  next();
+}
+
 // CORS - locked to this tenant's actual frontend domain(s), not left open to
 // any origin. APP_DOMAIN covers the common case (one frontend); set
 // CORS_ALLOWED_ORIGINS (comma-separated, full origins incl. scheme) for
@@ -750,12 +863,14 @@ app.post('/products/:id/channels', authMiddleware, async (req, res) => {
 // LLM connections - Super Admin only, platform-wide. api_key is encrypted at
 // rest (encryptSecret) and never returned once stored.
 app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
-  const { name, provider, api_key } = req.body;
+  const { name, provider, api_key, base_url } = req.body;
   if (!name || !provider || !api_key) return res.status(400).json({ error: 'name, provider and api_key are required' });
+  if (!LLM_PROVIDERS.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${LLM_PROVIDERS.join(', ')}` });
+  if (provider === 'openai_compatible' && !base_url) return res.status(400).json({ error: 'base_url is required for provider openai_compatible (e.g. https://api.groq.com/openai/v1)' });
   try {
     const { rows } = await pool.query(
-      'INSERT INTO llm_connections (name, provider, api_key_encrypted, created_by) VALUES ($1,$2,$3,$4) RETURNING id, name, provider, created_at',
-      [name, provider, encryptSecret(api_key), req.user.id]
+      'INSERT INTO llm_connections (name, provider, base_url, api_key_encrypted, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, provider, base_url, created_at',
+      [name, provider, provider === 'openai_compatible' ? base_url : null, encryptSecret(api_key), req.user.id]
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_LLM_CONNECTION', 'llm_connection', rows[0].id, req, 'SUCCESS', { provider });
     res.json(rows[0]);
@@ -764,7 +879,7 @@ app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), as
 
 app.get('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, provider, created_at FROM llm_connections ORDER BY created_at DESC');
+    const { rows } = await pool.query('SELECT id, name, provider, base_url, created_at FROM llm_connections ORDER BY created_at DESC');
     res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
@@ -852,6 +967,117 @@ app.delete('/products/:id/agents/:agentId', authMiddleware, async (req, res) => 
     if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can disable agents" });
     await pool.query('DELETE FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
     res.json({ message: 'Disabled' });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Run an enabled agent for real - actually calls its LLM connection (see
+// callLLM/runAgentForProduct above) rather than storing a system_prompt
+// nobody ever sends anywhere. Any product member can trigger this (not just
+// the product's Admin) - "run through Agents in premium" was meant to
+// replace a Standard-plan member's manual work, not gate behind an extra
+// admin step. Pass either a lead_id (pulls that lead's own fields into the
+// prompt) or freeform input; at least one is required.
+app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) => {
+  const { lead_id, input } = req.body;
+  if (!lead_id && !input) return res.status(400).json({ error: 'lead_id or input is required' });
+  try {
+    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [req.user.tenant_id]);
+    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature' });
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const enabled = await pool.query('SELECT id FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
+    if (!enabled.rows.length) return res.status(400).json({ error: 'This agent is not enabled on this product' });
+
+    let inputText = input || '';
+    let leadId = null;
+    if (lead_id) {
+      await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
+      const lead = await pool.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [lead_id, req.user.tenant_id]);
+      if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
+      const l = lead.rows[0];
+      leadId = l.id;
+      inputText = [
+        `New lead via ${l.source_channel || 'unknown channel'}.`,
+        `Company: ${l.company_name || 'n/a'}`,
+        `Contact: ${l.contact_name || 'n/a'}`,
+        l.phone ? `Phone: ${l.phone}` : null,
+        l.email ? `Email: ${l.email}` : null,
+        input ? `\nAdditional instructions: ${input}` : null
+      ].filter(Boolean).join('\n');
+    }
+
+    const run = await runAgentForProduct({
+      tenantId: req.user.tenant_id, productId: req.params.id, agentId: req.params.agentId,
+      leadId, triggeredBy: req.user.id, triggerType: 'manual', inputText
+    });
+    await auditLog(req.user.tenant_id, req.user.id, 'RUN_AGENT', 'agent', req.params.agentId, req, run.status, { product_id: req.params.id, lead_id: leadId });
+    res.json(run);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Run history for one agent on one product - so a Product Admin can see
+// what an agent actually said, not just that it was "enabled".
+app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
+    const { rows } = await pool.query(
+      'SELECT id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error, created_at FROM agent_runs WHERE product_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 50',
+      [req.params.id, req.params.agentId]
+    );
+    res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Internal, server-to-server only (see internalMiddleware) - Hermes calls
+// this after a lead lands, to actually run a Premium product's agent on it
+// instead of just logging "enrichment not yet implemented". Since inbound
+// webhooks are tenant+channel scoped, not product-scoped (there is no
+// per-product webhook URL - see README), this can only safely auto-route
+// when exactly one of the tenant's Premium products has that channel
+// configured with an enabled agent; anything more ambiguous is reported
+// back honestly instead of guessing.
+app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (req, res) => {
+  try {
+    const { rows: leadRows } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.leadId]);
+    if (!leadRows.length) return res.status(404).json({ error: 'Lead not found' });
+    const lead = leadRows[0];
+    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', lead.tenant_id]);
+
+    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [lead.tenant_id]);
+    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.json({ ran: false, reason: 'tenant is not on the Premium plan' });
+
+    const candidates = await pool.query(
+      `SELECT DISTINCT p.id AS product_id, pa.agent_id
+       FROM products p
+       JOIN product_channels pc ON pc.product_id = p.id AND pc.channel = $2 AND pc.status = 'configured'
+       JOIN product_agents pa ON pa.product_id = p.id
+       JOIN agents a ON a.id = pa.agent_id AND a.active = true
+       WHERE p.tenant_id = $1`,
+      [lead.tenant_id, lead.source_channel]
+    );
+    if (!candidates.rows.length) return res.json({ ran: false, reason: `no Premium product has "${lead.source_channel}" configured with an active agent enabled` });
+    if (candidates.rows.length > 1) return res.json({ ran: false, reason: `${candidates.rows.length} products match this channel - auto-routing is ambiguous without per-product webhook URLs, run the agent manually from the product's Agents tab instead` });
+
+    const { product_id, agent_id } = candidates.rows[0];
+    const inputText = [
+      `New lead via ${lead.source_channel || 'unknown channel'}.`,
+      `Company: ${lead.company_name || 'n/a'}`,
+      `Contact: ${lead.contact_name || 'n/a'}`,
+      lead.phone ? `Phone: ${lead.phone}` : null,
+      lead.email ? `Email: ${lead.email}` : null
+    ].filter(Boolean).join('\n');
+
+    const run = await runAgentForProduct({
+      tenantId: lead.tenant_id, productId: product_id, agentId: agent_id,
+      leadId: lead.id, triggeredBy: null, triggerType: 'auto_lead_intake', inputText
+    });
+    res.json({ ran: true, run_id: run.id, status: run.status });
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

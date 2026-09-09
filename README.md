@@ -104,17 +104,75 @@ member (`canAdminProduct()`) - a Product Admin manages their own product
 without needing any tenant-wide role.
 
 **What this does NOT do yet, on purpose:**
-- **No agent execution.** Creating an Agent stores its LLM connection/model/
-  system prompt - nothing calls the LLM or does anything autonomously yet.
-  That's a real, separate feature (needs deciding exactly what an agent
-  *does* - generate content? Auto-reply to leads? Auto-post on a schedule? -
-  plus the actual provider SDK calls) and hasn't been started.
 - **No real social-media posting.** `product_channels.config` is just
   storage; there's no OAuth flow or platform API integration behind any
   channel for either Standard (human) or Premium (agent) products. Every
   channel-posting mention elsewhere in this README/app is aspirational until
   specific platforms are integrated one at a time (each needs its own app
   registration/API credentials from you).
+
+### Real agent execution
+
+Creating an Agent used to just store its LLM connection/model/system prompt
+- nothing ever called the LLM. Now it does, for real, through three
+providers (chosen deliberately over "support anything": Anthropic and
+Sarvam each have a fixed, verified endpoint/auth shape hardcoded in
+`callLLM()`; anything else that speaks the OpenAI chat-completions format
+goes through `openai_compatible`, which needs the connection's own
+`base_url`):
+
+- **Anthropic** — `POST https://api.anthropic.com/v1/messages`, `x-api-key`
+  header. Model defaults to `claude-3-5-haiku-20241022` if the agent doesn't
+  specify one.
+- **Sarvam AI** — `POST https://api.sarvam.ai/v1/chat/completions`. Auth is
+  an `api-subscription-key` header, **not** `Authorization: Bearer` - easy
+  to get wrong, verified against Sarvam's own published SDK source rather
+  than guessed. Model defaults to `sarvam-105b`. (The old top-level
+  `SARVAM_API_KEY` env var from earlier versions of this kit is gone - it
+  was never actually wired to anything; add a real Sarvam connection via
+  Admin → Agents → LLM Connections instead.)
+- **OpenAI-compatible** — for Groq, Together, Fireworks, DeepSeek, a
+  self-hosted vLLM, etc. Set the connection's `base_url` to the provider's
+  full `.../v1` base (e.g. `https://api.groq.com/openai/v1`) -
+  `/chat/completions` is appended automatically, `Authorization: Bearer` is
+  used. Model defaults to `gpt-4o-mini` if unset (irrelevant for providers
+  that require their own model name - just set one on the agent).
+
+**Two ways an agent actually runs, both for real:**
+1. **Manual** — open a Premium product's Agents tab, click **Run** on an
+   enabled agent, and either give it a lead ID (pulls that lead's company/
+   contact/phone/email into the prompt) or free-form input. The real
+   response is stored and shown inline, with a **History** button to see
+   past runs (`POST /products/:id/agents/:agentId/run`,
+   `GET /products/:id/agents/:agentId/runs`). Any member of the product can
+   trigger this, not just its Admin - Premium agents are meant to replace a
+   Standard-plan member's manual work, not gate behind an extra admin step.
+2. **Automatic on lead intake** — Hermes calls a new internal-only route
+   (`POST /internal/leads/:leadId/auto-run-agent`, authenticated with a
+   shared `INTERNAL_API_SECRET` rather than a user JWT, since there's no
+   user session in that context) whenever a lead arrives. **Known,
+   documented limitation**: inbound webhooks are tenant+channel scoped, not
+   product-scoped (there's one webhook URL per channel per tenant, not per
+   product - see Webhooks below), so if more than one Premium product in a
+   tenant has the same channel configured with an agent enabled, this can't
+   safely guess which one should handle it and reports back why it didn't
+   run (visible in the hermes-orchestrator container logs) rather than
+   picking one arbitrarily. Works unambiguously today for the common case
+   of one product per channel; properly disambiguating multiple would need
+   product-scoped webhook URLs, which is a real but separate change.
+
+Every real run (manual or automatic, success or failure) is recorded in the
+new `agent_runs` table - input sent, output received, or the real error
+message if the provider call failed. Nothing here fabricates a result: if
+the API key is wrong or the provider is down, the run is stored as
+`FAILED` with the provider's actual error message, not silently marked
+successful.
+
+If your database predates this feature, run
+`postgres/migrate-agent-execution.sql` once first, and set a real
+`INTERNAL_API_SECRET` (generate like `JWT_SECRET`/`ENCRYPTION_KEY`, e.g.
+`openssl rand -hex 32`) in both the `api` and `hermes-orchestrator`
+services' environment.
 
 ### Frontend UI
 
@@ -220,11 +278,17 @@ at once from the same tab if a URL ever leaks (`POST
 
 A valid request is deduped (by phone/email against existing leads for that
 tenant) and inserted into `leads` directly — persistence no longer depends
-on the Hermes queue consumer being up. It also still pushes a
-`{lead_id, tenant_id, channel}` notification onto `webhook:incoming` for
-`lead_intake` to pick up for downstream enrichment (GSTIN lookup, language
-detection, etc.) — that enrichment step is not implemented yet, so
-`lead_intake` currently only logs the notification.
+on the Hermes queue consumer being up. It also pushes a
+`{lead_id, tenant_id, channel}` notification onto `webhook:incoming`, which
+`lead_intake` picks up to actually run a Premium product's agent on the
+lead now (see **Real agent execution** above) — when exactly one product
+unambiguously matches; GSTIN lookup, language detection, and similar
+enrichment beyond that are still not implemented.
+
+Because this URL is tenant+channel scoped rather than product-scoped, a
+tenant with two Premium products both configured on the same channel can't
+be automatically disambiguated for you today — see the auto-run limitation
+noted above.
 
 ## Virus scanning (ClamAV)
 

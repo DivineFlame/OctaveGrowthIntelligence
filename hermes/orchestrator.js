@@ -15,12 +15,24 @@ async function runAgent(type, payload) {
   if (type==='lead_intake') {
     // The webhook route (api/src/server.js: /webhooks/:tenantId/:webhookSecret/:channel)
     // already validates the tenant, dedupes, and INSERTs the lead synchronously
-    // before this job is even queued — payload here is just { lead_id, tenant_id, channel }
-    // as a downstream-enrichment signal. Real enrichment (GSTIN lookup, language
-    // detection, etc. per the README) isn't implemented yet, so this only logs
-    // rather than claiming work that doesn't happen.
-    console.log(`[Hermes] lead_intake notified for lead ${payload.lead_id} (tenant ${payload.tenant_id}, channel ${payload.channel}) — enrichment not yet implemented`);
-    return { enriched: false, lead_id: payload.lead_id };
+    // before this job is even queued — payload here is just { lead_id, tenant_id, channel }.
+    // This calls api's internal auto-run-agent route (server-to-server, shared-secret
+    // auth - see internalMiddleware in api/src/server.js) which actually runs a real
+    // LLM call through the tenant's Premium agent when exactly one product
+    // unambiguously matches the channel; otherwise it reports back why it didn't.
+    try {
+      const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/leads/${payload.lead_id}/auto-run-agent`, {
+        method: 'POST',
+        headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '' }
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { console.log(`[Hermes] lead_intake ${payload.lead_id}: auto-run-agent HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { enriched: false, lead_id: payload.lead_id }; }
+      console.log(`[Hermes] lead_intake ${payload.lead_id}: ${data.ran ? `agent ran (run ${data.run_id}, status ${data.status})` : `not run - ${data.reason}`}`);
+      return { enriched: !!data.ran, lead_id: payload.lead_id };
+    } catch(e) {
+      console.log(`[Hermes] lead_intake ${payload.lead_id}: could not reach api for auto-run-agent (${e.message})`);
+      return { enriched: false, lead_id: payload.lead_id };
+    }
   }
   return {};
 }

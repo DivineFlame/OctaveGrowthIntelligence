@@ -689,10 +689,14 @@ Error generating stack: `+u.message+`
             var enabled = await api(session, '/products/' + productId + '/agents');
             var available = await api(session, '/agents');
             var rows = enabled.map(function(a){
-              return '<tr><td>' + a.name + '</td><td>' + (a.model || '&mdash;') + '</td><td><button class="oc-pbtn" data-id="' + a.id + '">Disable</button></td></tr>';
+              return '<tr><td>' + a.name + '</td><td>' + (a.model || '&mdash;') + '</td>' +
+                '<td><button class="oc-run-agent" data-id="' + a.id + '" data-name="' + a.name.replace(/"/g,'&quot;') + '">Run</button></td>' +
+                '<td><button class="oc-view-runs" data-id="' + a.id + '">History</button></td>' +
+                '<td><button class="oc-pbtn" data-id="' + a.id + '">Disable</button></td></tr>';
             }).join('');
             el.innerHTML =
-              '<table><tr><th>Agent</th><th>Model</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:rgba(255,255,255,.5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
+              '<table><tr><th>Agent</th><th>Model</th><th></th><th></th><th></th></tr>' + (rows || '<tr><td colspan="5" style="color:rgba(255,255,255,.5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
+              '<div id="oc-agent-runs"></div>' +
               (available.length ?
                 '<form id="oc-enable-agent">' +
                   '<label class="oc-full">Enable an Agent</label>' +
@@ -702,6 +706,42 @@ Error generating stack: `+u.message+`
                 '</form>'
               : '<div class="oc-msg">No agents have been created yet — a Super Admin creates these under Admin &rarr; Agents.</div>');
 
+            var runsBox = document.getElementById('oc-agent-runs');
+            function renderRuns(agentId, runs){
+              runsBox.innerHTML =
+                '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:16px 0 8px">Recent runs</h4>' +
+                (runs.length ? runs.map(function(r){
+                  return '<div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px">' +
+                    '<div style="color:rgba(255,255,255,.5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + r.trigger_type + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'#00d19a':'#ff6b6b') + '">' + r.status + '</span></div>' +
+                    '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? (r.output_text||'').replace(/</g,'&lt;') : ('Error: ' + (r.error||'').replace(/</g,'&lt;'))) + '</div>' +
+                  '</div>';
+                }).join('') : '<div class="oc-msg">No runs yet.</div>');
+            }
+
+            el.querySelectorAll('.oc-view-runs').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                try { renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs')); }
+                catch(e){ alert(e.message); }
+              });
+            });
+            el.querySelectorAll('.oc-run-agent').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var leadId = prompt('Lead ID to run "' + btn.dataset.name + '" on (Cancel or leave blank to type free-form input instead):');
+                var input = null;
+                if (!leadId) {
+                  input = prompt('Input for the agent (e.g. a message to draft a reply to):');
+                  if (!input) return;
+                }
+                var origText = btn.textContent;
+                btn.textContent = 'Running…'; btn.disabled = true;
+                try {
+                  var run = await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/run', { method: 'POST', body: leadId ? { lead_id: leadId } : { input: input } });
+                  renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs'));
+                  if (run.status !== 'SUCCESS') alert('Agent run failed: ' + run.error);
+                } catch(e){ alert(e.message); }
+                finally { btn.textContent = origText; btn.disabled = false; }
+              });
+            });
             el.querySelectorAll('.oc-pbtn').forEach(function(btn){
               btn.addEventListener('click', async function(){
                 try { await api(session, '/products/' + productId + '/agents/' + btn.dataset.id, { method: 'DELETE' }); loadProductAgents(); }
@@ -923,10 +963,11 @@ Error generating stack: `+u.message+`
             '<form id="oc-create-connection">' +
               '<label class="oc-full">Add LLM Connection</label>' +
               '<input name="name" placeholder="Connection name" required>' +
-              '<select name="provider"><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select>' +
-              '<input name="api_key" type="password" placeholder="API key" class="oc-full" required>' +
+              '<select name="provider" id="oc-conn-provider"><option value="anthropic">Anthropic (Claude)</option><option value="sarvam">Sarvam AI</option><option value="openai_compatible">OpenAI-compatible (Groq, Together, etc.)</option></select>' +
+              '<input name="api_key" type="password" placeholder="API key" required>' +
+              '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none">' +
               '<button class="oc-submit" type="submit">Add</button>' +
-              '<div class="oc-msg" id="oc-connection-msg"></div>' +
+              '<div class="oc-msg oc-full" id="oc-connection-msg"></div>' +
             '</form>' +
             '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:20px 0 8px">Agents</h4>' +
             '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + a.name + '</td><td>' + (a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
@@ -935,7 +976,7 @@ Error generating stack: `+u.message+`
                 '<label class="oc-full">Create Agent</label>' +
                 '<input name="name" placeholder="Agent name" required>' +
                 '<select name="llm_connection_id" class="oc-full">' + connOptions + '</select>' +
-                '<input name="model" placeholder="Model (e.g. claude-sonnet-5)" class="oc-full">' +
+                '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full">' +
                 '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;font-family:inherit"></textarea>' +
                 '<button class="oc-submit" type="submit">Create</button>' +
                 '<div class="oc-msg" id="oc-agent-msg"></div>' +
@@ -943,12 +984,16 @@ Error generating stack: `+u.message+`
             : '<div class="oc-msg" style="margin-top:8px">Add an LLM connection first before creating an agent.</div>');
 
           var connForm = document.getElementById('oc-create-connection');
+          var providerSel = document.getElementById('oc-conn-provider');
+          var baseUrlInput = document.getElementById('oc-conn-baseurl');
+          function syncBaseUrlVisibility(){ baseUrlInput.style.display = providerSel.value === 'openai_compatible' ? '' : 'none'; }
+          if (providerSel) { providerSel.addEventListener('change', syncBaseUrlVisibility); syncBaseUrlVisibility(); }
           if (connForm) connForm.addEventListener('submit', async function(ev){
             ev.preventDefault();
             var msg = document.getElementById('oc-connection-msg');
             var fd = new FormData(ev.target);
             try {
-              await api(session, '/llm-connections', { method: 'POST', body: { name: fd.get('name'), provider: fd.get('provider'), api_key: fd.get('api_key') } });
+              await api(session, '/llm-connections', { method: 'POST', body: { name: fd.get('name'), provider: fd.get('provider'), api_key: fd.get('api_key'), base_url: fd.get('base_url') } });
               msg.className = 'oc-msg oc-ok'; msg.textContent = 'Connection added.';
               loadAgentsTab();
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }

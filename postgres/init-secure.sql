@@ -51,7 +51,13 @@ CREATE TABLE IF NOT EXISTS product_channels (id UUID PRIMARY KEY DEFAULT uuid_ge
 -- ciphertext (see encryptSecret()/decryptSecret() in api/src/server.js) -
 -- the raw key is never stored, and is only decrypted in memory when an
 -- agent actually needs to call the provider.
-CREATE TABLE IF NOT EXISTS llm_connections (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(100) NOT NULL, provider VARCHAR(30) NOT NULL, api_key_encrypted TEXT NOT NULL, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
+-- provider is one of 'anthropic' | 'sarvam' | 'openai_compatible' (enforced
+-- in the API, not here). base_url is only used/required for
+-- openai_compatible (a full .../v1 base, e.g. https://api.groq.com/openai/v1
+-- - '/chat/completions' is appended) - anthropic and sarvam use hardcoded
+-- real endpoints since their exact auth header/response shape is
+-- provider-specific, not something a generic base_url can express.
+CREATE TABLE IF NOT EXISTS llm_connections (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(100) NOT NULL, provider VARCHAR(30) NOT NULL, base_url TEXT, api_key_encrypted TEXT NOT NULL, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
 
 -- Platform-level (Super Admin only) agent definitions - which LLM
 -- connection/model/system prompt an agent uses. Assignable to individual
@@ -62,3 +68,13 @@ CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(
 -- in the API - a Standard-plan tenant's products run through product_members
 -- users instead).
 CREATE TABLE IF NOT EXISTS product_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, agent_id UUID REFERENCES agents(id) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, agent_id));
+
+-- Real record of every agent invocation (manual "Run Agent" clicks, and
+-- automatic runs off lead intake for Premium products) - the actual LLM
+-- call's input/output, not a fabricated status. trigger_type is 'manual' or
+-- 'auto_lead_intake'; triggered_by is NULL for automatic runs.
+CREATE TABLE IF NOT EXISTS agent_runs (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, product_id UUID REFERENCES products(id) ON DELETE CASCADE, agent_id UUID REFERENCES agents(id), lead_id UUID REFERENCES leads(id), triggered_by UUID REFERENCES users(id), trigger_type VARCHAR(20) NOT NULL DEFAULT 'manual', input_text TEXT, output_text TEXT, status VARCHAR(20) NOT NULL, error TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE agent_runs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_agent_runs ON agent_runs;
+CREATE POLICY tenant_isolation_agent_runs ON agent_runs USING (tenant_id = current_setting('app.tenant_id')::UUID);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_product ON agent_runs(product_id);

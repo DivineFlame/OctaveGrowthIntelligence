@@ -129,7 +129,9 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       CLAMAV_HOST: clamav
-      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      # Server-to-server auth for hermes calling /internal/* routes directly
+      # (no user JWT exists in that context) - see internalMiddleware.
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       PAPERCLIP_SERVICE: paperclip-transformer:8000
       HERMES_MODE: premium_multiagent
       # Both were listed in .env.vps.example but never actually forwarded into
@@ -168,6 +170,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
+      # Calls api's internal /internal/leads/:id/auto-run-agent route on
+      # lead intake (reachable over the shared `backend` network) - same
+      # shared secret api checks in internalMiddleware.
+      API_INTERNAL_URL: http://api:3000
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }

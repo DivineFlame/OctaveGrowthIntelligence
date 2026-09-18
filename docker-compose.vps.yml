@@ -102,6 +102,16 @@ services:
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       PAPERCLIP_SERVICE: paperclip-transformer:8000
       HERMES_MODE: premium_multiagent
+      # Load-bearing, not cosmetic: with APP_DOMAIN unset, CORS_ALLOWED_ORIGINS
+      # ends up empty and server.js rejects every browser cross-origin
+      # request outright (see its CORS_ALLOWED_ORIGINS warning at startup).
+      # These were documented as fixed/forwarded in README.md but that fix
+      # only ever landed in docker-compose.dokploy.yml, not this file - the
+      # one Dokploy actually builds from. Fixed here so it's real.
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
     volumes:
       - recordings:/app/recordings
     ports:

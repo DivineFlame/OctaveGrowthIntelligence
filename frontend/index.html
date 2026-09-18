@@ -163,6 +163,30 @@ Error generating stack: `+u.message+`
     #oc-products .oc-msg.oc-bad{color:var(--oc-danger)}
     #oc-products .oc-back{background:none;border:none;color:var(--oc-brand);font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
     #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-products .oc-upload-row{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+    #oc-products .oc-upload-row input[type=file]{flex:1;font-size:12px;padding:8px 10px;border-radius:8px;border:1px dashed var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text)}
+    #oc-products .oc-asset-card{border:1px solid var(--oc-border-08);border-radius:12px;padding:14px;margin-bottom:10px}
+    #oc-products .oc-asset-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+    #oc-products .oc-asset-name{font-size:13px;font-weight:600}
+    #oc-products .oc-asset-meta{font-size:11px;color:var(--oc-dim-5);margin-top:2px}
+    #oc-products .oc-scan-bad{color:var(--oc-danger);font-weight:600}
+    #oc-products .oc-variant-list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+    #oc-products .oc-variant-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--oc-card-bg-subtle);font-size:12px}
+    #oc-products .oc-variant-ch{font-weight:600;text-transform:capitalize}
+    #oc-products .oc-variant-spec{color:var(--oc-dim-5);font-size:11px;display:block}
+    #oc-products .oc-status-pill{font-size:10px;text-transform:uppercase;letter-spacing:.03em;padding:2px 8px;border-radius:999px;white-space:nowrap}
+    #oc-products .oc-status-PENDING_APPROVAL{background:var(--oc-badge-bad-bg);color:#e8a33d}
+    #oc-products .oc-status-APPROVED,#oc-products .oc-status-PUBLISHED{background:var(--oc-brand-hover-bg);color:var(--oc-success)}
+    #oc-products .oc-status-REJECTED,#oc-products .oc-status-PUBLISH_FAILED{background:var(--oc-badge-bad-bg);color:var(--oc-danger)}
+    #oc-products .oc-status-DRAFT{background:var(--oc-border-06);color:var(--oc-dim-6)}
+    #oc-products .oc-variant-actions{display:flex;gap:4px}
+    #oc-products .oc-vbtn{border:none;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer}
+    #oc-products .oc-vbtn-approve{background:var(--oc-success);color:#0a0a0b}
+    #oc-products .oc-vbtn-reject{background:var(--oc-danger);color:#fff}
+    #oc-products .oc-chpick{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+    #oc-products .oc-chpick label{display:flex;align-items:center;gap:5px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--oc-text);background:var(--oc-card-bg-subtle);border:1px solid var(--oc-border-08);border-radius:999px;padding:5px 10px;margin:0;cursor:pointer}
+    #oc-products .oc-chpick input{width:auto;padding:0}
+    #oc-products .oc-gen-btn{margin-top:10px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-brand);border-radius:999px;padding:6px 14px;font-size:11px;font-weight:600;cursor:pointer}
     #oc-channel-wizard{position:fixed;inset:0;z-index:99999;background:var(--oc-overlay-75);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
     #oc-channel-wizard .oc-panel{position:relative;width:100%;max-width:480px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
     #oc-channel-wizard .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
@@ -674,10 +698,12 @@ Error generating stack: `+u.message+`
           '<div class="oc-tabs">' +
             '<button class="oc-tab oc-active" data-tab="members">Members</button>' +
             '<button class="oc-tab" data-tab="channels">Channels</button>' +
+            '<button class="oc-tab" data-tab="content">Content</button>' +
             '<button class="oc-tab" data-tab="agents">Agents</button>' +
           '</div>' +
           '<div id="oc-ptab-members"></div>' +
           '<div id="oc-ptab-channels" style="display:none"></div>' +
+          '<div id="oc-ptab-content" style="display:none"></div>' +
           '<div id="oc-ptab-agents" style="display:none"></div>';
 
         document.getElementById('oc-back-to-list').addEventListener('click', loadList);
@@ -687,8 +713,10 @@ Error generating stack: `+u.message+`
             tab.classList.add('oc-active');
             document.getElementById('oc-ptab-members').style.display = tab.dataset.tab === 'members' ? 'block' : 'none';
             document.getElementById('oc-ptab-channels').style.display = tab.dataset.tab === 'channels' ? 'block' : 'none';
+            document.getElementById('oc-ptab-content').style.display = tab.dataset.tab === 'content' ? 'block' : 'none';
             document.getElementById('oc-ptab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
             if (tab.dataset.tab === 'channels') loadChannels();
+            if (tab.dataset.tab === 'content') loadContent();
             if (tab.dataset.tab === 'agents') loadProductAgents();
           });
         });
@@ -872,6 +900,116 @@ Error generating stack: `+u.message+`
               openChannelWizard(spec, configured, async function(ch, config){
                 await api(session, '/products/' + productId + '/channels', { method: 'POST', body: { channel: ch, config: config } });
                 loadChannels();
+              });
+            });
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        }
+
+        // Real content pipeline: upload -> generate per-channel variants ->
+        // approve/reject. Replaces the old dead-end upload-only flow (the
+        // separately-built widget this tab now supersedes) with the actual
+        // API surface (POST /content/upload, POST /content/:assetId/transform,
+        // POST /content/variants/:variantId/approve, GET /products/:id/content).
+        var CONTENT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+        var canApproveContent = ['SUPER_ADMIN', 'APPROVER', 'DEPT_ADMIN', 'IT_ADMIN'].indexOf(session.user.role) !== -1 || !!session.user.can_approve_content;
+
+        function fmtBytes(n){
+          if (!n && n !== 0) return '';
+          var units = ['B','KB','MB','GB']; var i = 0;
+          while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+          return n.toFixed(i ? 1 : 0) + ' ' + units[i];
+        }
+
+        function renderVariantRow(v){
+          var canAct = canApproveContent && v.status === 'PENDING_APPROVAL';
+          return '<div class="oc-variant-row">' +
+              '<div>' +
+                '<span class="oc-variant-ch">' + v.channel + '</span>' +
+                '<span class="oc-variant-spec">' + (v.spec || '') + (v.publish_error ? ' &middot; ' + v.publish_error : '') + '</span>' +
+              '</div>' +
+              '<div class="oc-variant-actions">' +
+                '<span class="oc-status-pill oc-status-' + v.status + '">' + v.status.replace(/_/g,' ') + '</span>' +
+                (canAct ?
+                  '<button class="oc-vbtn oc-vbtn-approve" data-approve="' + v.id + '" type="button">Approve</button>' +
+                  '<button class="oc-vbtn oc-vbtn-reject" data-reject="' + v.id + '" type="button">Reject</button>'
+                  : '') +
+              '</div>' +
+            '</div>';
+        }
+
+        function renderAssetCard(a){
+          var hasVariants = a.variants && a.variants.length > 0;
+          return '<div class="oc-asset-card" data-asset="' + a.id + '">' +
+              '<div class="oc-asset-head">' +
+                '<div>' +
+                  '<div class="oc-asset-name">' + a.file_name + '</div>' +
+                  '<div class="oc-asset-meta">' + fmtBytes(a.file_size) + ' &middot; ' + a.mime_type + ' &middot; ' +
+                    (a.virus_scan_status === 'CLEAN' ? 'scan clean' : '<span class="oc-scan-bad">' + a.virus_scan_status + '</span>') +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              (hasVariants ?
+                '<div class="oc-variant-list">' + a.variants.map(renderVariantRow).join('') + '</div>'
+                : '<div class="oc-chpick" data-chpick="' + a.id + '">' +
+                    CONTENT_CHANNELS.map(function(ch){ return '<label><input type="checkbox" value="' + ch + '"> ' + ch + '</label>'; }).join('') +
+                  '</div>' +
+                  '<button class="oc-gen-btn" data-generate="' + a.id + '" type="button">Generate Variants</button>') +
+              '<div class="oc-msg" data-msg="' + a.id + '"></div>' +
+            '</div>';
+        }
+
+        async function loadContent(){
+          var el = document.getElementById('oc-ptab-content');
+          el.innerHTML = 'Loading&hellip;';
+          try {
+            var assets = await api(session, '/products/' + productId + '/content');
+            el.innerHTML =
+              '<div class="oc-upload-row">' +
+                '<input type="file" id="oc-content-file">' +
+                '<button class="oc-gen-btn" id="oc-content-upload-btn" type="button">Upload</button>' +
+              '</div>' +
+              '<div class="oc-msg" id="oc-content-upload-msg"></div>' +
+              (assets.length ?
+                assets.map(renderAssetCard).join('')
+                : '<div class="oc-msg" style="color:var(--oc-dim-5)">No content uploaded for this product yet.</div>');
+
+            document.getElementById('oc-content-upload-btn').addEventListener('click', async function(){
+              var input = document.getElementById('oc-content-file');
+              var msg = document.getElementById('oc-content-upload-msg');
+              if (!input.files || !input.files[0]) { msg.className = 'oc-msg oc-bad'; msg.textContent = 'Choose a file first.'; return; }
+              var fd = new FormData();
+              fd.append('file', input.files[0]);
+              fd.append('product_id', productId);
+              msg.className = 'oc-msg'; msg.textContent = 'Uploading&hellip;';
+              try {
+                await api(session, '/content/upload', { method: 'POST', body: fd });
+                loadContent();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+
+            el.querySelectorAll('[data-generate]').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var assetId = btn.dataset.generate;
+                var picker = el.querySelector('[data-chpick="' + assetId + '"]');
+                var msg = el.querySelector('[data-msg="' + assetId + '"]');
+                var channels = Array.prototype.slice.call(picker.querySelectorAll('input:checked')).map(function(c){ return c.value; });
+                if (!channels.length) { msg.className = 'oc-msg oc-bad'; msg.textContent = 'Pick at least one channel.'; return; }
+                msg.className = 'oc-msg'; msg.textContent = 'Generating&hellip;';
+                try {
+                  await api(session, '/content/' + assetId + '/transform', { method: 'POST', body: { channels: channels } });
+                  loadContent();
+                } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+              });
+            });
+
+            el.querySelectorAll('[data-approve],[data-reject]').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var variantId = btn.dataset.approve || btn.dataset.reject;
+                var action = btn.dataset.approve ? 'APPROVE' : 'REJECT';
+                try {
+                  await api(session, '/content/variants/' + variantId + '/approve', { method: 'POST', body: { action: action } });
+                  loadContent();
+                } catch(e){ alert(e.message); }
               });
             });
           } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }

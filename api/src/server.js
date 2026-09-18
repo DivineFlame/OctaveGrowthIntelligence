@@ -485,6 +485,13 @@ const schemas = {
   approveVariant: z.object({
     action: z.enum(['APPROVE', 'REJECT', 'REQUEST_CHANGE']),
     comment: z.string().trim().max(2000).optional()
+  }),
+  // Keep this enum in sync with PRODUCT_CHANNELS below - a variant's
+  // `channel` has to equal one of those values, or the internal publish
+  // route (POST /internal/content-variants/:variantId/publish) can never
+  // find the matching product_channels row for it.
+  transformContent: z.object({
+    channels: z.array(z.enum(['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'])).min(1).max(7).optional()
   })
 };
 
@@ -926,6 +933,46 @@ app.get('/products/:id/members', authMiddleware, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Content - list a product's uploaded assets with their generated variants
+// nested underneath, newest first. There was previously no way at all to
+// read back what POST /content/upload and POST /content/:assetId/transform
+// had created (only a GET-less write pipeline) - the frontend's Content tab
+// (see renderProducts -> loadContent in frontend/index.html) is the first
+// consumer of this. Same membership check as GET /members: any member of
+// the product (or a tenant admin) can view; approving/uploading/generating
+// still go through their own, stricter checks on the write routes.
+app.get('/products/:id/content', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+
+    const assets = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query(
+        `SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at
+         FROM content_assets WHERE product_id=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 200`,
+        [req.params.id, req.user.tenant_id]
+      )
+    );
+    if (!assets.rows.length) return res.json([]);
+
+    const assetIds = assets.rows.map(a => a.id);
+    const variants = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query(
+        `SELECT id, asset_id, channel, spec, title, status, published_url, publish_error, created_at
+         FROM content_variants WHERE asset_id = ANY($1::uuid[]) AND tenant_id=$2 ORDER BY created_at`,
+        [assetIds, req.user.tenant_id]
+      )
+    );
+    const byAsset = {};
+    for (const v of variants.rows) {
+      (byAsset[v.asset_id] = byAsset[v.asset_id] || []).push(v);
+    }
+    res.json(assets.rows.map(a => Object.assign({}, a, { variants: byAsset[a.id] || [] })));
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
@@ -1397,28 +1444,34 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
 });
 
 // Content - Transform via Paperclip (YouTube, IG, etc.)
-app.post('/content/:assetId/transform', authMiddleware, async (req, res) => {
+app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transformContent), async (req, res) => {
   const { assetId } = req.params;
-  const { channels } = req.body; // ['youtube','shorts','instagram-feed','instagram-reels','facebook','linkedin','whatsapp']
+  const { channels } = req.body; // ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'] - must match PRODUCT_CHANNELS
   try {
     const asset = await withTenantClient(req.user.tenant_id, (client) =>
       client.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [assetId, req.user.tenant_id])
     );
     if (!asset.rows.length) return res.status(404).json({ error: 'Asset not found' });
+    if (!asset.rows[0].product_id) {
+      return res.status(400).json({ error: 'This asset is not associated with a Product, so its variants could never be published. Re-upload it via a Product to generate variants.' });
+    }
 
+    // Keyed by the same channel names as PRODUCT_CHANNELS/product_channels
+    // (see the transformContent schema above) so a generated variant's
+    // `channel` always lines up with a real, configurable channel.
     const specs = {
-      'youtube': '1920x1080 thumbnail 1280x720 title<=100',
-      'shorts': '1080x1920 <=60s',
-      'instagram-feed': '1080x1080 + 1080x1350',
-      'instagram-reels': '1080x1920 cover 1080x1920',
+      'whatsapp': '1:1 status 1080x1080',
       'facebook': '1200x628 + 1080x1080 text<=125',
+      'instagram': '1080x1080 feed / 1080x1350 portrait / 1080x1920 reels',
       'linkedin': '1200x627 doc 1080x1350 text<=3000',
-      'whatsapp': '1:1 status 1080x1080'
+      'youtube': '1920x1080 thumbnail 1280x720 title<=100',
+      'quora': 'text answer, optional 1200x675 image',
+      'email': 'responsive HTML, hero 1200x600'
     };
 
     const variants = await withTenantClient(req.user.tenant_id, async (client) => {
       const out = [];
-      for (const ch of (channels || ['youtube','instagram-feed'])) {
+      for (const ch of (channels || ['instagram','facebook'])) {
         const { rows } = await client.query('INSERT INTO content_variants (asset_id, tenant_id, channel, spec, title, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [assetId, req.user.tenant_id, ch, specs[ch] || 'auto', `${ch} variant for ${asset.rows[0].file_name}`, 'PENDING_APPROVAL']);
         out.push(rows[0]);
       }

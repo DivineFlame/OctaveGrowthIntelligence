@@ -781,3 +781,22 @@ code changes were needed.
   test` from `api/`; `api/Dockerfile` now also runs it during the image
   build (`RUN npm test`, right after `COPY . .`), so a regression here
   fails the build instead of reaching production.
+- **Extracted two more pure pieces of `server.js` into their own,
+  testable modules.** `normalizeDomain`/`sanitizeCSVValue` (small string
+  helpers) and the zod `schemas` object (request-body validation for 10
+  routes) had no dependency on anything stateful - they just weren't
+  reachable from a test without requiring `server.js` itself, which isn't
+  safe (it opens DB/Redis connections and calls `app.listen()` as a side
+  effect of being loaded). Moved them to `api/src/validators.js` and
+  `api/src/schemas.js` respectively, `require()`d back into `server.js`
+  with identical behavior (verified with `node --check` and a full
+  `npm test` run before and after) - nothing about how any route validates
+  or behaves changed, only where the code lives. Added
+  `api/test/validators.test.js` (CSV-formula-injection prefixing, HTML
+  stripping, domain normalization) and `api/test/schemas.test.js`
+  (password length, email/UUID/enum validation per schema, and - mirroring
+  the `CHANNEL_SPECS` test in `channels.test.js` from the other side - a
+  test pinning `transformContent`'s channel enum against the old,
+  disconnected channel vocabulary so the two copies of that list can't
+  silently drift apart again). The suite is now 31 tests across 3 files,
+  still all built-in `node:test` with zero new dependencies.

@@ -4,11 +4,12 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY . .
-# Runs the test suite at build time so a regression in api/src/channels.js
-# fails the build instead of reaching production - see api/test/ and
-# README.md "Hardening notes". Uses only Node's built-in test runner
-# (node:test/node:assert), so this needs no devDependencies beyond what
-# `npm ci --omit=dev` already installed.
+# Runs the test suite at build time so a regression in api/src/channels.js,
+# validators.js or schemas.js fails the build instead of reaching
+# production - see api/test/ and README.md "Hardening notes". Uses only
+# Node's built-in test runner (node:test/node:assert) plus zod, already a
+# production dependency installed by `npm ci --omit=dev` above - no
+# devDependencies needed.
 RUN npm test
 RUN mkdir -p /app/recordings /app/logs && chown -R appuser:appgroup /app
 USER appuser

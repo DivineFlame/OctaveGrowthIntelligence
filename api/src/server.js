@@ -18,6 +18,8 @@ const { rateLimit } = require('express-rate-limit');
 const { authenticator } = require('otplib');
 const QRCode = require('qrcode');
 const channelsLib = require('./channels');
+const { normalizeDomain, sanitizeCSVValue } = require('./validators');
+const schemas = require('./schemas');
 require('dotenv').config({ path: '../.env.production' });
 
 // JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
@@ -142,9 +144,6 @@ app.use(helmet({
 // "https://app.example.com"), which would silently double up to
 // "https://https://app.example.com" wherever we prepend one ourselves.
 // Strip any accidental scheme/trailing-slash so both forms work correctly.
-function normalizeDomain(d) {
-  return (d || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-}
 const APP_DOMAIN = normalizeDomain(process.env.APP_DOMAIN);
 const API_DOMAIN = normalizeDomain(process.env.API_DOMAIN);
 
@@ -375,13 +374,6 @@ const upload = multer({
 const csvUpload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
 // Helpers
-function sanitizeCSVValue(val) {
-  if (typeof val !== 'string') return val;
-  const trimmed = val.trim();
-  if (/^[=\+\-@]/.test(trimmed)) return `'${trimmed}`; // Prevent CSV injection
-  return trimmed.replace(/<[^>]*>/g,''); // Strip HTML
-}
-
 async function auditLog(tenant_id, user_id, action, resource_type, resource_id, req, result='SUCCESS', details={}) {
   try {
     await pool.query(
@@ -484,63 +476,6 @@ function serverError(res, e) {
   }
   return res.status(500).json({ error: e.message });
 }
-
-const schemas = {
-  createTenant: z.object({
-    name: z.string().trim().min(1).max(200),
-    subdomain: z.string().trim().toLowerCase().min(1).max(63).regex(/^[a-z0-9-]+$/, 'subdomain may only contain lowercase letters, digits and hyphens'),
-    plan: z.enum(['standard', 'premium'])
-  }),
-  createUser: z.object({
-    email: z.string().trim().toLowerCase().email().max(255),
-    password: z.string().min(12).max(200),
-    role: z.string().trim().min(1).max(50),
-    tenant_id: z.string().uuid().optional()
-  }),
-  createProduct: z.object({
-    name: z.string().trim().min(1).max(200),
-    description: z.string().trim().max(2000).optional().nullable()
-  }),
-  addProductMember: z.object({
-    user_id: z.string().uuid(),
-    role: z.enum(['ADMIN', 'MEMBER']).optional()
-  }),
-  configureChannel: z.object({
-    channel: z.string().trim().min(1).max(30),
-    config: z.record(z.any()).optional()
-  }),
-  createLlmConnection: z.object({
-    name: z.string().trim().min(1).max(100),
-    provider: z.string().trim().min(1).max(30),
-    api_key: z.string().min(1).max(2000),
-    base_url: z.string().trim().url().max(500).optional()
-  }),
-  createAgent: z.object({
-    name: z.string().trim().min(1).max(100),
-    llm_connection_id: z.string().uuid(),
-    model: z.string().trim().max(100).optional().nullable(),
-    system_prompt: z.string().max(20000).optional().nullable(),
-    config: z.record(z.any()).optional()
-  }),
-  updateAgent: z.object({
-    name: z.string().trim().min(1).max(100).optional(),
-    model: z.string().trim().max(100).optional().nullable(),
-    system_prompt: z.string().max(20000).optional().nullable(),
-    config: z.record(z.any()).optional(),
-    active: z.boolean().optional()
-  }),
-  approveVariant: z.object({
-    action: z.enum(['APPROVE', 'REJECT', 'REQUEST_CHANGE']),
-    comment: z.string().trim().max(2000).optional()
-  }),
-  // Keep this enum in sync with PRODUCT_CHANNELS below - a variant's
-  // `channel` has to equal one of those values, or the internal publish
-  // route (POST /internal/content-variants/:variantId/publish) can never
-  // find the matching product_channels row for it.
-  transformContent: z.object({
-    channels: z.array(z.enum(['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'])).min(1).max(7).optional()
-  })
-};
 
 // Routes
 

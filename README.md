@@ -33,12 +33,21 @@ Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./transformer lo
 > + access token, Email needs SMTP details, etc; secrets are encrypted at
 > rest and masked in every API response). Content only publishes through a
 > real channel if the asset was uploaded with a `product_id` (`POST
-> /content/upload`) - the built-in content-upload widget doesn't send this
-> yet (it's a separate, prebuilt/minified script this repo has no source
-> for), so associating an asset with a product currently requires calling
-> the API directly. Instagram specifically requires `APP_DOMAIN` or
-> `API_DOMAIN` to be a real public domain, since its API has no direct file
-> upload and must fetch the image itself.
+> /content/upload`) - use **Products > (open a product) > Content** in the
+> frontend for this: it uploads tied to that product, triggers
+> `POST /content/:assetId/transform` for the channels you pick, and lists
+> each generated variant with an Approve/Reject action
+> (`POST /content/variants/:variantId/approve`) for anyone with the
+> `can_approve_content` flag or an approver role. Reading back what's been
+> uploaded/generated goes through `GET /products/:id/content`, which didn't
+> exist before - there was previously no way to list assets or variants at
+> all, only write them. There's a separate, prebuilt/minified widget
+> mounted at `#root` in `frontend/index.html` (this repo has no source for
+> it) that predates this tab and still only does a bare upload with no
+> `product_id` - don't use it for anything that needs to publish; the
+> Products > Content tab is the supported path. Instagram specifically
+> requires `APP_DOMAIN` or `API_DOMAIN` to be a real public domain, since
+> its API has no direct file upload and must fetch the image itself.
 
 ## First login
 

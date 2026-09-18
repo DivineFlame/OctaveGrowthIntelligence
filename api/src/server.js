@@ -1437,7 +1437,7 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     // wildcards, so a per-tenant key here would mean the consumers below
     // could never actually block on "all tenants' queues" the way a
     // `transformer:queue:*` pattern implies but does not do.
-    await redisClient.lPush('transformer:queue', JSON.stringify({ asset_id: rows[0].id, tenant_id: req.user.tenant_id, channels: req.body.channels || ['youtube','instagram-feed','facebook'], requested_by: req.user.id }));
+    await redisClient.lPush('transformer:queue', JSON.stringify({ asset_id: rows[0].id, tenant_id: req.user.tenant_id, channels: req.body.channels || ['instagram','facebook','youtube'], requested_by: req.user.id }));
 
     res.json({ asset: rows[0], message: 'Uploaded, queued for Paperclip transform per channel spec' });
   } catch(e){ res.status(500).json({ error: e.message }); }

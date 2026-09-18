@@ -21,6 +21,7 @@ const channelsLib = require('./channels');
 const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
+const { processLeadCsvRecords } = require('./csv-leads');
 require('dotenv').config({ path: '../.env.production' });
 
 // JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
@@ -1340,30 +1341,10 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
     const records = parse(content, { columns: true, skip_empty_lines: true, trim: true });
     if (records.length > 5000) { fs.unlink(req.file.path, () => {}); return res.status(400).json({ error: 'Max 5000 rows' }); }
 
-    // Sanitize + validate
-    const sanitized = records.map(r => {
-      const obj = {};
-      for (const k in r) {
-        obj[k.toLowerCase().replace(/[^a-z]/g,'_')] = sanitizeCSVValue(r[k]);
-      }
-      return obj;
-    });
-
-    // Deduplicate by phone+email
-    const seen = new Set();
-    let dup = 0, valid = 0, invalid = 0;
-    const toInsert = [];
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    for (const row of sanitized) {
-      const phone = row.phone || row.mobile || row.phone_number || '';
-      const email = row.email || '';
-      if (email && !emailRegex.test(email)) { invalid++; continue; }
-      const key = `${phone}|${email}`.toLowerCase();
-      if (seen.has(key)) { dup++; continue; }
-      seen.add(key);
-      toInsert.push(row);
-      valid++;
-    }
+    // Sanitize, validate and deduplicate by phone+email - see
+    // csv-leads.js for the actual logic (extracted so it's unit
+    // testable independent of this route's DB/file-system work).
+    const { toInsert, valid, dup, invalid } = processLeadCsvRecords(records);
 
     // Insert with RLS - csv_uploads isn't RLS-protected but leads is, and
     // both need to land on the same tenant-scoped connection as each other

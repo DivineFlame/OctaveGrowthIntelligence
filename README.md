@@ -822,3 +822,22 @@ code changes were needed.
   (the random IV, without which two channels sharing one access token
   would leak that they're equal just by comparing stored ciphertext).
   Suite is now 38 tests across 4 files.
+- **Extracted and tested the CSV lead-import sanitize/validate/dedup
+  logic.** `POST /leads/upload-csv` ran column-name normalization,
+  per-value sanitization, email validation, and phone+email
+  deduplication inline in the route handler - real logic worth testing on
+  its own, but only reachable before now by actually uploading a CSV to a
+  running server. Moved it to `api/src/csv-leads.js`
+  (`sanitizeCsvRecord`/`processLeadCsvRecords`, pure functions - no DB or
+  file-system access) and wired the route to call it, same behavior,
+  verified with `node --check` and a full `npm test` run. Added
+  `api/test/csv-leads.test.js` (9 tests): column-name normalization across
+  inconsistent header styles, a malformed email correctly counted invalid
+  rather than inserted, case-insensitive phone+email deduplication (and
+  the inverse - that sharing only *one* of phone or email across two rows
+  is correctly NOT treated as a duplicate), the recognized phone-column
+  aliases (`phone`/`mobile`/`phone_number`), and an empty file. One test
+  also pins that a phone number starting with `+` still goes through the
+  same CSV-formula-injection guard as every other field, since `+` is one
+  of the characters that guard exists for. Suite is now 48 tests across 5
+  files.

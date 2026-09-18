@@ -98,6 +98,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-orgcomms_prod}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      # Optional off-host backup shipping via rclone - unset by default (see
+      # postgres/backup/backup.sh and README.md "Hardening notes"). Left
+      # empty here, this is a no-op: backup.sh only attempts to ship when
+      # it's set.
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-}
     volumes:
       - pgbackups:/backups
     deploy:

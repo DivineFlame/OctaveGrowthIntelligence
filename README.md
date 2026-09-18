@@ -694,3 +694,28 @@ code changes were needed.
   noisy one. Added a shared `x-logging` anchor in `docker-compose.vps.yml`
   (`json-file`, `max-size: 10m`, `max-file: 5` — 50MB of history per
   container) applied to all 8 services.
+- **Backups had no off-host copy.** `postgres-backup`'s daily `pg_dump`
+  writes into the `pgbackups` Docker volume, which lives on the same VPS
+  disk as the database it's backing up — real protection against a bad
+  migration or a fat-fingered `DELETE`, but none at all against disk
+  failure, the VPS provider having an outage, or an accidental `docker
+  volume rm`. `postgres/backup/backup.sh` now supports optional off-host
+  shipping via `rclone` (any of its ~70 supported storage backends - S3,
+  Backblaze B2, a second VPS over SFTP, etc.) right after each local
+  backup succeeds; a shipping failure is logged as a warning and never
+  deletes or skips the local copy, so it degrades to exactly today's
+  behavior rather than breaking the backup job. It's opt-in, not wired up
+  automatically, since it needs your own object-storage credentials. To
+  turn it on:
+  1. Add `rclone` to `postgres/backup/Dockerfile` (`RUN apk add --no-cache
+     dcron rclone`, alongside the existing `dcron` install).
+  2. Create an `rclone.conf` for your remote (see
+     [rclone's docs](https://rclone.org/docs/#configure)) and mount it
+     read-only into the container, e.g. add
+     `- ./rclone.conf:/root/.config/rclone/rclone.conf:ro` under
+     `postgres-backup`'s `volumes:` in `docker-compose.vps.yml`.
+  3. Set `RCLONE_REMOTE` in your `.env` (e.g. `RCLONE_REMOTE=s3:my-bucket/orgcomms-backups`)
+     — already passed through to the container, so this step alone is what
+     turns shipping on once the first two are done.
+  Leave `RCLONE_REMOTE` unset (the default) and nothing changes: backups
+  stay exactly as local-only as they are today.

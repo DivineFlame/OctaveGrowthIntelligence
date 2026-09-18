@@ -601,3 +601,39 @@ code changes were needed.
   from before the theme system existed — invisible-on-white in light mode.
   Switched to the same `var(--oc-*)` custom properties the rest of the UI
   uses.
+- **`JWT_SECRET` and `ENCRYPTION_KEY` used to fail silently, not loudly.**
+  Every call site did `process.env.JWT_SECRET || 'dev-secret-change-me'`
+  (and the same shape for `ENCRYPTION_KEY`) — if the VPS's `.env` was ever
+  missing that line, or the value came through empty (a blank env var is
+  falsy in Node), the API would boot without complaint and run on a
+  hardcoded default that's sitting in this public source file. That means
+  forgeable JWTs for any tenant/role, or a decryptable key for everything
+  `ENCRYPTION_KEY_BUF` protects (stored LLM API keys, webhook secrets),
+  with no error anywhere pointing at the cause. Added a
+  `requireSecretOrExit()` startup guard: with `NODE_ENV=production` (which
+  `docker-compose.vps.yml` always sets), a missing/empty value now exits
+  the process with a clear message instead of starting; outside production
+  it still falls back for local dev, but logs a loud warning. All 7 former
+  inline fallbacks now go through the same resolved `JWT_SECRET_VALUE` /
+  `ENCRYPTION_KEY_VALUE` constants.
+- **The frontend's HTML page had no CSP, and no HSTS/X-Frame-Options/
+  X-Content-Type-Options either.** Those headers existed on the
+  `api.yourdomain.com` nginx server block, but the separate
+  `app.yourdomain.com` block that actually serves `frontend/index.html` —
+  where the XSS fixes above apply — had none of them. Added the same
+  three headers there, plus `Referrer-Policy`, plus a real
+  `Content-Security-Policy`. `frontend/index.html`'s 4 inline `<script>`
+  blocks are static (no per-request templating — nginx just serves the
+  file), so `script-src` uses exact `sha256-...` hashes of each block
+  instead of `'unsafe-inline'`: an injected inline `<script>` (exactly the
+  class of bug just fixed at the application layer) now fails to execute
+  even if it somehow got past escaping, giving CSP its intended job as a
+  second line of defense rather than a header that quietly allows
+  anything. `style-src` keeps `'unsafe-inline'` (~50 inline `style="..."`
+  attributes across dynamically-built rows make per-attribute hashing
+  impractical, and it's a materially lower-severity primitive than inline
+  script). Added `scripts/gen-csp-hashes.sh` to regenerate the four hashes
+  whenever an inline `<script>` block's content changes — the deploy
+  checklist in this README should run it before any frontend release that
+  touches the hand-written `<script>` code, and paste the output into
+  `nginx/orgcomms-vps.conf`'s `app.yourdomain.com` block.

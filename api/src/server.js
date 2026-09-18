@@ -20,6 +20,26 @@ const QRCode = require('qrcode');
 const channelsLib = require('./channels');
 require('dotenv').config({ path: '../.env.production' });
 
+// JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
+// hardcoded, publicly-visible-in-source default whenever the env var was
+// unset or empty (e.g. a blank line in .env on the VPS) - not a crash, just
+// a quiet boot into a state where anyone who has read this file can forge
+// valid JWTs for any tenant/role, or decrypt anything encrypted with
+// ENCRYPTION_KEY_BUF (stored LLM API keys, webhook secrets, etc). Fail fast
+// in production instead of ever booting on the insecure default.
+function requireSecretOrExit(envVarName, devDefault) {
+  const value = process.env[envVarName];
+  if (value) return value;
+  if (process.env.NODE_ENV === 'production') {
+    console.error(`FATAL: ${envVarName} is not set. Refusing to start with an insecure hardcoded default in production - see .env.vps.example.`);
+    process.exit(1);
+  }
+  console.warn(`WARNING: ${envVarName} is not set - using an insecure development-only default. Set ${envVarName} before deploying.`);
+  return devDefault;
+}
+const JWT_SECRET_VALUE = requireSecretOrExit('JWT_SECRET', 'dev-secret-change-me');
+const ENCRYPTION_KEY_VALUE = requireSecretOrExit('ENCRYPTION_KEY', 'dev-encryption-key-change-me');
+
 const app = express();
 // Behind Dokploy's Traefik (one reverse-proxy hop) - without this, every
 // request looks like it comes from Traefik's own address, which breaks
@@ -133,7 +153,7 @@ const API_DOMAIN = normalizeDomain(process.env.API_DOMAIN);
 // until now: LLM provider API keys (llm_connections.api_key_encrypted) are
 // encrypted at rest with it, AES-256-GCM, and only decrypted in memory at
 // the point an agent actually calls the provider.
-const ENCRYPTION_KEY_BUF = crypto.createHash('sha256').update(process.env.ENCRYPTION_KEY || 'dev-encryption-key-change-me').digest();
+const ENCRYPTION_KEY_BUF = crypto.createHash('sha256').update(ENCRYPTION_KEY_VALUE).digest();
 function encryptSecret(plaintext) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY_BUF, iv);
@@ -410,7 +430,7 @@ function authMiddleware(req, res, next) {
   if (!auth) return res.status(401).json({ error: 'No token' });
   try {
     const token = auth.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret-change-me');
+    const decoded = jwt.verify(token, JWT_SECRET_VALUE);
     req.user = decoded;
     next();
   } catch(e){
@@ -547,8 +567,8 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       }
     }
     const claims = userClaims(user);
-    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
-    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
+    const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
+    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, JWT_SECRET_VALUE, { expiresIn: '7d' });
     await auditLog(user.tenant_id, user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
     res.json({ token, refresh, user: claims });
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
@@ -619,8 +639,8 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
     await client.query('COMMIT');
 
     const claims = userClaims(user);
-    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
-    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
+    const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
+    const refresh = jwt.sign({ id: user.id, type: 'refresh' }, JWT_SECRET_VALUE, { expiresIn: '7d' });
     res.json({ token, refresh, user: claims });
   } catch(e) {
     await client.query('ROLLBACK');
@@ -639,13 +659,13 @@ app.post('/auth/refresh', authLimiter, async (req, res) => {
   const { refresh } = req.body;
   if (!refresh) return res.status(400).json({ error: 'refresh token required' });
   try {
-    const decoded = jwt.verify(refresh, process.env.JWT_SECRET || 'dev-secret-change-me');
+    const decoded = jwt.verify(refresh, JWT_SECRET_VALUE);
     if (decoded.type !== 'refresh') return res.status(401).json({ error: 'Not a refresh token' });
     const { rows } = await pool.query('SELECT * FROM users WHERE id=$1', [decoded.id]);
     if (!rows.length) return res.status(401).json({ error: 'User no longer exists' });
     const user = rows[0];
     const claims = userClaims(user);
-    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
     res.json({ token, user: claims });
   } catch(e){ return res.status(401).json({ error: 'Invalid or expired refresh token' }); }
 });

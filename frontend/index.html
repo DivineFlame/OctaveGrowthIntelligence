@@ -1270,12 +1270,15 @@ Error generating stack: `+u.message+`
         try {
           var data = await api(session, '/integrations/webhook-urls');
           var rows = data.urls.map(function(u){
-            return '<tr><td>' + u.channel + '</td><td><input readonly value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px" onclick="this.select()"></td></tr>';
+            return '<tr><td>' + u.channel + '</td><td><input readonly class="oc-webhook-url-input" value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px"></td></tr>';
           }).join('');
           el.innerHTML =
             '<table><tr><th>Channel</th><th>Webhook URL</th></tr>' + rows + '</table>' +
             '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>' +
             '<div class="oc-msg" id="oc-webhook-msg"></div>';
+          Array.prototype.forEach.call(el.querySelectorAll('.oc-webhook-url-input'), function(inp){
+            inp.addEventListener('click', function(){ inp.select(); });
+          });
           el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
             if (!confirm('Rotating invalidates every URL above — every configured channel will need the new URL. Continue?')) return;
             var msg = document.getElementById('oc-webhook-msg');

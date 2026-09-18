@@ -108,6 +108,26 @@ Error generating stack: `+u.message+`
     #oc-products .oc-msg.oc-bad{color:#ff6b6b}
     #oc-products .oc-back{background:none;border:none;color:#00a884;font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
     #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:rgba(255,255,255,.1);color:#fff}
+    #oc-channel-wizard{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-channel-wizard .oc-panel{position:relative;width:100%;max-width:480px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-channel-wizard .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
+    #oc-channel-wizard h2{font-size:16px;margin:0 0 4px}
+    #oc-channel-wizard p.oc-sub{font-size:12px;color:rgba(255,255,255,.5);margin:0 0 18px}
+    #oc-channel-wizard .oc-chgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    #oc-channel-wizard .oc-chcard{text-align:left;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);border-radius:12px;padding:12px 14px;cursor:pointer;color:#fff;font-family:inherit}
+    #oc-channel-wizard .oc-chcard:hover{border-color:#00a884;background:rgba(0,168,132,.08)}
+    #oc-channel-wizard .oc-chcard .oc-chname{font-size:13px;font-weight:600;display:block}
+    #oc-channel-wizard .oc-chcard .oc-chstatus{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:rgba(255,255,255,.4);display:block;margin-top:4px}
+    #oc-channel-wizard .oc-chcard .oc-chstatus.oc-configured{color:#00d19a}
+    #oc-channel-wizard .oc-chcard.oc-disabled{opacity:.45;cursor:default}
+    #oc-channel-wizard .oc-chcard.oc-disabled:hover{border-color:rgba(255,255,255,.1);background:rgba(255,255,255,.03)}
+    #oc-channel-wizard label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:12px 0 6px}
+    #oc-channel-wizard input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
+    #oc-channel-wizard .oc-row{display:flex;gap:8px;margin-top:20px}
+    #oc-channel-wizard .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-err{margin-top:10px;font-size:12px;color:#ff6b6b}
+    #oc-channel-wizard .oc-help{font-size:11px;color:rgba(255,255,255,.45);margin-bottom:14px;line-height:1.5}
     #oc-onboarding{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
     #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:28px;font-family:Inter,system-ui,sans-serif}
     #oc-onboarding .oc-steps{display:flex;gap:6px;margin-bottom:18px}
@@ -651,6 +671,112 @@ Error generating stack: `+u.message+`
           } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
         }
 
+        // Renders the channel-config fields for one channel into a
+        // container element - shared by the wizard's config step.
+        function renderChannelFields(spec, ch, existingConfig){
+          var s = spec[ch];
+          if (!s) return '';
+          if (!s.implemented) {
+            return '<div class="oc-help">' + (s.help || 'Not implemented yet.') + '</div>';
+          }
+          var existing = existingConfig || {};
+          return (s.help ? '<div class="oc-help">' + s.help + '</div>' : '') +
+            s.fields.map(function(f){
+              var val = existing[f.key] || '';
+              var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+              return '<label>' + f.label + (f.required ? ' *' : '') + '</label>' +
+                '<input name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
+                (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
+            }).join('');
+        }
+
+        // A focused, two-step modal (pick a channel -> fill its fields) for
+        // configuring one channel at a time, instead of a single dropdown +
+        // form crammed into the tab (which also had a real usability bug -
+        // native <select> option lists render inconsistently, sometimes
+        // showing mostly blank rows, especially on mobile/some browsers).
+        function openChannelWizard(spec, configured, onSaved){
+          var existing = document.getElementById('oc-channel-wizard');
+          if (existing) existing.remove();
+          var modal = document.createElement('div');
+          modal.id = 'oc-channel-wizard';
+          document.body.appendChild(modal);
+
+          function close(){ modal.remove(); }
+          modal.addEventListener('click', function(ev){ if (ev.target === modal) close(); });
+
+          function renderPicker(){
+            var all = Object.keys(spec);
+            modal.innerHTML =
+              '<div class="oc-panel">' +
+                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<h2>Configure a Channel</h2>' +
+                '<p class="oc-sub">Pick a channel to connect. You can come back and edit any of these later.</p>' +
+                '<div class="oc-chgrid">' +
+                  all.map(function(ch){
+                    var s = spec[ch];
+                    var isConfigured = configured[ch] && configured[ch].status === 'configured';
+                    var disabled = !s.implemented;
+                    return '<button type="button" class="oc-chcard' + (disabled ? ' oc-disabled' : '') + '" data-ch="' + ch + '"' + (disabled ? ' disabled' : '') + '>' +
+                      '<span class="oc-chname">' + s.label + '</span>' +
+                      '<span class="oc-chstatus' + (isConfigured ? ' oc-configured' : '') + '">' + (disabled ? 'not available yet' : (isConfigured ? 'connected' : 'not connected')) + '</span>' +
+                    '</button>';
+                  }).join('') +
+                '</div>' +
+              '</div>';
+            document.getElementById('oc-cw-close').addEventListener('click', close);
+            modal.querySelectorAll('.oc-chcard:not(.oc-disabled)').forEach(function(card){
+              card.addEventListener('click', function(){ renderForm(card.dataset.ch); });
+            });
+          }
+
+          function renderForm(ch){
+            var s = spec[ch];
+            var existingConfig = (configured[ch] && configured[ch].config) || {};
+            modal.innerHTML =
+              '<div class="oc-panel">' +
+                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<button type="button" class="oc-secondary" id="oc-cw-back" style="margin-bottom:14px;padding:6px 12px;font-size:12px">&larr; Back</button>' +
+                '<h2>' + s.label + '</h2>' +
+                '<form id="oc-cw-form">' +
+                  renderChannelFields(spec, ch, existingConfig) +
+                  '<div class="oc-row">' +
+                    '<button type="submit" class="oc-primary">Save</button>' +
+                  '</div>' +
+                  '<div class="oc-err" id="oc-cw-err" style="display:none"></div>' +
+                '</form>' +
+              '</div>';
+            document.getElementById('oc-cw-close').addEventListener('click', close);
+            document.getElementById('oc-cw-back').addEventListener('click', renderPicker);
+            var form = document.getElementById('oc-cw-form');
+            if (form.querySelector('input')) {
+              form.addEventListener('submit', async function(ev){
+                ev.preventDefault();
+                var err = document.getElementById('oc-cw-err');
+                err.style.display = 'none';
+                var fd = new FormData(ev.target);
+                var config = {};
+                s.fields.forEach(function(f){
+                  var v = fd.get(f.key);
+                  // Leave an unchanged secret alone (it renders as a masked
+                  // placeholder, never as real input text) rather than
+                  // overwriting a saved token with the literal mask string.
+                  if (v !== null && v !== '') config[f.key] = v;
+                });
+                try {
+                  await onSaved(ch, config);
+                  close();
+                } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+              });
+            } else {
+              // Not-implemented channel: nothing to submit, just a way back.
+              modal.querySelector('.oc-row').innerHTML = '';
+            }
+          }
+
+          renderPicker();
+        }
+
         async function loadChannels(){
           var el = document.getElementById('oc-ptab-channels');
           el.innerHTML = 'Loading&hellip;';
@@ -666,59 +792,15 @@ Error generating stack: `+u.message+`
               return '<tr><td>' + label + '</td><td>' + st + '</td></tr>';
             }).join('');
 
-            function renderFields(ch){
-              var s = spec[ch];
-              if (!s) return '';
-              if (!s.implemented) {
-                return '<div class="oc-msg oc-full">' + (s.help || 'Not implemented yet.') + '</div>';
-              }
-              var existing = (configured[ch] && configured[ch].config) || {};
-              return (s.help ? '<div class="oc-msg oc-full" style="opacity:.75">' + s.help + '</div>' : '') +
-                s.fields.map(function(f){
-                  var val = existing[f.key] || '';
-                  var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
-                  return '<label class="oc-full">' + f.label + (f.required ? ' *' : '') + '</label>' +
-                    '<input class="oc-full" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
-                    (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
-                }).join('');
-            }
-
             el.innerHTML =
               '<table><tr><th>Channel</th><th>Status</th></tr>' + rows + '</table>' +
-              '<form id="oc-config-channel">' +
-                '<label class="oc-full">Configure a Channel</label>' +
-                '<select name="channel" class="oc-full" id="oc-channel-select">' + all.map(function(ch){ return '<option value="' + ch + '">' + ((spec[ch] && spec[ch].label) || ch) + '</option>'; }).join('') + '</select>' +
-                '<div id="oc-channel-fields">' + renderFields(all[0]) + '</div>' +
-                '<button class="oc-submit" type="submit">Save</button>' +
-                '<div class="oc-msg oc-full" id="oc-channel-msg"></div>' +
-              '</form>';
+              '<button class="oc-submit" id="oc-open-channel-wizard" type="button">Configure a Channel</button>';
 
-            document.getElementById('oc-channel-select').addEventListener('change', function(ev){
-              document.getElementById('oc-channel-fields').innerHTML = renderFields(ev.target.value);
-            });
-
-            document.getElementById('oc-config-channel').addEventListener('submit', async function(ev){
-              ev.preventDefault();
-              var msg = document.getElementById('oc-channel-msg');
-              var fd = new FormData(ev.target);
-              var ch = fd.get('channel');
-              var s = spec[ch];
-              var config = {};
-              if (s && s.implemented) {
-                s.fields.forEach(function(f){
-                  var v = fd.get(f.key);
-                  // Leave an unchanged secret alone (its value renders as
-                  // the masked placeholder in real config from the API,
-                  // never as real input text) rather than overwriting a
-                  // saved token with the literal mask string.
-                  if (v !== null && v !== '') config[f.key] = v;
-                });
-              }
-              try {
+            document.getElementById('oc-open-channel-wizard').addEventListener('click', function(){
+              openChannelWizard(spec, configured, async function(ch, config){
                 await api(session, '/products/' + productId + '/channels', { method: 'POST', body: { channel: ch, config: config } });
-                msg.className = 'oc-msg oc-ok'; msg.textContent = 'Saved.';
                 loadChannels();
-              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+              });
             });
           } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
         }

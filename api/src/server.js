@@ -22,6 +22,7 @@ const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
 const { processLeadCsvRecords } = require('./csv-leads');
+const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
 require('dotenv').config({ path: '../.env.production' });
 
 // JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
@@ -384,26 +385,13 @@ async function auditLog(tenant_id, user_id, action, resource_type, resource_id, 
 // the roles table defines had no actual effect. Baking them into the JWT
 // (rather than a DB lookup on every request) makes them available as
 // req.user.can_view_revenue etc. wherever authMiddleware runs.
-function userClaims(user) {
-  return {
-    id: user.id,
-    tenant_id: user.tenant_id,
-    role: user.role,
-    email: user.email,
-    max_history_days: user.max_history_days ?? null,
-    can_view_revenue: !!user.can_view_revenue,
-    can_view_integrations: !!user.can_view_integrations,
-    can_approve_content: !!user.can_approve_content
-  };
-}
-
 // True if the caller's role is in `roles`, OR (when `flag` is given) their
 // per-role flag from the roles table is set - lets a role the hardcoded
 // list doesn't name still qualify if a tenant admin has granted it the
 // flag via PATCH /users/:userId/role, without loosening anyone else.
 function roleOrFlag(roles, flag) {
   return (req, res, next) => {
-    if (roles.includes(req.user.role) || (flag && req.user[flag])) return next();
+    if (hasRoleOrFlag(req.user.role, roles, flag && req.user[flag])) return next();
     auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
     return res.status(403).json({ error: 'Forbidden - role not allowed' });
   };
@@ -749,7 +737,7 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
     const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
-    if (r.name === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (!canGrantRole(req.user.role, r.name)) {
       await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', null, req, 'BLOCKED', { attempted: 'create SUPER_ADMIN user', role: req.user.role });
       return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
     }
@@ -777,7 +765,7 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
-    if (r.name === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (!canGrantRole(req.user.role, r.name)) {
       await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', userId, req, 'BLOCKED', { attempted: 'promote to SUPER_ADMIN', role: req.user.role });
       return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
     }

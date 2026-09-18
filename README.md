@@ -851,3 +851,20 @@ code changes were needed.
   pure-function unit test by design (see the extraction work above), so
   there's nothing stateful for CI to provision. A broken PR now fails
   visibly before merge instead of only being caught at the next deploy.
+- **Extracted and tested the RBAC decision logic itself, including a
+  direct regression test for the cross-tenant privilege-escalation fix
+  above.** `userClaims` (JWT claims shaping), the `roleOrFlag()`
+  middleware's core role-or-flag check, and the `canGrantRole` check added
+  earlier in this pass (only a Super Admin can grant the Super Admin
+  role) were all inline in `server.js` - correct, but only verified by
+  hand when they were written. Moved the pure decision logic to
+  `api/src/rbac.js` (`userClaims`, `hasRoleOrFlag`, `canGrantRole`) and
+  rebound the three call sites in `server.js` to it, identical behavior,
+  verified with `node --check` and a full `npm test` run (57/57 passing)
+  before and after. Added `api/test/rbac.test.js` (9 tests) - most
+  importantly, `canGrantRole` now has a fast, direct test pinning the
+  exact privilege-escalation scenario the earlier fix closed (`IT_ADMIN`/
+  `DEPT_ADMIN`/any other role attempting to grant `SUPER_ADMIN` must
+  return `false`), so that fix can never silently regress without a test
+  failing immediately, rather than relying on someone noticing in
+  production again. Suite is now 57 tests across 6 files.

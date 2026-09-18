@@ -9,8 +9,30 @@
 ![Nginx](https://img.shields.io/badge/Nginx-reverse%20proxy-009639?logo=nginx&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./transformer locally, no external registry. Real source code included.
+Fixed: docker-compose builds from ./api, ./hermes, ./paperclip locally, no external registry. Real source code included.
 
+> **A pass of dummy/stub cleanup landed together**: the content-transform
+> pipeline had two Redis consumers (`hermes-orchestrator` and a
+> `transformer-worker` service) racing each other for jobs on the same
+> queue key, one of which called a Paperclip endpoint that fabricated a
+> file path and never wrote anything; upload also blind-pushed a transform
+> job with guessed-at default channels before any transform was requested.
+> All replaced with one real, synchronous path: POST
+> `/content/:assetId/transform` calls Paperclip directly and Paperclip does
+> a real Pillow resize for image assets (honestly reporting "skipped" - not
+> a fake success - for video/PDF/spreadsheet sources), persisting the real
+> output path onto the variant. The now-dead `transformer-worker` service
+> and its `transformer/` directory are gone (same treatment as the earlier
+> `csv-handler/` removal); `hermes-orchestrator`'s `scout`/`compliance`
+> agent types, which only ever returned hardcoded canned data nothing used,
+> are gone too - it now just runs `publisher` and `lead_intake`, both real.
+> Separately: content-upload's MIME-type allowlist was defined but never
+> enforced (`fileFilter` accepted everything - "Allow all for MVP"); it's
+> enforced now. And there was no global Express error handler, so an error
+> that didn't hit its own try/catch (a rejected upload, a malformed JSON
+> body) fell through to Express's default HTML error page instead of this
+> API's usual JSON error shape - added one.
+>
 > **Migrations now apply automatically.** The `api` container runs
 > `postgres/migrate-*.sql` against `DATABASE_URL` on every start, before it
 > begins serving traffic (see `api/src/migrate.js` and the `api` service's

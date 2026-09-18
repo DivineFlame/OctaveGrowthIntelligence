@@ -1,41 +1,76 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI
 from PIL import Image
 import os, uuid
-app = FastAPI(title="Paperclip Transformer", version="4.0.0")
+
+app = FastAPI(title="Paperclip Transformer", version="4.1.0")
+
+# Keyed by the same channel names api/src/server.js's PRODUCT_CHANNELS uses
+# (and validates content_variants.channel against) - so a variant's channel
+# always has a spec here. One canonical target size per channel for now
+# (not the full multi-crop set some channels can technically take, e.g.
+# Instagram feed + portrait + reels) - a real, working single resize per
+# channel rather than a bigger multi-output job this pass doesn't cover.
 SPECS = {
-    "youtube": {"width":1920,"height":1080,"thumb":(1280,720),"title_max":100},
-    "shorts": {"width":1080,"height":1920,"max_sec":60},
-    "instagram-feed": {"sizes":[(1080,1080),(1080,1350)]},
-    "instagram-reels": {"width":1080,"height":1920},
-    "facebook": {"width":1200,"height":628,"alt":(1080,1080)},
-    "linkedin": {"width":1200,"height":627,"doc":(1080,1350)},
-    "whatsapp": {"width":1080,"height":1080}
+    "whatsapp": {"width": 1080, "height": 1080},
+    "facebook": {"width": 1200, "height": 628},
+    "instagram": {"width": 1080, "height": 1080},
+    "linkedin": {"width": 1200, "height": 627},
+    "youtube": {"width": 1280, "height": 720},
+    "quora": {"width": 1200, "height": 675},
+    "email": {"width": 1200, "height": 600},
 }
+
+RECORDINGS_DIR = "/app/recordings"
+
+
 @app.get("/health")
-def health(): return {"status":"ok","service":"paperclip-transformer","specs":list(SPECS.keys()),"languages":["hi","ta","te","ml","kn","mr","gu","bn","pa","or","as","en"]}
+def health():
+    return {"status": "ok", "service": "paperclip-transformer", "specs": list(SPECS.keys())}
+
+
+# Real per-channel resize for image assets. Takes the *source* asset's
+# s3_key (a real path on the `recordings` volume this container shares with
+# `api`) plus which channel to target, resizes it for real with Pillow, and
+# writes a real file - no fabricated path, no fake "status": "transformed"
+# for work that never happened. Anything that isn't an image (video, PDF,
+# spreadsheet) is honestly reported as skipped: resizing those needs a
+# meaningfully different pipeline (ffmpeg for video, a renderer for
+# PDF/doc), which isn't part of this pass - the caller (POST
+# /content/:assetId/transform in api/src/server.js) leaves the variant row
+# it already created untouched when this happens, rather than pretending a
+# file exists that doesn't.
 @app.post("/transform")
 async def transform(payload: dict):
+    variant_id = payload.get("variant_id")
     asset_id = payload.get("asset_id")
-    variants = payload.get("variants",[])
-    results=[]
-    for v in variants:
-        ch=v.get("channel")
-        results.append({"channel":ch,"spec":SPECS.get(ch,{}),"output":f"/app/recordings/{asset_id}_{ch}_{uuid.uuid4().hex[:8]}.jpg","status":"transformed","checks":["virus_scan_clean","mime_valid"]})
-    return {"asset_id":asset_id,"transformed":len(results),"variants":results}
-@app.post("/transform-image")
-async def transform_image(file: UploadFile = File(...), channel: str = "instagram-feed"):
-    contents = await file.read()
-    temp_path = f"/tmp/{uuid.uuid4().hex}.jpg"
-    with open(temp_path,"wb") as f: f.write(contents)
+    channel = payload.get("channel")
+    s3_key = payload.get("s3_key")
+    mime_type = payload.get("mime_type") or ""
+
+    spec = SPECS.get(channel)
+    if not spec:
+        return {"variant_id": variant_id, "channel": channel, "status": "skipped", "reason": f"no spec for channel '{channel}'"}
+
+    if not mime_type.startswith("image/"):
+        return {"variant_id": variant_id, "channel": channel, "status": "skipped", "reason": f"'{mime_type}' is not an image - per-channel resize for video/PDF/spreadsheet sources isn't implemented yet"}
+
+    if not s3_key or not os.path.exists(s3_key):
+        return {"variant_id": variant_id, "channel": channel, "status": "skipped", "reason": "source file not found on the recordings volume"}
+
     try:
-        img=Image.open(temp_path)
-        if channel=="youtube": resized=img.resize((1920,1080))
-        elif channel=="shorts": resized=img.resize((1080,1920))
-        elif channel=="instagram-feed": resized=img.resize((1080,1080))
-        else: resized=img.resize((1080,1080))
-        out_path=f"/app/recordings/{uuid.uuid4().hex}_{channel}.jpg"
-        os.makedirs("/app/recordings",exist_ok=True)
-        resized.save(out_path)
-        return {"channel":channel,"output":out_path,"original":img.size,"transformed":resized.size,"status":"ok"}
-    finally:
-        os.path.exists(temp_path) and os.remove(temp_path)
+        os.makedirs(RECORDINGS_DIR, exist_ok=True)
+        with Image.open(s3_key) as img:
+            img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+            resized = img.resize((spec["width"], spec["height"]))
+            out_path = f"{RECORDINGS_DIR}/{asset_id}_{channel}_{uuid.uuid4().hex[:8]}.jpg"
+            resized.save(out_path, "JPEG", quality=90)
+        return {
+            "variant_id": variant_id,
+            "channel": channel,
+            "status": "transformed",
+            "output": out_path,
+            "width": spec["width"],
+            "height": spec["height"],
+        }
+    except Exception as e:
+        return {"variant_id": variant_id, "channel": channel, "status": "skipped", "reason": f"resize failed: {e}"}

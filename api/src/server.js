@@ -333,12 +333,22 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => cb(null, `${Date.now()}-${uuidv4()}-${file.originalname.replace(/[^a-zA-Z0-9.-]/g,'_')}`)
 });
+const CONTENT_UPLOAD_MIME_TYPES = ['image/jpeg','image/png','image/webp','video/mp4','video/quicktime','application/pdf','text/csv','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
 const upload = multer({
   storage,
   limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max for content
+  // The client-reported MIME type isn't trustworthy on its own (it's
+  // whatever the browser/OS claimed, not a real inspection of the bytes) -
+  // this is just a fast reject for obviously-wrong types before the file
+  // even finishes uploading. ClamAV (scanFile, right after this) is what
+  // actually inspects the file's content and blocks malware regardless of
+  // what MIME type it claims to be. This filter previously accepted every
+  // type unconditionally ("Allow all for MVP"), making the allowlist dead
+  // code - now it's actually enforced.
   fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg','image/png','image/webp','video/mp4','video/quicktime','application/pdf','text/csv','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    // Allow all for MVP but check MIME via magic later via Paperclip/ClamAV
+    if (!CONTENT_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error(`Unsupported file type: ${file.mimetype}`));
+    }
     cb(null, true);
   }
 });
@@ -1431,15 +1441,7 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
 
     await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
-    // Push to transformer queue - Hermes + Paperclip
-    // NOTE: this is a single shared key, not per-tenant (tenant_id travels
-    // in the payload instead) — Redis BRPOP takes exact key names, not
-    // wildcards, so a per-tenant key here would mean the consumers below
-    // could never actually block on "all tenants' queues" the way a
-    // `transformer:queue:*` pattern implies but does not do.
-    await redisClient.lPush('transformer:queue', JSON.stringify({ asset_id: rows[0].id, tenant_id: req.user.tenant_id, channels: req.body.channels || ['instagram','facebook','youtube'], requested_by: req.user.id }));
-
-    res.json({ asset: rows[0], message: 'Uploaded, queued for Paperclip transform per channel spec' });
+    res.json({ asset: rows[0], message: 'Uploaded. Call POST /content/:assetId/transform (or Products > Content > Generate Variants) to create per-channel variants.' });
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
@@ -1478,10 +1480,34 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
       return out;
     });
 
-    // Call Paperclip transformer service
-    try {
-      await fetch(`http://${process.env.PAPERCLIP_SERVICE || 'paperclip-transformer:8000'}/transform`, { method: 'POST', body: JSON.stringify({ asset_id: assetId, variants }), headers: { 'Content-Type': 'application/json' } });
-    } catch(e){ console.log('Paperclip call failed, queued via Redis', e.message); }
+    // Real, synchronous, per-channel resize via Paperclip - it has the
+    // source file on the same shared `recordings` volume (by s3_key), so
+    // this is one same-network HTTP round trip per variant, not a heavy
+    // background job. Only image assets get a real resized output;
+    // anything else (video/PDF/spreadsheet) comes back "skipped" honestly
+    // rather than a made-up success. Either way the variant row itself was
+    // already created above and stays PENDING_APPROVAL either way - this
+    // just fills in the real rendered file when one could be produced.
+    for (const v of variants) {
+      try {
+        const resp = await fetch(`http://${process.env.PAPERCLIP_SERVICE || 'paperclip-transformer:8000'}/transform`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variant_id: v.id, asset_id: assetId, s3_key: asset.rows[0].s3_key, channel: v.channel, mime_type: asset.rows[0].mime_type })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.status === 'transformed' && data.output) {
+          await withTenantClient(req.user.tenant_id, (client) =>
+            client.query('UPDATE content_variants SET s3_key=$1 WHERE id=$2 AND tenant_id=$3', [data.output, v.id, req.user.tenant_id])
+          );
+          v.s3_key = data.output;
+        } else {
+          console.log(`[transform] variant ${v.id} (${v.channel}): ${data.status || 'no response'}${data.reason ? ' - ' + data.reason : ''}`);
+        }
+      } catch (e) {
+        console.log(`[transform] Paperclip unreachable for variant ${v.id}: ${e.message}`);
+      }
+    }
 
     await auditLog(req.user.tenant_id, req.user.id, 'TRANSFORM_CONTENT', 'content_asset', assetId, req, 'SUCCESS', { channels, variants: variants.length });
 
@@ -1768,6 +1794,29 @@ app.get('/public/content-assets/:token/file', async (req, res) => {
     res.setHeader('Content-Type', mime_type || 'application/octet-stream');
     fs.createReadStream(file_path).pipe(res);
   } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Global error handler - without this, an error passed to next(err) (or
+// thrown synchronously inside a route/middleware before its own try/catch,
+// e.g. multer's fileFilter rejecting an upload, or a bad JSON body) fell
+// through to Express's default handler: an HTML response, not the JSON
+// every other error path in this API returns, with a 500 regardless of
+// what actually went wrong. Must be registered last, with all 4 args (that
+// arity is what tells Express this is an error handler, not a normal
+// middleware).
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File too large' : err.message;
+    return res.status(400).json({ error: message });
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+  if (err && err.message && err.message.startsWith('Unsupported file type')) {
+    return res.status(400).json({ error: err.message });
+  }
+  console.error('Unhandled error:', err);
+  res.status(err && err.status ? err.status : 500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));

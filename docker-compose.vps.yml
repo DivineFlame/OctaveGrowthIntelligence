@@ -112,8 +112,8 @@ services:
     # --bind 127.0.0.1 was the actual cause of the api container's endless
     # "Redis error ECONNREFUSED 172.30.0.2:6379" loop: binding to loopback
     # restricts redis-server to connections from *inside its own container*,
-    # so every other service reaching it over the docker network (api, hermes,
-    # transformer-worker) as redis:6379 was refused at the TCP level, not just
+    # so every other service reaching it over the docker network (api, hermes)
+    # as redis:6379 was refused at the TCP level, not just
     # denied by auth. redis has no `ports:` entry at all (confirmed above) -
     # it was never reachable from the host or internet either way, so binding
     # to loopback added no real security and just broke internal connectivity.
@@ -262,29 +262,18 @@ services:
   # /leads/upload-csv in api/src/server.js - the csv-handler/ directory
   # itself has been deleted (see docker-compose.dokploy.yml for the same
   # note, and the README's production audit section).
-  transformer-worker:
-    build:
-      context: ./transformer
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    networks: [backend]
-    user: "1001:1001"
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    environment:
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on:
-      redis: { condition: service_healthy }
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256m
+  # transformer-worker service removed: it only ever consumed
+  # `transformer:queue`, racing hermes-orchestrator's own (also removed)
+  # consumer of the same Redis list for the same jobs - which container
+  # actually handled a given upload was non-deterministic, and what it
+  # called (Paperclip's old /transform) just fabricated a file path that
+  # was never written. Real per-channel transformation now happens
+  # synchronously inside POST /content/:assetId/transform (api/src/server.js
+  # calls Paperclip directly and persists the real resized output) - nothing
+  # pushes to `transformer:queue` any more, so there was nothing left for
+  # this service to do. The transformer/ directory has been deleted (same
+  # treatment as csv-handler/ above, for the same reason: a service left
+  # running with nothing real to do).
   frontend:
     build:
       context: ./frontend

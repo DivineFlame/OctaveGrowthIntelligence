@@ -11,7 +11,28 @@ async function runAgent(type, payload) {
     return { transformed: true };
   }
   if (type==='compliance') return { compliant: true };
-  if (type==='publisher') { console.log(`Publishing variant ${payload.variant_id}`); return { published: true, url: `https://youtube.com/watch?v=${payload.variant_id}` }; }
+  if (type==='publisher') {
+    // Calls api's internal publish route (server-to-server, shared-secret
+    // auth - see internalMiddleware in api/src/server.js), which actually
+    // posts through the configured channel integration
+    // (api/src/channels.js) instead of faking success with a fabricated
+    // YouTube URL. payload is { variant_id, tenant_id } - pushed by
+    // POST /content/variants/:variantId/approve when a variant is approved.
+    try {
+      const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/content-variants/${payload.variant_id}/publish`, {
+        method: 'POST',
+        headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: payload.tenant_id })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { console.log(`[Hermes] publisher ${payload.variant_id}: HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { published: false, variant_id: payload.variant_id, error: data.error }; }
+      console.log(`[Hermes] publisher ${payload.variant_id}: published to ${data.channel}${data.external_url ? ' - ' + data.external_url : ''}`);
+      return { published: true, variant_id: payload.variant_id, url: data.external_url };
+    } catch(e) {
+      console.log(`[Hermes] publisher ${payload.variant_id}: could not reach api (${e.message})`);
+      return { published: false, variant_id: payload.variant_id, error: e.message };
+    }
+  }
   if (type==='lead_intake') {
     // The webhook route (api/src/server.js: /webhooks/:tenantId/:webhookSecret/:channel)
     // already validates the tenant, dedupes, and INSERTs the lead synchronously
@@ -23,7 +44,8 @@ async function runAgent(type, payload) {
     try {
       const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/leads/${payload.lead_id}/auto-run-agent`, {
         method: 'POST',
-        headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '' }
+        headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: payload.tenant_id })
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { console.log(`[Hermes] lead_intake ${payload.lead_id}: auto-run-agent HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { enriched: false, lead_id: payload.lead_id }; }

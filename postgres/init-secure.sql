@@ -20,7 +20,7 @@ ALTER TABLE content_assets ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_assets ON content_assets;
 CREATE POLICY tenant_isolation_assets ON content_assets USING (tenant_id = current_setting('app.tenant_id')::UUID);
 ALTER TABLE content_assets FORCE ROW LEVEL SECURITY;
-CREATE TABLE IF NOT EXISTS content_variants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), asset_id UUID REFERENCES content_assets(id) ON DELETE CASCADE, tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, channel VARCHAR(30), spec VARCHAR(100), s3_key TEXT, title VARCHAR(200), status VARCHAR(20) DEFAULT 'DRAFT', approved_by UUID REFERENCES users(id), published_url TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS content_variants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), asset_id UUID REFERENCES content_assets(id) ON DELETE CASCADE, tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, channel VARCHAR(30), spec VARCHAR(100), s3_key TEXT, title VARCHAR(200), status VARCHAR(20) DEFAULT 'DRAFT', approved_by UUID REFERENCES users(id), published_url TEXT, published_at TIMESTAMPTZ, publish_error TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 ALTER TABLE content_variants ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_variants ON content_variants;
 CREATE POLICY tenant_isolation_variants ON content_variants USING (tenant_id = current_setting('app.tenant_id')::UUID);
@@ -51,6 +51,14 @@ CREATE INDEX IF NOT EXISTS idx_product_members_user ON product_members(user_id);
 -- Per-product social channel configuration, managed by that product's Admin.
 CREATE TABLE IF NOT EXISTS product_channels (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, channel VARCHAR(30) NOT NULL, config JSONB DEFAULT '{}', status VARCHAR(20) DEFAULT 'not_configured', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, channel));
 
+-- Ties an uploaded asset to the Product it belongs to, so publishing one of
+-- its variants can look up that product's product_channels config
+-- (credentials) for the variant's channel. Added here (not at
+-- content_assets' own CREATE TABLE above) because `products` doesn't exist
+-- yet at that point in this file.
+ALTER TABLE content_assets ADD COLUMN IF NOT EXISTS product_id UUID REFERENCES products(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_content_assets_product ON content_assets(product_id);
+
 -- Platform-level (Super Admin only, not tenant-scoped) LLM provider
 -- connections. api_key_encrypted is application-layer AES-256-GCM
 -- ciphertext (see encryptSecret()/decryptSecret() in api/src/server.js) -
@@ -79,6 +87,20 @@ CREATE TABLE IF NOT EXISTS product_agents (id UUID PRIMARY KEY DEFAULT uuid_gene
 -- call's input/output, not a fabricated status. trigger_type is 'manual' or
 -- 'auto_lead_intake'; triggered_by is NULL for automatic runs.
 CREATE TABLE IF NOT EXISTS agent_runs (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, product_id UUID REFERENCES products(id) ON DELETE CASCADE, agent_id UUID REFERENCES agents(id), lead_id UUID REFERENCES leads(id), triggered_by UUID REFERENCES users(id), trigger_type VARCHAR(20) NOT NULL DEFAULT 'manual', input_text TEXT, output_text TEXT, status VARCHAR(20) NOT NULL, error TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
+
+-- Short-lived, single-purpose public file tokens: lets one specific asset
+-- be fetched at a public URL for a few minutes, for the one real use case
+-- that needs it (Instagram's Graph API requires a publicly-reachable
+-- image_url - it has no direct-upload option, unlike Facebook). Not the
+-- content_assets table itself (which is FORCE ROW LEVEL SECURITY'd and
+-- tenant-scoped) - a deliberately narrow, ungrantable-by-default token
+-- containing only what a public GET needs to serve one file: no tenant
+-- data, no RLS bypass required. Created by POST
+-- /internal/content-variants/:variantId/publish right before it needs one,
+-- expires quickly, and is deleted after being served once.
+CREATE TABLE IF NOT EXISTS public_file_tokens (token UUID PRIMARY KEY DEFAULT uuid_generate_v4(), file_path TEXT NOT NULL, mime_type TEXT, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE INDEX IF NOT EXISTS idx_public_file_tokens_expires ON public_file_tokens(expires_at);
+
 ALTER TABLE agent_runs ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_agent_runs ON agent_runs;
 CREATE POLICY tenant_isolation_agent_runs ON agent_runs USING (tenant_id = current_setting('app.tenant_id')::UUID);

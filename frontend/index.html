@@ -656,25 +656,66 @@ Error generating stack: `+u.message+`
           el.innerHTML = 'Loading&hellip;';
           try {
             var channels = await api(session, '/products/' + productId + '/channels');
+            var spec = await api(session, '/channels/spec');
             var configured = {};
-            channels.forEach(function(c){ configured[c.channel] = c.status; });
-            var all = ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'];
-            var rows = all.map(function(ch){ return '<tr><td>' + ch + '</td><td>' + (configured[ch] || 'not_configured') + '</td></tr>'; }).join('');
+            channels.forEach(function(c){ configured[c.channel] = c; });
+            var all = Object.keys(spec);
+            var rows = all.map(function(ch){
+              var st = configured[ch] ? configured[ch].status : 'not_configured';
+              var label = (spec[ch] && spec[ch].label) || ch;
+              return '<tr><td>' + label + '</td><td>' + st + '</td></tr>';
+            }).join('');
+
+            function renderFields(ch){
+              var s = spec[ch];
+              if (!s) return '';
+              if (!s.implemented) {
+                return '<div class="oc-msg oc-full">' + (s.help || 'Not implemented yet.') + '</div>';
+              }
+              var existing = (configured[ch] && configured[ch].config) || {};
+              return (s.help ? '<div class="oc-msg oc-full" style="opacity:.75">' + s.help + '</div>' : '') +
+                s.fields.map(function(f){
+                  var val = existing[f.key] || '';
+                  var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+                  return '<label class="oc-full">' + f.label + (f.required ? ' *' : '') + '</label>' +
+                    '<input class="oc-full" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
+                    (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
+                }).join('');
+            }
+
             el.innerHTML =
               '<table><tr><th>Channel</th><th>Status</th></tr>' + rows + '</table>' +
               '<form id="oc-config-channel">' +
                 '<label class="oc-full">Configure a Channel</label>' +
-                '<select name="channel">' + all.map(function(ch){ return '<option value="' + ch + '">' + ch + '</option>'; }).join('') + '</select>' +
-                '<input name="note" placeholder="Note (no real platform integration yet)" class="oc-full">' +
+                '<select name="channel" class="oc-full" id="oc-channel-select">' + all.map(function(ch){ return '<option value="' + ch + '">' + ((spec[ch] && spec[ch].label) || ch) + '</option>'; }).join('') + '</select>' +
+                '<div id="oc-channel-fields">' + renderFields(all[0]) + '</div>' +
                 '<button class="oc-submit" type="submit">Save</button>' +
                 '<div class="oc-msg oc-full" id="oc-channel-msg"></div>' +
               '</form>';
+
+            document.getElementById('oc-channel-select').addEventListener('change', function(ev){
+              document.getElementById('oc-channel-fields').innerHTML = renderFields(ev.target.value);
+            });
+
             document.getElementById('oc-config-channel').addEventListener('submit', async function(ev){
               ev.preventDefault();
               var msg = document.getElementById('oc-channel-msg');
               var fd = new FormData(ev.target);
+              var ch = fd.get('channel');
+              var s = spec[ch];
+              var config = {};
+              if (s && s.implemented) {
+                s.fields.forEach(function(f){
+                  var v = fd.get(f.key);
+                  // Leave an unchanged secret alone (its value renders as
+                  // the masked placeholder in real config from the API,
+                  // never as real input text) rather than overwriting a
+                  // saved token with the literal mask string.
+                  if (v !== null && v !== '') config[f.key] = v;
+                });
+              }
               try {
-                await api(session, '/products/' + productId + '/channels', { method: 'POST', body: { channel: fd.get('channel'), config: { note: fd.get('note') } } });
+                await api(session, '/products/' + productId + '/channels', { method: 'POST', body: { channel: ch, config: config } });
                 msg.className = 'oc-msg oc-ok'; msg.textContent = 'Saved.';
                 loadChannels();
               } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }

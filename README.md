@@ -11,6 +11,35 @@
 
 Fixed: docker-compose builds from ./api, ./hermes, ./paperclip, ./transformer locally, no external registry. Real source code included.
 
+> **Migrations now apply automatically.** The `api` container runs
+> `postgres/migrate-*.sql` against `DATABASE_URL` on every start, before it
+> begins serving traffic (see `api/src/migrate.js` and the `api` service's
+> `command:` in `docker-compose.vps.yml`) - a `git pull` + redeploy is
+> enough, no manual `docker exec ... psql` step required. The migration
+> mentions below predate that and are kept for reference / manual runs
+> against a database this container isn't managing.
+>
+> **Backups now run automatically too**, via the `postgres-backup` sidecar
+> container (`postgres/backup/`) - daily `pg_dump`, 7-day local retention by
+> default. `scripts/backup-vps.sh` still works for an on-demand backup, and
+> `scripts/restore-vps.sh` restores either kind.
+
+> **Channel publishing is now real**, for Email, WhatsApp Business,
+> Facebook, Instagram, and LinkedIn (see `api/src/channels.js`) - YouTube
+> and Quora remain documented placeholders (YouTube needs a meaningfully
+> different upload protocol; Quora has no public posting API at all).
+> Configure credentials per-channel from Products > Channels in the
+> frontend (fields are channel-specific - WhatsApp needs a phone number ID
+> + access token, Email needs SMTP details, etc; secrets are encrypted at
+> rest and masked in every API response). Content only publishes through a
+> real channel if the asset was uploaded with a `product_id` (`POST
+> /content/upload`) - the built-in content-upload widget doesn't send this
+> yet (it's a separate, prebuilt/minified script this repo has no source
+> for), so associating an asset with a product currently requires calling
+> the API directly. Instagram specifically requires `APP_DOMAIN` or
+> `API_DOMAIN` to be a real public domain, since its API has no direct file
+> upload and must fetch the image itself.
+
 ## First login
 
 There's no general signup — every user after the first is created by a

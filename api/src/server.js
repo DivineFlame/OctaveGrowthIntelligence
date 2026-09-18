@@ -17,6 +17,7 @@ const NodeClam = require('clamscan');
 const { rateLimit } = require('express-rate-limit');
 const { authenticator } = require('otplib');
 const QRCode = require('qrcode');
+const channelsLib = require('./channels');
 require('dotenv').config({ path: '../.env.production' });
 
 const app = express();
@@ -33,6 +34,29 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgres://${process.env.POSTGRES_USER}:${process.env.POSTGRES_PASSWORD}@postgres:5432/${process.env.POSTGRES_DB}`,
   ssl: false
 });
+
+// pool.query() picks an arbitrary connection out of the pool for every call,
+// so a session-scoped `set_config('app.tenant_id', ...)` on one pool.query()
+// and the RLS-protected query it's meant to scope on a *different*
+// pool.query() call can silently land on two different physical
+// connections under concurrent load - the tenant context would then not be
+// set on the connection actually running the query. FORCE ROW LEVEL
+// SECURITY (see postgres/migrate-force-rls.sql) makes that fail closed
+// (0 rows / a spurious error) rather than leak another tenant's data, but
+// it's still a bug. withTenantClient() checks out one dedicated client,
+// sets the tenant context on it, and runs every RLS-scoped query for this
+// operation on that same client, then releases it - use this (not `pool`
+// directly) for any query touching leads / content_assets /
+// content_variants / agent_runs.
+async function withTenantClient(tenantId, fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT set_config($1,$2,false)', ['app.tenant_id', tenantId]);
+    return await fn(client);
+  } finally {
+    client.release();
+  }
+}
 
 // Redis
 const redisClient = redis.createClient({ url: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD}@redis:6379` });
@@ -213,11 +237,14 @@ async function runAgentForProduct({ tenantId, productId, agentId, leadId, trigge
     errorMsg = e.message;
   }
 
-  const { rows } = await pool.query(
-    `INSERT INTO agent_runs (tenant_id, product_id, agent_id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-    [tenantId, productId, agentId, leadId || null, triggeredBy || null, triggerType, inputText, outputText, status, errorMsg]
-  );
+  const rows = await withTenantClient(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO agent_runs (tenant_id, product_id, agent_id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [tenantId, productId, agentId, leadId || null, triggeredBy || null, triggerType, inputText, outputText, status, errorMsg]
+    );
+    return rows;
+  });
   return rows[0];
 }
 
@@ -334,6 +361,39 @@ async function auditLog(tenant_id, user_id, action, resource_type, resource_id, 
   } catch(e){ console.error('Audit log failed', e.message); }
 }
 
+// Per-role data-visibility flags (roles.can_view_revenue / max_history_days /
+// can_view_integrations / can_approve_content, copied onto each user row at
+// creation/role-change time - see POST /users, PATCH /users/:userId/role).
+// These were being stored but never read back anywhere: every route only
+// checked req.user.role against a hardcoded list, so the per-role limits
+// the roles table defines had no actual effect. Baking them into the JWT
+// (rather than a DB lookup on every request) makes them available as
+// req.user.can_view_revenue etc. wherever authMiddleware runs.
+function userClaims(user) {
+  return {
+    id: user.id,
+    tenant_id: user.tenant_id,
+    role: user.role,
+    email: user.email,
+    max_history_days: user.max_history_days ?? null,
+    can_view_revenue: !!user.can_view_revenue,
+    can_view_integrations: !!user.can_view_integrations,
+    can_approve_content: !!user.can_approve_content
+  };
+}
+
+// True if the caller's role is in `roles`, OR (when `flag` is given) their
+// per-role flag from the roles table is set - lets a role the hardcoded
+// list doesn't name still qualify if a tenant admin has granted it the
+// flag via PATCH /users/:userId/role, without loosening anyone else.
+function roleOrFlag(roles, flag) {
+  return (req, res, next) => {
+    if (roles.includes(req.user.role) || (flag && req.user[flag])) return next();
+    auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
+    return res.status(403).json({ error: 'Forbidden - role not allowed' });
+  };
+}
+
 // Auth middleware - JWT + tenant + role
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization;
@@ -342,8 +402,6 @@ function authMiddleware(req, res, next) {
     const token = auth.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret-change-me');
     req.user = decoded;
-    // Set tenant for RLS
-    pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', decoded.tenant_id]).catch(()=>{});
     next();
   } catch(e){
     return res.status(401).json({ error: 'Invalid token' });
@@ -359,6 +417,76 @@ function rbacMiddleware(allowedRoles) {
     next();
   };
 }
+
+// Request-body schema validation. Most routes already do ad-hoc "is this
+// field present" checks inline - those catch missing fields but not wrong
+// types, oversized strings, or extra/unexpected fields. This adds that
+// second, structural layer for the routes that accept free-form admin
+// input; req.body is replaced with the parsed (trimmed/typed) result so
+// handlers can trust its shape.
+function validate(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: result.error.issues.map(i => ({ path: i.path.join('.') || '(body)', message: i.message }))
+      });
+    }
+    req.body = result.data;
+    next();
+  };
+}
+
+const schemas = {
+  createTenant: z.object({
+    name: z.string().trim().min(1).max(200),
+    subdomain: z.string().trim().toLowerCase().min(1).max(63).regex(/^[a-z0-9-]+$/, 'subdomain may only contain lowercase letters, digits and hyphens'),
+    plan: z.enum(['standard', 'premium'])
+  }),
+  createUser: z.object({
+    email: z.string().trim().toLowerCase().email().max(255),
+    password: z.string().min(12).max(200),
+    role: z.string().trim().min(1).max(50),
+    tenant_id: z.string().uuid().optional()
+  }),
+  createProduct: z.object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().max(2000).optional().nullable()
+  }),
+  addProductMember: z.object({
+    user_id: z.string().uuid(),
+    role: z.enum(['ADMIN', 'MEMBER']).optional()
+  }),
+  configureChannel: z.object({
+    channel: z.string().trim().min(1).max(30),
+    config: z.record(z.any()).optional()
+  }),
+  createLlmConnection: z.object({
+    name: z.string().trim().min(1).max(100),
+    provider: z.string().trim().min(1).max(30),
+    api_key: z.string().min(1).max(2000),
+    base_url: z.string().trim().url().max(500).optional()
+  }),
+  createAgent: z.object({
+    name: z.string().trim().min(1).max(100),
+    llm_connection_id: z.string().uuid(),
+    model: z.string().trim().max(100).optional().nullable(),
+    system_prompt: z.string().max(20000).optional().nullable(),
+    config: z.record(z.any()).optional()
+  }),
+  updateAgent: z.object({
+    name: z.string().trim().min(1).max(100).optional(),
+    model: z.string().trim().max(100).optional().nullable(),
+    system_prompt: z.string().max(20000).optional().nullable(),
+    config: z.record(z.any()).optional(),
+    active: z.boolean().optional()
+  }),
+  approveVariant: z.object({
+    action: z.enum(['APPROVE', 'REJECT', 'REQUEST_CHANGE']),
+    comment: z.string().trim().max(2000).optional()
+  })
+};
 
 // Routes
 
@@ -401,10 +529,11 @@ app.post('/auth/login', authLimiter, async (req, res) => {
         return res.status(401).json({ error: 'Invalid 2FA code' });
       }
     }
-    const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    const claims = userClaims(user);
+    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
     const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
     await auditLog(user.tenant_id, user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
-    res.json({ token, refresh, user: { id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email } });
+    res.json({ token, refresh, user: claims });
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 });
 
@@ -459,7 +588,8 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
     const password_hash = await bcrypt.hash(password, 12);
     const userRows = await client.query(
       `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
-       VALUES ($1,$2,$3,'SUPER_ADMIN',$4,$5,$6,$7) RETURNING id, tenant_id, email, role`,
+       VALUES ($1,$2,$3,'SUPER_ADMIN',$4,$5,$6,$7)
+       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content`,
       [tenantId, email, password_hash, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
     );
     const user = userRows.rows[0];
@@ -471,9 +601,10 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
-    const token = jwt.sign({ id: user.id, tenant_id: tenantId, role: 'SUPER_ADMIN', email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    const claims = userClaims(user);
+    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
     const refresh = jwt.sign({ id: user.id, type: 'refresh' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
-    res.json({ token, refresh, user: { id: user.id, tenant_id: tenantId, role: 'SUPER_ADMIN', email } });
+    res.json({ token, refresh, user: claims });
   } catch(e) {
     await client.query('ROLLBACK');
     if (e.code === '23505') return res.status(409).json({ error: 'That email or company name is already taken' });
@@ -496,8 +627,9 @@ app.post('/auth/refresh', authLimiter, async (req, res) => {
     const { rows } = await pool.query('SELECT * FROM users WHERE id=$1', [decoded.id]);
     if (!rows.length) return res.status(401).json({ error: 'User no longer exists' });
     const user = rows[0];
-    const token = jwt.sign({ id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
-    res.json({ token, user: { id: user.id, tenant_id: user.tenant_id, role: user.role, email: user.email } });
+    const claims = userClaims(user);
+    const token = jwt.sign(claims, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '15m' });
+    res.json({ token, user: claims });
   } catch(e){ return res.status(401).json({ error: 'Invalid or expired refresh token' }); }
 });
 
@@ -565,7 +697,7 @@ app.get('/auth/2fa/status', authMiddleware, async (req, res) => {
 const TENANT_PUBLIC_COLUMNS = 'id, name, subdomain, plan, is_premium, created_at';
 
 // Tenants - Create (Super Admin only)
-app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.createTenant), async (req, res) => {
   const { name, subdomain, plan } = req.body;
   try {
     const webhookSecret = crypto.randomBytes(24).toString('hex');
@@ -618,7 +750,7 @@ app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req
 // Users - Create within a tenant, role drives permissions (single source of truth: roles table)
 // Super Admin may pass tenant_id to seed the first user of a tenant they just created —
 // everyone else is locked to their own tenant regardless of what they send.
-app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(schemas.createUser), async (req, res) => {
   const { email, password, role, tenant_id } = req.body;
   if (!email || !password || !role) return res.status(400).json({ error: 'email, password and role are required' });
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
@@ -731,7 +863,7 @@ async function canAdminProduct(req, productId) {
 // 'not_configured', in the same transaction, so a product's full channel
 // set exists from the moment it's created rather than materializing rows
 // lazily the first time each one is individually configured.
-app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES), async (req, res) => {
+app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   const client = await pool.connect();
@@ -799,7 +931,7 @@ app.get('/products/:id/members', authMiddleware, async (req, res) => {
 
 // Product members - add/assign (Tenant Admin, to assign the first Product
 // Admin; or that product's existing Admin, to add MEMBER users)
-app.post('/products/:id/members', authMiddleware, async (req, res) => {
+app.post('/products/:id/members', authMiddleware, validate(schemas.addProductMember), async (req, res) => {
   const { user_id, role } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
   const memberRole = role === 'ADMIN' ? 'ADMIN' : 'MEMBER';
@@ -832,6 +964,18 @@ app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => 
 
 // Product channels - config storage only (no real per-platform posting yet -
 // see README). Product Admin (or Tenant Admin) manages these.
+// Field definitions (no values) for every channel's config - the frontend
+// uses this to render the right credential form per channel instead of a
+// hardcoded free-text box. See api/src/channels.js for the real
+// implementations and exactly what each field is used for.
+app.get('/channels/spec', authMiddleware, (req, res) => {
+  const spec = {};
+  for (const [key, def] of Object.entries(channelsLib.CHANNEL_SPECS)) {
+    spec[key] = { label: def.label, implemented: def.implemented, help: def.help, fields: def.fields.map(f => ({ key: f.key, label: f.label, required: f.required, secret: !!f.secret, default: f.default || '' })) };
+  }
+  res.json(spec);
+});
+
 app.get('/products/:id/channels', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
@@ -839,30 +983,65 @@ app.get('/products/:id/channels', authMiddleware, async (req, res) => {
     const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
     if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query('SELECT channel, status, config, updated_at FROM product_channels WHERE product_id=$1', [req.params.id]);
-    res.json(rows);
+    // Secret fields (access tokens, SMTP passwords, ...) are encrypted at
+    // rest but were never masked in the API response before - the frontend
+    // just never happened to render them. Mask explicitly so a decrypted
+    // or plaintext secret can never end up in a browser/network log.
+    const masked = rows.map(r => Object.assign({}, r, { config: channelsLib.maskChannelSecrets(r.channel, r.config) }));
+    res.json(masked);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
-app.post('/products/:id/channels', authMiddleware, async (req, res) => {
+app.post('/products/:id/channels', authMiddleware, validate(schemas.configureChannel), async (req, res) => {
   const { channel, config } = req.body;
   if (!PRODUCT_CHANNELS.includes(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
     if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can configure channels" });
+
+    // The frontend leaves a secret field blank to mean "keep the value
+    // that's already saved" (it never round-trips the decrypted value, so
+    // it has nothing else to submit for an unchanged secret) - this
+    // endpoint has to merge on top of the existing row, not replace it
+    // wholesale, or saving just `page_id` again would silently wipe out a
+    // previously-saved access_token.
+    const existingRow = await pool.query('SELECT config FROM product_channels WHERE product_id=$1 AND channel=$2', [req.params.id, channel]);
+    const existingConfig = existingRow.rows.length ? (existingRow.rows[0].config || {}) : {};
+    const submitted = Object.fromEntries(Object.entries(config || {}).filter(([, v]) => v !== '' && v !== null && v !== undefined));
+
+    // Validate required-ness against the *effective* config (whatever's
+    // already stored, overlaid with what's submitted this time) - a
+    // required field satisfied by a previously-saved value shouldn't force
+    // the caller to resubmit it every time they tweak an unrelated field.
+    try {
+      channelsLib.validateChannelConfig(channel, Object.assign({}, existingConfig, submitted));
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    // Secret fields (access tokens, SMTP passwords) are encrypted with the
+    // same AES-256-GCM key as llm_connections.api_key_encrypted before
+    // they're ever written to product_channels.config - previously this
+    // JSONB column stored whatever was posted, in plaintext. Only the
+    // fields actually submitted this call get (re-)encrypted; everything
+    // else is carried over from existingConfig as-is (already encrypted).
+    const encryptedSubmitted = channelsLib.encryptChannelSecrets(channel, submitted, encryptSecret);
+    const mergedConfig = Object.assign({}, existingConfig, encryptedSubmitted);
+
     const { rows } = await pool.query(
       `INSERT INTO product_channels (product_id, channel, config, status, updated_at) VALUES ($1,$2,$3,'configured',NOW())
        ON CONFLICT (product_id, channel) DO UPDATE SET config=EXCLUDED.config, status='configured', updated_at=NOW() RETURNING *`,
-      [req.params.id, channel, JSON.stringify(config || {})]
+      [req.params.id, channel, JSON.stringify(mergedConfig)]
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
-    res.json(rows[0]);
+    res.json(Object.assign({}, rows[0], { config: channelsLib.maskChannelSecrets(channel, rows[0].config) }));
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
 // LLM connections - Super Admin only, platform-wide. api_key is encrypted at
 // rest (encryptSecret) and never returned once stored.
-app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.createLlmConnection), async (req, res) => {
   const { name, provider, api_key, base_url } = req.body;
   if (!name || !provider || !api_key) return res.status(400).json({ error: 'name, provider and api_key are required' });
   if (!LLM_PROVIDERS.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${LLM_PROVIDERS.join(', ')}` });
@@ -895,7 +1074,7 @@ app.delete('/llm-connections/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN'
 
 // Agents - Super Admin creates/edits; any authenticated user can list (so a
 // Product Admin can pick one to enable on their Premium product).
-app.post('/agents', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+app.post('/agents', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.createAgent), async (req, res) => {
   const { name, llm_connection_id, model, system_prompt, config } = req.body;
   if (!name || !llm_connection_id) return res.status(400).json({ error: 'name and llm_connection_id are required' });
   try {
@@ -917,7 +1096,7 @@ app.get('/agents', authMiddleware, async (req, res) => {
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
-app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
+app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.updateAgent), async (req, res) => {
   const { name, model, system_prompt, config, active } = req.body;
   try {
     const { rows } = await pool.query(
@@ -993,8 +1172,9 @@ app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) =
     let inputText = input || '';
     let leadId = null;
     if (lead_id) {
-      await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-      const lead = await pool.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [lead_id, req.user.tenant_id]);
+      const lead = await withTenantClient(req.user.tenant_id, (client) =>
+        client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [lead_id, req.user.tenant_id])
+      );
       if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
       const l = lead.rows[0];
       leadId = l.id;
@@ -1025,10 +1205,11 @@ app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) =
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
     const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
     if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-    const { rows } = await pool.query(
-      'SELECT id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error, created_at FROM agent_runs WHERE product_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 50',
-      [req.params.id, req.params.agentId]
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query(
+        'SELECT id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error, created_at FROM agent_runs WHERE product_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 50',
+        [req.params.id, req.params.agentId]
+      )
     );
     res.json(rows);
   } catch(e){ res.status(500).json({ error: e.message }); }
@@ -1043,11 +1224,14 @@ app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) =
 // configured with an enabled agent; anything more ambiguous is reported
 // back honestly instead of guessing.
 app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (req, res) => {
+  const { tenant_id } = req.body; // Hermes already has this on the queue payload that carried leadId here
+  if (!tenant_id) return res.status(400).json({ error: 'tenant_id is required' });
   try {
-    const { rows: leadRows } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.leadId]);
-    if (!leadRows.length) return res.status(404).json({ error: 'Lead not found' });
+    const { rows: leadRows } = await withTenantClient(tenant_id, (client) =>
+      client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.leadId, tenant_id])
+    );
+    if (!leadRows.length) return res.status(404).json({ error: 'Lead not found for that tenant' });
     const lead = leadRows[0];
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', lead.tenant_id]);
 
     const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [lead.tenant_id]);
     if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.json({ ran: false, reason: 'tenant is not on the Premium plan' });
@@ -1081,12 +1265,20 @@ app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (re
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
-// Leads - List (RLS enforced)
+// Leads - List (RLS enforced). Also enforces two per-role limits from the
+// roles table that were previously stored on every user row but never
+// actually read anywhere: max_history_days (how far back this role can see)
+// and can_view_revenue (whether value_inr is included at all).
 app.get('/leads', authMiddleware, async (req, res) => {
   try {
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-    const { rows } = await pool.query('SELECT * FROM leads WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100', [req.user.tenant_id]);
-    res.json(rows);
+    const days = req.user.max_history_days;
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      (Number.isFinite(days) && days > 0)
+        ? client.query(`SELECT * FROM leads WHERE tenant_id=$1 AND created_at >= NOW() - ($2 || ' days')::interval ORDER BY created_at DESC LIMIT 100`, [req.user.tenant_id, days])
+        : client.query('SELECT * FROM leads WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100', [req.user.tenant_id])
+    );
+    const out = req.user.can_view_revenue ? rows : rows.map(({ value_inr, ...rest }) => rest);
+    res.json(out);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
@@ -1136,14 +1328,16 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
       valid++;
     }
 
-    // Insert with RLS
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
+    // Insert with RLS - csv_uploads isn't RLS-protected but leads is, and
+    // both need to land on the same tenant-scoped connection as each other
+    // for consistency within this one upload.
     const uploadId = uuidv4();
-    await pool.query('INSERT INTO csv_uploads (id, tenant_id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [uploadId, req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
-
-    for (const row of toInsert.slice(0, 5000)) {
-      await pool.query('INSERT INTO leads (tenant_id, company_name, contact_name, phone, email, source_channel, status, csv_upload_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [req.user.tenant_id, row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'csv_upload', 'NEW', uploadId]);
-    }
+    await withTenantClient(req.user.tenant_id, async (client) => {
+      await client.query('INSERT INTO csv_uploads (id, tenant_id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [uploadId, req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
+      for (const row of toInsert.slice(0, 5000)) {
+        await client.query('INSERT INTO leads (tenant_id, company_name, contact_name, phone, email, source_channel, status, csv_upload_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [req.user.tenant_id, row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'csv_upload', 'NEW', uploadId]);
+      }
+    });
 
     await auditLog(req.user.tenant_id, req.user.id, 'IMPORT_CSV', 'csv_upload', uploadId, req, 'SUCCESS', { rows_total: records.length, valid, dup, invalid, file: req.file.originalname });
 
@@ -1159,6 +1353,17 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
 app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   try {
+    // Associating an asset with a Product is what lets it later be
+    // published through that product's configured channel credentials
+    // (see POST /internal/content-variants/:variantId/publish) - optional
+    // for backward compatibility, but publishing will fail with a clear
+    // error for an asset that was never associated with one.
+    let productId = null;
+    if (req.body.product_id) {
+      const prodCheck = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.body.product_id, req.user.tenant_id]);
+      if (!prodCheck.rows.length) return res.status(400).json({ error: 'product_id not found in your tenant' });
+      productId = req.body.product_id;
+    }
     let scan;
     try {
       scan = await scanFile(req.file.path);
@@ -1173,8 +1378,9 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     }
     const virusStatus = 'CLEAN';
 
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-    const { rows } = await pool.query('INSERT INTO content_assets (tenant_id, uploaded_by, file_name, file_size, mime_type, s3_key, virus_scan_status, brand_kit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *', [req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, req.file.mimetype, req.file.path, virusStatus, JSON.stringify(req.body.brand_kit || {})]);
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('INSERT INTO content_assets (tenant_id, uploaded_by, product_id, file_name, file_size, mime_type, s3_key, virus_scan_status, brand_kit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *', [req.user.tenant_id, req.user.id, productId, req.file.originalname, req.file.size, req.file.mimetype, req.file.path, virusStatus, JSON.stringify(req.body.brand_kit || {})])
+    );
 
     await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
@@ -1195,8 +1401,9 @@ app.post('/content/:assetId/transform', authMiddleware, async (req, res) => {
   const { assetId } = req.params;
   const { channels } = req.body; // ['youtube','shorts','instagram-feed','instagram-reels','facebook','linkedin','whatsapp']
   try {
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-    const asset = await pool.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [assetId, req.user.tenant_id]);
+    const asset = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [assetId, req.user.tenant_id])
+    );
     if (!asset.rows.length) return res.status(404).json({ error: 'Asset not found' });
 
     const specs = {
@@ -1209,11 +1416,14 @@ app.post('/content/:assetId/transform', authMiddleware, async (req, res) => {
       'whatsapp': '1:1 status 1080x1080'
     };
 
-    const variants = [];
-    for (const ch of (channels || ['youtube','instagram-feed'])) {
-      const { rows } = await pool.query('INSERT INTO content_variants (asset_id, tenant_id, channel, spec, title, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [assetId, req.user.tenant_id, ch, specs[ch] || 'auto', `${ch} variant for ${asset.rows[0].file_name}`, 'PENDING_APPROVAL']);
-      variants.push(rows[0]);
-    }
+    const variants = await withTenantClient(req.user.tenant_id, async (client) => {
+      const out = [];
+      for (const ch of (channels || ['youtube','instagram-feed'])) {
+        const { rows } = await client.query('INSERT INTO content_variants (asset_id, tenant_id, channel, spec, title, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [assetId, req.user.tenant_id, ch, specs[ch] || 'auto', `${ch} variant for ${asset.rows[0].file_name}`, 'PENDING_APPROVAL']);
+        out.push(rows[0]);
+      }
+      return out;
+    });
 
     // Call Paperclip transformer service
     try {
@@ -1227,17 +1437,20 @@ app.post('/content/:assetId/transform', authMiddleware, async (req, res) => {
 });
 
 // Content - Approval workflow (Super Admin / Approver only)
-app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(['SUPER_ADMIN','APPROVER','DEPT_ADMIN','IT_ADMIN']), async (req, res) => {
+app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SUPER_ADMIN','APPROVER','DEPT_ADMIN','IT_ADMIN'], 'can_approve_content'), validate(schemas.approveVariant), async (req, res) => {
   const { variantId } = req.params;
   const { action, comment } = req.body; // APPROVE, REJECT, REQUEST_CHANGE
   try {
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
-    const { rows } = await pool.query('SELECT * FROM content_variants WHERE id=$1 AND tenant_id=$2', [variantId, req.user.tenant_id]);
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('SELECT * FROM content_variants WHERE id=$1 AND tenant_id=$2', [variantId, req.user.tenant_id])
+    );
     if (!rows.length) return res.status(404).json({ error: 'Variant not found' });
 
-    const newStatus = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'DRAFT';
-    await pool.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
-    await pool.query('INSERT INTO approvals (tenant_id, variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5,$6)', [req.user.tenant_id, rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
+    const newStatus = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'DRAFT'; // REQUEST_CHANGE, now zod-enforced above
+    await withTenantClient(req.user.tenant_id, async (client) => {
+      await client.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
+      await client.query('INSERT INTO approvals (tenant_id, variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5,$6)', [req.user.tenant_id, rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
+    });
 
     if (newStatus === 'APPROVED') {
       // Push to publisher queue - Hermes Publisher Agent (shared key, see note above)
@@ -1248,6 +1461,97 @@ app.post('/content/variants/:variantId/approve', authMiddleware, rbacMiddleware(
 
     res.json({ variant_id: variantId, status: newStatus, message: `Content ${newStatus}, ${newStatus==='APPROVED' ? 'queued for publishing to channel' : ''}` });
   } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Internal, server-to-server only (see internalMiddleware) - Hermes calls
+// this after an approved content_variant lands on the `publisher:queue`
+// Redis list, to actually post it through the real channel integration
+// (api/src/channels.js) instead of just logging a fake "Publishing variant
+// X" and fabricating a YouTube URL. tenant_id comes from the caller, same
+// reasoning as /internal/leads/:leadId/auto-run-agent - content_variants is
+// FORCE ROW LEVEL SECURITY'd, so it can't be looked up by id alone with no
+// tenant context, and Hermes already has tenant_id on the queue payload
+// that carried variantId here.
+app.post('/internal/content-variants/:variantId/publish', internalMiddleware, async (req, res) => {
+  const { tenant_id } = req.body;
+  if (!tenant_id) return res.status(400).json({ error: 'tenant_id is required' });
+  const { variantId } = req.params;
+  try {
+    const { variant, asset } = await withTenantClient(tenant_id, async (client) => {
+      const v = await client.query('SELECT * FROM content_variants WHERE id=$1 AND tenant_id=$2', [variantId, tenant_id]);
+      if (!v.rows.length) return {};
+      const a = await client.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [v.rows[0].asset_id, tenant_id]);
+      return { variant: v.rows[0], asset: a.rows[0] };
+    });
+    if (!variant) return res.status(404).json({ error: 'Variant not found for that tenant' });
+    if (variant.status !== 'APPROVED') return res.status(400).json({ error: `Variant is ${variant.status}, not APPROVED - nothing to publish` });
+
+    async function fail(message) {
+      await withTenantClient(tenant_id, (client) =>
+        client.query(`UPDATE content_variants SET status='PUBLISH_FAILED', publish_error=$1 WHERE id=$2`, [message, variantId])
+      );
+      await auditLog(tenant_id, null, 'PUBLISH_CONTENT_FAILED', 'content_variant', variantId, req, 'FAILED', { channel: variant.channel, error: message });
+      return res.status(502).json({ published: false, error: message });
+    }
+
+    if (!asset || !asset.product_id) {
+      return await fail('Content is not associated with a Product, so no channel credentials can be found for it. Re-upload it via a Product (POST /content/upload with product_id) to enable publishing.');
+    }
+
+    const channelRow = await pool.query('SELECT config, status FROM product_channels WHERE product_id=$1 AND channel=$2', [asset.product_id, variant.channel]);
+    if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
+      return await fail(`Channel "${variant.channel}" is not configured on this product yet - configure it under Products > Channels first.`);
+    }
+
+    let config;
+    try {
+      config = channelsLib.decryptChannelSecrets(variant.channel, channelRow.rows[0].config, decryptSecret);
+    } catch (e) {
+      return await fail(`Could not decrypt channel credentials: ${e.message}`);
+    }
+
+    // Instagram needs the asset reachable at a public URL (see
+    // channels.js) - mint a short-lived, single-purpose token for it
+    // rather than exposing content_assets generally.
+    let publicFileUrl = null;
+    if (variant.channel === 'instagram') {
+      const domain = API_DOMAIN || APP_DOMAIN;
+      if (!domain) {
+        return await fail('Instagram requires APP_DOMAIN or API_DOMAIN to be set to a real, internet-reachable domain so the image can be fetched.');
+      }
+      const tok = await pool.query(
+        `INSERT INTO public_file_tokens (file_path, mime_type, expires_at) VALUES ($1,$2, NOW() + interval '15 minutes') RETURNING token`,
+        [asset.s3_key, asset.mime_type]
+      );
+      publicFileUrl = `https://${domain}/public/content-assets/${tok.rows[0].token}/file`;
+    }
+
+    let result;
+    try {
+      result = await channelsLib.publishToChannel(variant.channel, {
+        config,
+        title: variant.title,
+        text: variant.title,
+        filePath: asset.s3_key,
+        fileName: asset.file_name,
+        mimeType: asset.mime_type,
+        publicFileUrl,
+        to: req.body.to
+      });
+    } catch (e) {
+      return await fail(e.message);
+    }
+
+    await withTenantClient(tenant_id, (client) =>
+      client.query(
+        `UPDATE content_variants SET status='PUBLISHED', published_url=$1, published_at=NOW(), publish_error=NULL WHERE id=$2`,
+        [result.externalUrl || null, variantId]
+      )
+    );
+    await auditLog(tenant_id, null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
+
+    res.json({ published: true, channel: variant.channel, external_id: result.externalId, external_url: result.externalUrl });
+  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // Audit log - real rows only, scoped to the caller's own tenant. There was
@@ -1279,7 +1583,7 @@ app.get('/integrations', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN
   res.json({ channels });
 });
 
-app.post('/integrations/reveal', authMiddleware, authLimiter, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+app.post('/integrations/reveal', authMiddleware, authLimiter, roleOrFlag(['SUPER_ADMIN','IT_ADMIN'], 'can_view_integrations'), async (req, res) => {
   const { channel, totp } = req.body;
   try {
     // Real verification now (POST /auth/2fa/setup|verify added real 2FA
@@ -1355,24 +1659,25 @@ async function handleInboundWebhook(req, res) {
     const email = sanitizeCSVValue(req.body.email || '');
     const value_inr = Number(req.body.value) || 0;
 
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', tenantId]);
-    const dup = await pool.query(
-      `SELECT id FROM leads WHERE tenant_id=$1 AND ((phone<>'' AND phone=$2) OR (email<>'' AND email=$3)) LIMIT 1`,
-      [tenantId, phone, email]
-    );
-    const isDuplicate = dup.rows.length > 0;
+    const { leadId, isDuplicate } = await withTenantClient(tenantId, async (client) => {
+      const dup = await client.query(
+        `SELECT id FROM leads WHERE tenant_id=$1 AND ((phone<>'' AND phone=$2) OR (email<>'' AND email=$3)) LIMIT 1`,
+        [tenantId, phone, email]
+      );
+      const isDuplicate = dup.rows.length > 0;
+      const { rows } = await client.query(
+        `INSERT INTO leads (tenant_id, source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'NEW',$8) RETURNING id`,
+        [tenantId, channel, company_name, contact_name, phone, email, value_inr, isDuplicate]
+      );
+      return { leadId: rows[0].id, isDuplicate };
+    });
 
-    const { rows: inserted } = await pool.query(
-      `INSERT INTO leads (tenant_id, source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'NEW',$8) RETURNING id`,
-      [tenantId, channel, company_name, contact_name, phone, email, value_inr, isDuplicate]
-    );
-
-    await auditLog(tenantId, null, 'WEBHOOK_LEAD_RECEIVED', 'lead', inserted[0].id, req, 'SUCCESS', { channel, is_duplicate: isDuplicate });
+    await auditLog(tenantId, null, 'WEBHOOK_LEAD_RECEIVED', 'lead', leadId, req, 'SUCCESS', { channel, is_duplicate: isDuplicate });
     // Notify Hermes for downstream enrichment (GSTIN lookup, language detection, etc.)
-    await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: inserted[0].id, tenant_id: tenantId, channel }));
+    await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: leadId, tenant_id: tenantId, channel }));
 
-    res.json({ received: true, channel, lead_id: inserted[0].id, is_duplicate: isDuplicate });
+    res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate });
   } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
 }
 
@@ -1383,9 +1688,32 @@ app.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleIn
 // not backfilled with a fabricated status list.
 app.get('/hermes/agents', authMiddleware, async (req, res) => {
   try {
-    await pool.query('SELECT set_config($1,$2,false)', ['app.tenant_id', req.user.tenant_id]);
     const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
     res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
+  } catch(e){ res.status(500).json({ error: e.message }); }
+});
+
+// Public, unauthenticated by design - see public_file_tokens in
+// postgres/init-secure.sql for why this is safe to expose: it serves only
+// a specific file that POST /internal/content-variants/:variantId/publish
+// explicitly minted a short-lived token for (currently only needed for
+// Instagram, whose API has no direct-upload option and must fetch the
+// image from a public URL). Single-use: the token row is deleted right
+// after a successful read, and an expired or already-used token 404s.
+app.get('/public/content-assets/:token/file', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `DELETE FROM public_file_tokens WHERE token=$1 AND expires_at > NOW() RETURNING file_path, mime_type`,
+      [req.params.token]
+    );
+    // Opportunistic cleanup of any other expired tokens - this table is
+    // tiny and short-lived, so no separate cron job is needed for it.
+    pool.query(`DELETE FROM public_file_tokens WHERE expires_at <= NOW()`).catch(() => {});
+    if (!rows.length) return res.status(404).json({ error: 'Not found or expired' });
+    const { file_path, mime_type } = rows[0];
+    if (!fs.existsSync(file_path)) return res.status(404).json({ error: 'File no longer exists' });
+    res.setHeader('Content-Type', mime_type || 'application/octet-stream');
+    fs.createReadStream(file_path).pipe(res);
   } catch(e){ res.status(500).json({ error: e.message }); }
 });
 

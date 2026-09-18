@@ -719,3 +719,24 @@ code changes were needed.
      turns shipping on once the first two are done.
   Leave `RCLONE_REMOTE` unset (the default) and nothing changes: backups
   stay exactly as local-only as they are today.
+- **Cross-tenant privilege escalation via role assignment (the most
+  serious finding of this pass).** `USER_MANAGER_ROLES` (`SUPER_ADMIN`,
+  `IT_ADMIN`, `DEPT_ADMIN`) can all call `POST /users` and `PATCH
+  /users/:userId/role` — but `IT_ADMIN` and `DEPT_ADMIN` are meant to be
+  *tenant-scoped* admins, while `SUPER_ADMIN` reaches across every tenant
+  on the platform (`POST`/`GET /tenants`, platform-wide LLM connections
+  and agent definitions — see the `SUPER_ADMIN`-only routes). Neither
+  route checked what role the *caller* was allowed to grant: any tenant's
+  `IT_ADMIN` (or `DEPT_ADMIN`) could create a brand-new user with `role:
+  "SUPER_ADMIN"`, or promote an existing one, and that account would then
+  have full platform-wide reach — every other tenant's data, the ability
+  to create new tenants, and control of every LLM connection and agent
+  definition on the install. This wasn't a misconfiguration or an edge
+  case; it was reachable by design in the default deployment, by the
+  lowest-privileged role that can manage users at all. Both routes now
+  reject (`403`, audit-logged as `RBAC_BLOCKED`) an attempt to grant the
+  `SUPER_ADMIN` role from any caller who isn't already a `SUPER_ADMIN`
+  themselves. `IT_ADMIN`/`DEPT_ADMIN` granting each other's roles is left
+  alone — the `roles` table gives `IT_ADMIN` the same tenant-level
+  permission flags as `SUPER_ADMIN` already, so that doesn't cross a
+  privilege boundary the way reaching into another tenant does.

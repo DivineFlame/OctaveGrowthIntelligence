@@ -821,6 +821,10 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
     const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
+    if (r.name === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+      await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', null, req, 'BLOCKED', { attempted: 'create SUPER_ADMIN user', role: req.user.role });
+      return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
+    }
     const password_hash = await bcrypt.hash(password, 12);
     const { rows } = await pool.query(
       `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
@@ -845,6 +849,10 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
+    if (r.name === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+      await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', userId, req, 'BLOCKED', { attempted: 'promote to SUPER_ADMIN', role: req.user.role });
+      return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
+    }
     const { rows } = await pool.query(
       `UPDATE users SET role=$1, max_history_days=$2, can_view_revenue=$3, can_view_integrations=$4, can_approve_content=$5
        WHERE id=$6 AND tenant_id=$7

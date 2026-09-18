@@ -1471,7 +1471,10 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     let productId = null;
     if (req.body.product_id) {
       const prodCheck = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.body.product_id, req.user.tenant_id]);
-      if (!prodCheck.rows.length) return res.status(400).json({ error: 'product_id not found in your tenant' });
+      if (!prodCheck.rows.length) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: 'product_id not found in your tenant' });
+      }
       productId = req.body.product_id;
     }
     let scan;
@@ -1495,7 +1498,17 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
     res.json({ asset: rows[0], message: 'Uploaded. Call POST /content/:assetId/transform (or Products > Content > Generate Variants) to create per-channel variants.' });
-  } catch(e){ serverError(res, e); }
+  } catch(e){
+    // The file already landed on disk (multer wrote it before this handler
+    // even ran) - if anything past this point throws before a DB row
+    // exists to reference it (e.g. the INSERT itself failing), it's
+    // unreferenced garbage with nothing else that will ever clean it up.
+    // Uploads here can be up to 100MB each, so repeated failures could
+    // otherwise fill the disk over time the same way unrotated logs could
+    // (see README "Hardening notes").
+    if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
+    serverError(res, e);
+  }
 });
 
 // Content - Transform via Paperclip (YouTube, IG, etc.)

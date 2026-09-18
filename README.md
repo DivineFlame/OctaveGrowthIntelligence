@@ -740,3 +740,15 @@ code changes were needed.
   alone — the `roles` table gives `IT_ADMIN` the same tenant-level
   permission flags as `SUPER_ADMIN` already, so that doesn't cross a
   privilege boundary the way reaching into another tenant does.
+- **`POST /content/upload` could leak an orphaned file on disk.** Multer
+  writes the uploaded file to `/app/recordings` before the route handler
+  even runs, so any failure between that point and the `content_assets`
+  INSERT succeeding left a file on disk with no DB row pointing at it —
+  and nothing else in this codebase ever cleans up a file like that. Two
+  paths could hit this: an invalid `product_id` (checked but didn't clean
+  up before returning 400) and the generic catch-all (any thrown error
+  after a successful virus scan, e.g. the INSERT itself failing, left the
+  file behind silently). Uploads here can be up to 100MB each, so repeated
+  failures — a bad `product_id`, a transient DB hiccup — could grow this
+  the same unbounded way the container-logs issue above could. Both paths
+  now unlink the file before returning/re-throwing.

@@ -647,3 +647,50 @@ code changes were needed.
   too, so a disabled user's access dies within at most 15 minutes (the
   bound already accepted for a stolen/expiring access token) instead of
   up to 7 days.
+- **Unexpected-error responses were leaking raw Postgres/driver messages to
+  the client.** ~50 routes shared the same `catch(e){
+  res.status(500).json({ error: e.message }); }` shape — the generic
+  "something unexpected happened" fallback path, as opposed to the
+  deliberately-thrown, already-friendly errors those same routes surface
+  through their own explicit 400/403/409 checks. A raw driver error's
+  `.message` can include column/constraint/table names or other schema
+  internals (e.g. `duplicate key value violates unique constraint
+  "users_email_key"`) that shouldn't reach an API response. Added a shared
+  `serverError(res, e)` helper — always logs the full error server-side,
+  but in production (`NODE_ENV=production`, which `docker-compose.vps.yml`
+  always sets) responds with a generic `Internal server error` instead of
+  `e.message`; outside production it still returns the real message, since
+  that's more useful for local debugging than the disclosure risk. Routes
+  that deliberately craft a user-facing error message (validation
+  failures, "email already exists", channel-publish failures, etc.) were
+  left untouched — only the generic catch-all path changed. `/health`'s
+  own `error: e.message` was also left as-is; it's meant to report *why*
+  a dependency is unreachable for anyone watching uptime, not app data.
+- **Neither `api` nor `hermes-orchestrator` handled `SIGTERM`.** Every
+  redeploy sends it, then SIGKILLs after Docker's default 10s grace period
+  — with no handler, that meant in-flight HTTP requests got cut off
+  mid-response on every single deploy (not just a crash), and
+  `hermes-orchestrator`'s loop (including whatever `runAgent()` call was
+  mid-flight — a real HTTP call to `api`, or the gap between a destructive,
+  non-acked `BRPOP` and finishing the job it just popped) could be killed
+  at any point in its cycle, routinely. Added graceful shutdown to both:
+  `api` now stops accepting new connections on `SIGTERM`/`SIGINT`, lets
+  in-flight requests on both its HTTP servers finish, then closes the
+  shared pg pool and Redis client (with a 9s internal force-exit timer so
+  a stuck connection can't hang it past that); `hermes-orchestrator` checks
+  a shutdown flag at the top of each loop iteration and exits cleanly once
+  the current iteration finishes. `docker-compose.vps.yml`'s
+  `stop_grace_period` bumped to `15s` for both so Docker's SIGKILL isn't
+  racing the graceful path under normal conditions. This doesn't make the
+  underlying Redis queues reliable — `BRPOP` still has no ack, so a crash
+  (as opposed to a normal SIGTERM'd redeploy) mid-processing still loses
+  that one job; that would need a bigger change (`BRPOPLPUSH` + an explicit
+  ack/re-queue step) that's out of scope here.
+- **Container logs had no size cap.** Docker's default `json-file` driver
+  keeps every line forever unless told otherwise, and `api` alone logs
+  every request via `morgan('combined')` — on a long-running VPS that
+  grows without bound and can eventually fill the disk, which takes down
+  every service on the box at once (including Postgres), not just the
+  noisy one. Added a shared `x-logging` anchor in `docker-compose.vps.yml`
+  (`json-file`, `max-size: 10m`, `max-file: 5` — 50MB of history per
+  container) applied to all 8 services.

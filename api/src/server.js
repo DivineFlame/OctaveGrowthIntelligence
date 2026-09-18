@@ -468,6 +468,23 @@ function validate(schema) {
   };
 }
 
+// Generic catch-all responder for the "something unexpected went wrong"
+// path (as opposed to a deliberately-thrown, already-friendly validation
+// or business-logic error, which routes handle with their own explicit
+// status codes and don't go through this). Always logs the full error
+// server-side. In production, `e.message` from a raw Postgres/driver
+// error can include column/constraint/table names or other schema
+// internals that shouldn't reach an API response, so it's replaced with a
+// generic message there; outside production the real message is more
+// useful for local debugging than the disclosure risk.
+function serverError(res, e) {
+  console.error(e);
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+  return res.status(500).json({ error: e.message });
+}
+
 const schemas = {
   createTenant: z.object({
     name: z.string().trim().min(1).max(200),
@@ -571,7 +588,7 @@ app.post('/auth/login', authLimiter, async (req, res) => {
     const refresh = jwt.sign({ id: user.id, type: 'refresh' }, JWT_SECRET_VALUE, { expiresIn: '7d' });
     await auditLog(user.tenant_id, user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
     res.json({ token, refresh, user: claims });
-  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Auth - Signup status (lets the frontend show/hide the Sign Up option without guessing)
@@ -580,7 +597,7 @@ app.get('/auth/signup-status', async (req, res) => {
     const used = await pool.query(`SELECT 1 FROM system_flags WHERE key='signup_used'`);
     const enabled = process.env.SIGNUP_ENABLED !== 'false';
     res.json({ available: enabled && !used.rows.length });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Auth - Signup (bootstraps the very first Super Admin + their tenant only)
@@ -645,8 +662,7 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
   } catch(e) {
     await client.query('ROLLBACK');
     if (e.code === '23505') return res.status(409).json({ error: 'That email or company name is already taken' });
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    serverError(res, e);
   } finally {
     client.release();
   }
@@ -691,7 +707,7 @@ app.post('/auth/2fa/setup', authMiddleware, async (req, res) => {
     const otpauth = authenticator.keyuri(req.user.email, 'OctaveGrowthIntelligence', secret);
     const qrDataUrl = await QRCode.toDataURL(otpauth);
     res.json({ secret, otpauth, qr: qrDataUrl });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // 2FA - Verify: confirms the code from the authenticator app matches, then
@@ -707,7 +723,7 @@ app.post('/auth/2fa/verify', authMiddleware, authLimiter, async (req, res) => {
     await pool.query('UPDATE users SET two_fa_enabled=true WHERE id=$1', [req.user.id]);
     await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
     res.json({ message: '2FA enabled' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // 2FA - Disable: requires the current password so a hijacked but
@@ -724,7 +740,7 @@ app.post('/auth/2fa/disable', authMiddleware, authLimiter, async (req, res) => {
     await pool.query('UPDATE users SET two_fa_enabled=false, two_fa_secret=NULL WHERE id=$1', [req.user.id]);
     await auditLog(req.user.tenant_id, req.user.id, 'DISABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
     res.json({ message: '2FA disabled' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // 2FA - Status: lets the frontend show enabled/disabled without guessing from the JWT
@@ -732,7 +748,7 @@ app.get('/auth/2fa/status', authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT two_fa_enabled FROM users WHERE id=$1', [req.user.id]);
     res.json({ enabled: !!(rows.length && rows[0].two_fa_enabled) });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Tenant columns safe to return to any authenticated user. webhook_secret is
@@ -753,7 +769,7 @@ app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(s
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_TENANT', 'tenant', rows[0].id, req, 'SUCCESS', { subdomain });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Tenants - List all (Super Admin only)
@@ -761,7 +777,7 @@ app.get('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req,
   try {
     const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants ORDER BY created_at DESC`);
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Tenants - Get own tenant (any authenticated user)
@@ -770,7 +786,7 @@ app.get('/tenants/me', authMiddleware, async (req, res) => {
     const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants WHERE id=$1`, [req.user.tenant_id]);
     if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Roles - List available roles (for user-creation role picker)
@@ -778,7 +794,7 @@ app.get('/roles', authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM roles ORDER BY name');
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Roles allowed to create/manage users, kept in sync with roles.can_manage_users
@@ -790,7 +806,7 @@ app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req
     const targetTenant = (req.user.role === 'SUPER_ADMIN' && req.query.tenant_id) ? req.query.tenant_id : req.user.tenant_id;
     const { rows } = await pool.query('SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE tenant_id=$1 ORDER BY created_at DESC', [targetTenant]);
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Users - Create within a tenant, role drives permissions (single source of truth: roles table)
@@ -816,7 +832,7 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
     res.json(rows[0]);
   } catch(e){
     if (e.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
-    res.status(500).json({ error: e.message });
+    serverError(res, e);
   }
 });
 
@@ -838,7 +854,7 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
     await auditLog(req.user.tenant_id, req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Users - Enable/disable an account (own tenant only). A disabled user is
@@ -859,7 +875,7 @@ app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_MANAGER_R
     if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
     await auditLog(req.user.tenant_id, req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS');
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Users - Admin-driven password reset (own tenant only). There is no email
@@ -879,7 +895,7 @@ app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MA
     if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
     await auditLog(req.user.tenant_id, req.user.id, 'RESET_USER_PASSWORD', 'user', userId, req, 'SUCCESS');
     res.json({ success: true, email: rows[0].email });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // ===== Products/Services, per-product membership, channels, and Agents =====
@@ -931,7 +947,7 @@ app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES)
     res.json(product);
   } catch(e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    serverError(res, e);
   } finally {
     client.release();
   }
@@ -945,7 +961,7 @@ app.get('/products', authMiddleware, async (req, res) => {
       ? await pool.query('SELECT * FROM products WHERE tenant_id=$1 ORDER BY created_at DESC', [req.user.tenant_id])
       : await pool.query('SELECT p.* FROM products p JOIN product_members pm ON pm.product_id=p.id WHERE p.tenant_id=$1 AND pm.user_id=$2 ORDER BY p.created_at DESC', [req.user.tenant_id, req.user.id]);
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.get('/products/:id', authMiddleware, async (req, res) => {
@@ -956,7 +972,7 @@ app.get('/products/:id', authMiddleware, async (req, res) => {
     const membershipRole = await getProductMembership(req.params.id, req.user.id);
     if (!isTenantAdmin && !membershipRole) return res.status(403).json({ error: 'Not a member of this product' });
     res.json(Object.assign({}, rows[0], { your_role: isTenantAdmin ? 'TENANT_ADMIN' : membershipRole }));
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Product members - list (Tenant Admin or any member of the product)
@@ -972,7 +988,7 @@ app.get('/products/:id/members', authMiddleware, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Content - list a product's uploaded assets with their generated variants
@@ -1012,7 +1028,7 @@ app.get('/products/:id/content', authMiddleware, async (req, res) => {
       (byAsset[v.asset_id] = byAsset[v.asset_id] || []).push(v);
     }
     res.json(assets.rows.map(a => Object.assign({}, a, { variants: byAsset[a.id] || [] })));
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Product members - add/assign (Tenant Admin, to assign the first Product
@@ -1034,7 +1050,7 @@ app.post('/products/:id/members', authMiddleware, validate(schemas.addProductMem
     );
     await auditLog(req.user.tenant_id, req.user.id, 'ADD_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id, role: memberRole });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => {
@@ -1045,7 +1061,7 @@ app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => 
     await pool.query('DELETE FROM product_members WHERE product_id=$1 AND user_id=$2', [req.params.id, req.params.userId]);
     await auditLog(req.user.tenant_id, req.user.id, 'REMOVE_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id: req.params.userId });
     res.json({ message: 'Removed' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Product channels - config storage only (no real per-platform posting yet -
@@ -1075,7 +1091,7 @@ app.get('/products/:id/channels', authMiddleware, async (req, res) => {
     // or plaintext secret can never end up in a browser/network log.
     const masked = rows.map(r => Object.assign({}, r, { config: channelsLib.maskChannelSecrets(r.channel, r.config) }));
     res.json(masked);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.post('/products/:id/channels', authMiddleware, validate(schemas.configureChannel), async (req, res) => {
@@ -1122,7 +1138,7 @@ app.post('/products/:id/channels', authMiddleware, validate(schemas.configureCha
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
     res.json(Object.assign({}, rows[0], { config: channelsLib.maskChannelSecrets(channel, rows[0].config) }));
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // LLM connections - Super Admin only, platform-wide. api_key is encrypted at
@@ -1139,14 +1155,14 @@ app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), va
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_LLM_CONNECTION', 'llm_connection', rows[0].id, req, 'SUCCESS', { provider });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.get('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT id, name, provider, base_url, created_at FROM llm_connections ORDER BY created_at DESC');
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.delete('/llm-connections/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
@@ -1155,7 +1171,7 @@ app.delete('/llm-connections/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN'
     if (inUse.rows.length) return res.status(409).json({ error: 'This LLM connection is still used by one or more agents' });
     await pool.query('DELETE FROM llm_connections WHERE id=$1', [req.params.id]);
     res.json({ message: 'Deleted' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Agents - Super Admin creates/edits; any authenticated user can list (so a
@@ -1172,14 +1188,14 @@ app.post('/agents', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(sc
     );
     await auditLog(req.user.tenant_id, req.user.id, 'CREATE_AGENT', 'agent', rows[0].id, req, 'SUCCESS', { name });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.get('/agents', authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT id, name, model, active, created_at FROM agents WHERE active=true ORDER BY created_at DESC');
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.updateAgent), async (req, res) => {
@@ -1191,7 +1207,7 @@ app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), valida
     );
     if (!rows.length) return res.status(404).json({ error: 'Agent not found' });
     res.json(rows[0]);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Product agents - which agents a (Premium-only) product has enabled.
@@ -1204,7 +1220,7 @@ app.get('/products/:id/agents', authMiddleware, async (req, res) => {
     if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query('SELECT a.id, a.name, a.model FROM product_agents pa JOIN agents a ON a.id=pa.agent_id WHERE pa.product_id=$1', [req.params.id]);
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.post('/products/:id/agents', authMiddleware, async (req, res) => {
@@ -1224,7 +1240,7 @@ app.post('/products/:id/agents', authMiddleware, async (req, res) => {
     );
     await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_PRODUCT_AGENT', 'product', req.params.id, req, 'SUCCESS', { agent_id });
     res.json(rows[0] || { message: 'Already enabled' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.delete('/products/:id/agents/:agentId', authMiddleware, async (req, res) => {
@@ -1232,7 +1248,7 @@ app.delete('/products/:id/agents/:agentId', authMiddleware, async (req, res) => 
     if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can disable agents" });
     await pool.query('DELETE FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
     res.json({ message: 'Disabled' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Run an enabled agent for real - actually calls its LLM connection (see
@@ -1280,7 +1296,7 @@ app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) =
     });
     await auditLog(req.user.tenant_id, req.user.id, 'RUN_AGENT', 'agent', req.params.agentId, req, run.status, { product_id: req.params.id, lead_id: leadId });
     res.json(run);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Run history for one agent on one product - so a Product Admin can see
@@ -1298,7 +1314,7 @@ app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) =
       )
     );
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Internal, server-to-server only (see internalMiddleware) - Hermes calls
@@ -1348,7 +1364,7 @@ app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (re
       leadId: lead.id, triggeredBy: null, triggerType: 'auto_lead_intake', inputText
     });
     res.json({ ran: true, run_id: run.id, status: run.status });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Leads - List (RLS enforced). Also enforces two per-role limits from the
@@ -1365,7 +1381,7 @@ app.get('/leads', authMiddleware, async (req, res) => {
     );
     const out = req.user.can_view_revenue ? rows : rows.map(({ value_inr, ...rest }) => rest);
     res.json(out);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Leads - CSV Upload (Secure: 10MB, 5000 rows, sanitize, dedup, ClamAV)
@@ -1432,7 +1448,7 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
 
     fs.unlink(req.file.path, () => {}); // temp CSV is fully parsed into the DB now, no need to keep it
     res.json({ uploadId, rows_total: records.length, rows_valid: valid, rows_duplicate: dup, rows_invalid: invalid, message: 'CSV imported, pushed to Inbox + Sarvam queue' });
-  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Content - Upload raw asset (100MB max, ClamAV scan, MIME check)
@@ -1471,7 +1487,7 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
     res.json({ asset: rows[0], message: 'Uploaded. Call POST /content/:assetId/transform (or Products > Content > Generate Variants) to create per-channel variants.' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Content - Transform via Paperclip (YouTube, IG, etc.)
@@ -1541,7 +1557,7 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
     await auditLog(req.user.tenant_id, req.user.id, 'TRANSFORM_CONTENT', 'content_asset', assetId, req, 'SUCCESS', { channels, variants: variants.length });
 
     res.json({ variants, message: 'Transformed per channel spec, pending approval' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Content - Approval workflow (Super Admin / Approver only)
@@ -1568,7 +1584,7 @@ app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SU
     await auditLog(req.user.tenant_id, req.user.id, `${action}_CONTENT`, 'content_variant', variantId, req, 'SUCCESS', { comment });
 
     res.json({ variant_id: variantId, status: newStatus, message: `Content ${newStatus}, ${newStatus==='APPROVED' ? 'queued for publishing to channel' : ''}` });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Internal, server-to-server only (see internalMiddleware) - Hermes calls
@@ -1659,7 +1675,7 @@ app.post('/internal/content-variants/:variantId/publish', internalMiddleware, as
     await auditLog(tenant_id, null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
 
     res.json({ published: true, channel: variant.channel, external_id: result.externalId, external_url: result.externalUrl });
-  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Audit log - real rows only, scoped to the caller's own tenant. There was
@@ -1673,7 +1689,7 @@ app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN', 'IT_ADMIN'
       [req.user.tenant_id, limit]
     );
     res.json(rows);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
@@ -1712,7 +1728,7 @@ app.post('/integrations/reveal', authMiddleware, authLimiter, roleOrFlag(['SUPER
     await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
     const domain = API_DOMAIN ? `https://${API_DOMAIN}` : '';
     res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 app.post('/integrations/toggle', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
@@ -1733,7 +1749,7 @@ app.get('/integrations/webhook-urls', authMiddleware, rbacMiddleware(['SUPER_ADM
     const secret = rows[0].webhook_secret;
     const urls = INTEGRATION_CHANNELS.map(channel => ({ channel, url: `${base}/webhooks/${req.user.tenant_id}/${secret}/${channel}` }));
     res.json({ urls });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Integrations - Rotate this tenant's webhook secret (invalidates all previously issued URLs)
@@ -1743,7 +1759,7 @@ app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware([
     await pool.query('UPDATE tenants SET webhook_secret=$1 WHERE id=$2', [newSecret, req.user.tenant_id]);
     await auditLog(req.user.tenant_id, req.user.id, 'ROTATE_WEBHOOK_SECRET', 'tenant', req.user.tenant_id, req, 'SUCCESS', {});
     res.json({ message: 'Webhook secret rotated. Update every configured channel URL with the new one.' });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Webhook handlers - 7 channels, per-tenant + secret so inbound leads can be
@@ -1786,7 +1802,7 @@ async function handleInboundWebhook(req, res) {
     await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: leadId, tenant_id: tenantId, channel }));
 
     res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate });
-  } catch(e){ console.error(e); res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 }
 
 app.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
@@ -1798,7 +1814,7 @@ app.get('/hermes/agents', authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
     res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Public, unauthenticated by design - see public_file_tokens in
@@ -1822,7 +1838,7 @@ app.get('/public/content-assets/:token/file', async (req, res) => {
     if (!fs.existsSync(file_path)) return res.status(404).json({ error: 'File no longer exists' });
     res.setHeader('Content-Type', mime_type || 'application/octet-stream');
     fs.createReadStream(file_path).pipe(res);
-  } catch(e){ res.status(500).json({ error: e.message }); }
+  } catch(e){ serverError(res, e); }
 });
 
 // Global error handler - without this, an error passed to next(err) (or
@@ -1848,7 +1864,7 @@ app.use((err, req, res, next) => {
   res.status(err && err.status ? err.status : 500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));
+const httpServer = app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));
 
 // Webhook server separate
 const webhookApp = express();
@@ -1856,4 +1872,35 @@ webhookApp.set('trust proxy', 1);
 webhookApp.use(express.json());
 webhookApp.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
-webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));
+const webhookServer = webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));
+
+// Graceful shutdown - without this, `docker compose down`/a redeploy sends
+// SIGTERM and (by default, after Docker's 10s grace period) SIGKILL, which
+// cuts off in-flight requests mid-response and leaves the pg pool's
+// connections to be dropped uncleanly rather than closed. Stop accepting
+// new connections on both HTTP servers, let in-flight requests finish, then
+// close the shared DB/Redis clients - with a hard timeout so a stuck
+// connection can't block shutdown forever and get SIGKILLed anyway.
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  const forceExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 9000);
+  forceExit.unref();
+  let pending = 2;
+  const done = () => { if (--pending === 0) finish(); };
+  httpServer.close(done);
+  webhookServer.close(done);
+  async function finish() {
+    try { await pool.end(); } catch (e) { console.error('Error closing pg pool:', e.message); }
+    try { await redisClient.quit(); } catch (e) { console.error('Error closing redis client:', e.message); }
+    clearTimeout(forceExit);
+    process.exit(0);
+  }
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

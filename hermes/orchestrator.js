@@ -76,10 +76,29 @@ async function runAgent(type, payload) {
   return {};
 }
 
+// Graceful shutdown - a redeploy sends SIGTERM to every container, and
+// without this the loop (and whatever runAgent() call is mid-flight) just
+// gets cut off wherever it happens to be, every single time this service
+// restarts - not only on a crash. BRPOP is a destructive pop with no ack,
+// so a job already popped off the list when the process dies is gone; this
+// doesn't fix that (a reliable queue would need BRPOPLPUSH + an ack step,
+// a bigger change), but it does stop routine deploys from being a source
+// of dropped jobs: the flag is checked at the top of each iteration, so a
+// SIGTERM finishes whatever's already in flight (bounded by the two 1s
+// BRPOP timeouts plus one runAgent() call, typically well under a couple
+// of seconds) before exiting, instead of being killed mid-iteration.
+let shuttingDown = false;
+function shutdown(signal) {
+  console.log(`[Hermes] received ${signal}, finishing current iteration then exiting...`);
+  shuttingDown = true;
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 async function loop() {
   console.log('Hermes Agents started - publisher, lead_intake');
   beat();
-  while (true) {
+  while (!shuttingDown) {
     try {
       const pub = await redisClient.brPop('publisher:queue', 1);
       if (pub) await runAgent('publisher', JSON.parse(pub.element));
@@ -88,5 +107,9 @@ async function loop() {
       beat();
     } catch(e){ console.error('Hermes error', e.message); await new Promise(r=>setTimeout(r,1000)); }
   }
+  console.log('[Hermes] loop exited, closing connections');
+  try { await redisClient.quit(); } catch (e) { console.error('Error closing redis client:', e.message); }
+  try { await pool.end(); } catch (e) { console.error('Error closing pg pool:', e.message); }
+  process.exit(0);
 }
 loop();

@@ -7,6 +7,11 @@
 # points for a modest VPS, not measured under real load; raise them if
 # a service gets OOM-killed (check `docker inspect <container> | grep
 # -i oom`) or throttled.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 networks:
   frontend:
   backend:
@@ -24,6 +29,7 @@ services:
   clamav:
     image: clamav/clamav:latest
     restart: unless-stopped
+    logging: *default-logging
     networks: [backend]
     volumes:
       - clamav_data:/var/lib/clamav
@@ -35,6 +41,7 @@ services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
+    logging: *default-logging
     networks: [db]
     user: "999:999"
     read_only: true
@@ -77,6 +84,7 @@ services:
       context: ./postgres/backup
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     networks: [db]
     depends_on:
       postgres: { condition: service_healthy }
@@ -100,6 +108,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     networks: [db]
     user: "999:999"
     read_only: true
@@ -139,6 +148,13 @@ services:
       context: ./api
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
+    # server.js now drains in-flight requests on SIGTERM before exiting
+    # (bounded by its own 9s internal force-exit timer) - give Docker a
+    # grace period longer than that instead of the 10s default, so it
+    # SIGKILLs only if the graceful path itself is stuck, not as the
+    # normal outcome of every redeploy racing the default.
+    stop_grace_period: 15s
     networks: [frontend, backend, db]
     user: "1001:1001"
     read_only: true
@@ -201,6 +217,13 @@ services:
       context: ./hermes
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
+    # orchestrator.js finishes its current loop iteration on SIGTERM before
+    # exiting (bounded by the two 1s BRPOP timeouts plus one runAgent()
+    # call) - the default 10s grace period is already generous for that,
+    # but bumped slightly so a slow runAgent() call (a real HTTP call to
+    # api) doesn't get SIGKILLed mid-flight on a loaded host.
+    stop_grace_period: 15s
     networks: [backend, db]
     user: "1001:1001"
     read_only: true
@@ -228,6 +251,7 @@ services:
       context: ./paperclip
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     networks: [backend]
     user: "1001:1001"
     read_only: true
@@ -279,6 +303,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     networks: [frontend]
     ports:
       - "127.0.0.1:8305:80"

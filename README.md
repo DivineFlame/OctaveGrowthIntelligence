@@ -637,3 +637,13 @@ code changes were needed.
   checklist in this README should run it before any frontend release that
   touches the hand-written `<script>` code, and paste the output into
   `nginx/orgcomms-vps.conf`'s `app.yourdomain.com` block.
+- **Disabling a user didn't actually stop them if they already had a
+  refresh token.** `POST /auth/login` already refused a `disabled` user,
+  but `POST /auth/refresh` didn't check the flag at all — it just verified
+  the refresh token's signature and looked the user up. A disabled user's
+  still-valid 7-day refresh token could keep minting fresh 15-minute access
+  tokens indefinitely, making "disable this account" a no-op against
+  anyone who was already logged in. `/auth/refresh` now checks `disabled`
+  too, so a disabled user's access dies within at most 15 minutes (the
+  bound already accepted for a stolen/expiring access token) instead of
+  up to 7 days.

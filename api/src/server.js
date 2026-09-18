@@ -655,6 +655,14 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
 // Auth - Refresh (exchange a 7-day refresh token for a new 15-minute access token)
 // Without this, the access token issued at login has no way to be renewed and
 // every session silently dies 15 minutes after login.
+//
+// Checking `disabled` here (not just at /auth/login) matters: authMiddleware
+// only verifies the JWT signature, so a user disabled mid-session keeps
+// working on their current access token until it naturally expires (up to
+// 15 minutes - an accepted, bounded window) - but without this check they
+// could otherwise use their still-valid 7-day refresh token to keep minting
+// fresh access tokens forever, making "disable this user" a no-op for
+// anyone who already has one.
 app.post('/auth/refresh', authLimiter, async (req, res) => {
   const { refresh } = req.body;
   if (!refresh) return res.status(400).json({ error: 'refresh token required' });
@@ -664,6 +672,7 @@ app.post('/auth/refresh', authLimiter, async (req, res) => {
     const { rows } = await pool.query('SELECT * FROM users WHERE id=$1', [decoded.id]);
     if (!rows.length) return res.status(401).json({ error: 'User no longer exists' });
     const user = rows[0];
+    if (user.disabled) return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
     const claims = userClaims(user);
     const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
     res.json({ token, user: claims });

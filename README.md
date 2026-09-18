@@ -752,3 +752,32 @@ code changes were needed.
   failures — a bad `product_id`, a transient DB hiccup — could grow this
   the same unbounded way the container-logs issue above could. Both paths
   now unlink the file before returning/re-throwing.
+- **Added a real test suite, starting from zero.** This repo had no
+  automated tests at all - `scripts/smoke-test.sh` is a post-deploy curl
+  check, not a test suite, and every fix in this "Hardening notes" section
+  up to now was verified by hand (`node --check`, a manual repro, reading
+  the diff) rather than by a test that keeps checking it. Most of
+  `api/src/server.js` isn't safely unit-testable as-is - it's a monolithic
+  file that connects to Postgres/Redis and calls `app.listen()` as a side
+  effect of being required, so testing it would mean either spinning up
+  real infrastructure or a larger refactor, neither of which fits this
+  pass. `api/src/channels.js` is different: it's already a clean,
+  side-effect-free module (no DB/network connection on require, secrets
+  passed in as injected encrypt/decrypt functions rather than reaching for
+  real crypto), so it's where a real suite could start without touching
+  anything else. Added `api/test/channels.test.js` (13 tests, using
+  Node's built-in `node:test` - no new dependency to add or keep patched)
+  covering config validation (missing/blank required fields, the
+  unknown-channel and unimplemented-channel cases), the
+  encrypt/mask/decrypt round-trip (including that masking never fakes a
+  value for an empty secret), and `publishToChannel` refusing an
+  unimplemented channel with a clear error rather than a silent fake
+  success - the exact bug class this same audit found and fixed in
+  Paperclip's old `/transform` endpoint earlier. One test
+  (`CHANNEL_SPECS keys match the channel vocabulary...`) directly pins the
+  channel-vocabulary bug fixed earlier in this file's history
+  (`content_variants.channel` vs `product_channels.channel` using two
+  different vocabularies) so it can't silently regress. Run with `npm
+  test` from `api/`; `api/Dockerfile` now also runs it during the image
+  build (`RUN npm test`, right after `COPY . .`), so a regression here
+  fails the build instead of reaching production.

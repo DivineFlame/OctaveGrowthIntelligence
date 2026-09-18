@@ -58,7 +58,18 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     cap_add: [SETGID, SETUID]
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 127.0.0.1 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # --bind 127.0.0.1 was the actual cause of the api container's endless
+    # "Redis error ECONNREFUSED 172.30.0.2:6379" loop: binding to loopback
+    # restricts redis-server to connections from *inside its own container*,
+    # so every other service reaching it over the docker network (api, hermes,
+    # transformer-worker) as redis:6379 was refused at the TCP level, not just
+    # denied by auth. redis has no `ports:` entry at all (confirmed above) -
+    # it was never reachable from the host or internet either way, so binding
+    # to loopback added no real security and just broke internal connectivity.
+    # --bind 0.0.0.0 + requirepass (already set) is the correct combination:
+    # reachable on the internal `db`/`backend` docker networks, authenticated,
+    # still not published to the host.
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 0.0.0.0 --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
     healthcheck:

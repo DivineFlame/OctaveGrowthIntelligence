@@ -800,3 +800,25 @@ code changes were needed.
   disconnected channel vocabulary so the two copies of that list can't
   silently drift apart again). The suite is now 31 tests across 3 files,
   still all built-in `node:test` with zero new dependencies.
+- **Extracted and tested the AES-256-GCM secret-encryption helpers.**
+  `encryptSecret`/`decryptSecret` in `server.js` are what every stored
+  secret in this app goes through - LLM provider API keys, channel access
+  tokens, SMTP passwords - but they closed over a module-level
+  `ENCRYPTION_KEY_BUF` derived from `requireSecretOrExit()`, so testing
+  them meant either requiring the real `ENCRYPTION_KEY` env var or
+  requiring `server.js` itself (unsafe - see above). Moved the actual
+  AES-256-GCM logic to `api/src/crypto-secrets.js` as pure functions that
+  take the key buffer as a parameter (the same dependency-injection
+  pattern `channels.js` already used for these two functions), and
+  rebound `encryptSecret`/`decryptSecret` in `server.js` to call it with
+  the real key - every call site keeps its original single-argument
+  signature, nothing about how secrets are stored changed. Added
+  `api/test/crypto-secrets.test.js` (7 tests, throwaway test key) that
+  goes beyond "it round-trips" to pin the actual security properties an
+  authenticated cipher is supposed to give: decrypting with the wrong key
+  throws, a single flipped byte anywhere in the ciphertext or the auth tag
+  fails to decrypt rather than silently returning corrupted output, and
+  encrypting the same plaintext twice never produces the same ciphertext
+  (the random IV, without which two channels sharing one access token
+  would leak that they're equal just by comparing stored ciphertext).
+  Suite is now 38 tests across 4 files.

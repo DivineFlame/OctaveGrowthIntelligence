@@ -20,6 +20,7 @@ const QRCode = require('qrcode');
 const channelsLib = require('./channels');
 const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
+const cryptoSecrets = require('./crypto-secrets');
 require('dotenv').config({ path: '../.env.production' });
 
 // JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
@@ -153,22 +154,13 @@ const API_DOMAIN = normalizeDomain(process.env.API_DOMAIN);
 // encrypted at rest with it, AES-256-GCM, and only decrypted in memory at
 // the point an agent actually calls the provider.
 const ENCRYPTION_KEY_BUF = crypto.createHash('sha256').update(ENCRYPTION_KEY_VALUE).digest();
-function encryptSecret(plaintext) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY_BUF, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return Buffer.concat([iv, authTag, ciphertext]).toString('base64');
-}
-function decryptSecret(encoded) {
-  const raw = Buffer.from(encoded, 'base64');
-  const iv = raw.subarray(0, 12);
-  const authTag = raw.subarray(12, 28);
-  const ciphertext = raw.subarray(28);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY_BUF, iv);
-  decipher.setAuthTag(authTag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-}
+// Bound to this process's real key so every call site below keeps its
+// existing single-argument signature - the actual AES-256-GCM logic now
+// lives in crypto-secrets.js (see its header comment for why: testability
+// with a throwaway key, without server.js's own key-derivation/startup
+// requirements getting in the way of that).
+const encryptSecret = (plaintext) => cryptoSecrets.encrypt(plaintext, ENCRYPTION_KEY_BUF);
+const decryptSecret = (encoded) => cryptoSecrets.decrypt(encoded, ENCRYPTION_KEY_BUF);
 
 // Real agent execution - actually calls the configured provider, rather than
 // storing a system_prompt nobody ever sends anywhere. Three providers,

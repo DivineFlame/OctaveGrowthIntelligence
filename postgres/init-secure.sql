@@ -14,12 +14,17 @@ CREATE TABLE IF NOT EXISTS leads (id UUID PRIMARY KEY DEFAULT uuid_generate_v4()
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
 CREATE POLICY tenant_isolation_leads ON leads USING (tenant_id = current_setting('app.tenant_id')::UUID);
+ALTER TABLE leads FORCE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS content_assets (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, uploaded_by UUID REFERENCES users(id), file_name VARCHAR(500), file_size BIGINT, mime_type VARCHAR(100), s3_key TEXT, virus_scan_status VARCHAR(20) DEFAULT 'PENDING', brand_kit JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
 ALTER TABLE content_assets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_assets ON content_assets;
 CREATE POLICY tenant_isolation_assets ON content_assets USING (tenant_id = current_setting('app.tenant_id')::UUID);
+ALTER TABLE content_assets FORCE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS content_variants (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), asset_id UUID REFERENCES content_assets(id) ON DELETE CASCADE, tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, channel VARCHAR(30), spec VARCHAR(100), s3_key TEXT, title VARCHAR(200), status VARCHAR(20) DEFAULT 'DRAFT', approved_by UUID REFERENCES users(id), published_url TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 ALTER TABLE content_variants ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_variants ON content_variants;
 CREATE POLICY tenant_isolation_variants ON content_variants USING (tenant_id = current_setting('app.tenant_id')::UUID);
+ALTER TABLE content_variants FORCE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS approvals (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, variant_id UUID REFERENCES content_variants(id) ON DELETE CASCADE, requested_by UUID REFERENCES users(id), approved_by UUID REFERENCES users(id), status VARCHAR(20) DEFAULT 'PENDING', comment TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS csv_uploads (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, uploaded_by UUID REFERENCES users(id), file_name VARCHAR(500), file_size BIGINT, rows_total INT, rows_valid INT, rows_duplicate INT, rows_invalid INT, virus_scan_status VARCHAR(20) DEFAULT 'PENDING', status VARCHAR(20) DEFAULT 'PROCESSING', created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS audit_logs (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id), user_id UUID REFERENCES users(id), action VARCHAR(100) NOT NULL, resource_type VARCHAR(100), resource_id UUID, ip_address INET, user_agent TEXT, result VARCHAR(20), details JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
@@ -77,4 +82,5 @@ CREATE TABLE IF NOT EXISTS agent_runs (id UUID PRIMARY KEY DEFAULT uuid_generate
 ALTER TABLE agent_runs ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation_agent_runs ON agent_runs;
 CREATE POLICY tenant_isolation_agent_runs ON agent_runs USING (tenant_id = current_setting('app.tenant_id')::UUID);
+ALTER TABLE agent_runs FORCE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_agent_runs_product ON agent_runs(product_id);

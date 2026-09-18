@@ -1,3 +1,12 @@
+# Per-service deploy.resources.limits (cpus/memory) below: previously
+# unbounded, so one runaway container (a big Paperclip image job, an
+# unbounded query, a memory leak) could starve every other service on
+# the same VPS with no isolation between them. Compose V2 (the `docker
+# compose` CLI, confirmed in use here) applies these as real container
+# limits outside of Swarm too - values below are conservative starting
+# points for a modest VPS, not measured under real load; raise them if
+# a service gets OOM-killed (check `docker inspect <container> | grep
+# -i oom`) or throttled.
 networks:
   frontend:
   backend:
@@ -17,6 +26,11 @@ services:
     networks: [backend]
     volumes:
       - clamav_data:/var/lib/clamav
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
@@ -46,6 +60,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -78,6 +97,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 640m
   api:
     build:
       context: ./api
@@ -124,6 +148,11 @@ services:
     ports:
       - "127.0.0.1:8300:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
       - "127.0.0.1:8301:3001"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512m
   hermes-orchestrator:
     build:
       context: ./hermes
@@ -146,6 +175,11 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
   paperclip-transformer:
     build:
       context: ./paperclip
@@ -174,6 +208,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768m
   # csv-handler service removed: csv-handler.js only defined/exported
   # functions, never started a server or consumer loop, so it crash-looped
   # in production. That logic already lives inline in POST
@@ -198,6 +237,11 @@ services:
       PAPERCLIP_SERVICE: paperclip-transformer:8000
     depends_on:
       redis: { condition: service_healthy }
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
   frontend:
     build:
       context: ./frontend
@@ -212,3 +256,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128m

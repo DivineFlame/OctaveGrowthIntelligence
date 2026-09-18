@@ -841,3 +841,13 @@ code changes were needed.
   same CSV-formula-injection guard as every other field, since `+` is one
   of the characters that guard exists for. Suite is now 48 tests across 5
   files.
+- **Wired the test suite into actual CI.** All 48 tests were already a
+  hard gate at Docker build time (`api/Dockerfile`'s `RUN npm test`), but
+  that only catches a regression at deploy time - after it's merged, not
+  before. Added `.github/workflows/api-tests.yml`: runs `npm test` on
+  every push to `main` and every pull request that touches `api/**`, using
+  `actions/setup-node` with the same Node 20 the Dockerfile builds on. No
+  Postgres/Redis service containers needed - every test in this suite is a
+  pure-function unit test by design (see the extraction work above), so
+  there's nothing stateful for CI to provision. A broken PR now fails
+  visibly before merge instead of only being caught at the next deploy.

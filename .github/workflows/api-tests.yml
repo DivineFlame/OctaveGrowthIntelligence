@@ -1,0 +1,42 @@
+# Runs api/test/ (48 tests as of this writing, Node's built-in node:test -
+# see api/test/ and README.md "Hardening notes") on every push and pull
+# request. This is the same suite api/Dockerfile already runs at image
+# build time (`RUN npm test`), so it was already a hard gate on deploy -
+# this just moves that same check earlier, onto every PR, before a broken
+# change is even merged, instead of only being caught at build/deploy
+# time. No DB/Redis service containers needed: every test in this suite
+# is a pure-function unit test (see api/src/validators.js, schemas.js,
+# channels.js, crypto-secrets.js, csv-leads.js) with no external
+# dependency, by design - see README.md for why the rest of api/src is
+# not yet safely testable this way.
+name: API tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-tests.yml'
+  pull_request:
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+
+      - run: npm ci
+
+      - run: npm test

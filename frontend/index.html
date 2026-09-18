@@ -23,6 +23,14 @@
         window.__ORGCOMMS_SESSION__ = s;
       }
     } catch (e) {}
+
+    // Applied here, before the app renders, so there's no flash of the
+    // wrong theme on load - defaults to dark (the app's original look) for
+    // anyone who hasn't picked a theme yet.
+    try {
+      var theme = localStorage.getItem('octave_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {}
   })();</script>
 
   
@@ -38,111 +46,158 @@ Error generating stack: `+u.message+`
   <script>(function(){function m(a){var h=a.getAttribute("href");if(!h)return;try{var u=new URL(h,document.baseURI);if((u.protocol==="http:"||u.protocol==="https:")&&u.host!==location.host){a.target="_blank";a.rel="noopener noreferrer";}}catch(e){}}function s(){document.querySelectorAll("a[href]").forEach(m);}if(document.readyState!=="loading"){s();}else{document.addEventListener("DOMContentLoaded",s);}document.addEventListener("click",function(e){var a=e.target&&e.target.closest&&e.target.closest("a[href]");if(a){m(a);}},true);})();</script>
   
   <style>
+    :root{
+      --oc-bg:#0a0a0b;
+      --oc-panel:#141416;
+      --oc-text:#fff;
+      --oc-border-06:rgba(255,255,255,.06);
+      --oc-border-08:rgba(255,255,255,.08);
+      --oc-border-1:rgba(255,255,255,.1);
+      --oc-border-12:rgba(255,255,255,.12);
+      --oc-input-bg:rgba(255,255,255,.04);
+      --oc-card-bg-subtle:rgba(255,255,255,.03);
+      --oc-dim-4:rgba(255,255,255,.4);
+      --oc-dim-45:rgba(255,255,255,.45);
+      --oc-dim-5:rgba(255,255,255,.5);
+      --oc-dim-6:rgba(255,255,255,.6);
+      --oc-dim-7:rgba(255,255,255,.7);
+      --oc-overlay-6:rgba(0,0,0,.6);
+      --oc-overlay-7:rgba(0,0,0,.7);
+      --oc-overlay-75:rgba(0,0,0,.75);
+      --oc-brand:#00a884;
+      --oc-danger:#ff6b6b;
+      --oc-success:#00d19a;
+      --oc-badge-bad-bg:rgba(255,107,107,.15);
+      --oc-brand-hover-bg:rgba(0,168,132,.08);
+    }
+    :root[data-theme="light"]{
+      --oc-bg:#f0f0f3;
+      --oc-panel:#ffffff;
+      --oc-text:#17181c;
+      --oc-border-06:rgba(0,0,0,.06);
+      --oc-border-08:rgba(0,0,0,.09);
+      --oc-border-1:rgba(0,0,0,.11);
+      --oc-border-12:rgba(0,0,0,.14);
+      --oc-input-bg:rgba(0,0,0,.035);
+      --oc-card-bg-subtle:rgba(0,0,0,.025);
+      --oc-dim-4:rgba(0,0,0,.45);
+      --oc-dim-45:rgba(0,0,0,.5);
+      --oc-dim-5:rgba(0,0,0,.55);
+      --oc-dim-6:rgba(0,0,0,.62);
+      --oc-dim-7:rgba(0,0,0,.7);
+      --oc-overlay-6:rgba(0,0,0,.35);
+      --oc-overlay-7:rgba(0,0,0,.4);
+      --oc-overlay-75:rgba(0,0,0,.45);
+      --oc-badge-bad-bg:rgba(255,107,107,.12);
+      --oc-brand-hover-bg:rgba(0,168,132,.1);
+    }
+    body{background:var(--oc-bg)}
+    #oc-bar .oc-theme-toggle{background:var(--oc-border-1);color:var(--oc-text);font-size:14px;padding:6px 9px;line-height:1}
     #oc-gate *{box-sizing:border-box;font-family:Inter,system-ui,sans-serif}
-    #oc-gate{position:fixed;inset:0;z-index:99999;background:#0a0a0b;color:#fff;display:flex;align-items:center;justify-content:center}
-    #oc-gate .oc-card{width:100%;max-width:380px;background:#141416;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:28px}
+    #oc-gate{position:fixed;inset:0;z-index:99999;background:var(--oc-bg);color:var(--oc-text);display:flex;align-items:center;justify-content:center}
+    #oc-gate .oc-card{width:100%;max-width:380px;background:var(--oc-panel);border:1px solid var(--oc-border-08);border-radius:16px;padding:28px}
     #oc-gate .oc-logo{display:block;max-width:200px;width:100%;height:auto;margin:0 auto 16px;background:#fff;border-radius:12px;padding:10px}
     #oc-gate h1{font-size:18px;font-weight:700;margin:0 0 4px;text-align:center}
-    #oc-gate p.oc-sub{font-size:12px;color:rgba(255,255,255,.5);margin:0 0 20px}
-    #oc-gate label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:14px 0 6px}
-    #oc-gate input,#oc-gate select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;outline:none}
-    #oc-gate input:focus,#oc-gate select:focus{border-color:#00a884}
-    #oc-gate button.oc-primary{margin-top:20px;width:100%;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-gate p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 20px}
+    #oc-gate label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:14px 0 6px}
+    #oc-gate input,#oc-gate select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;outline:none}
+    #oc-gate input:focus,#oc-gate select:focus{border-color:var(--oc-brand)}
+    #oc-gate button.oc-primary{margin-top:20px;width:100%;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
     #oc-gate button.oc-primary:disabled{opacity:.5;cursor:default}
-    #oc-gate .oc-err{margin-top:12px;font-size:12px;color:#ff6b6b}
+    #oc-gate .oc-err{margin-top:12px;font-size:12px;color:var(--oc-danger)}
     #oc-gate .oc-switch{text-align:center;margin-top:16px;font-size:12px}
-    #oc-gate .oc-switch a{color:#00a884;text-decoration:none;font-weight:600}
+    #oc-gate .oc-switch a{color:var(--oc-brand);text-decoration:none;font-weight:600}
     #oc-gate .oc-switch a:hover{text-decoration:underline}
-    #oc-bar{position:fixed;top:12px;right:12px;z-index:99998;display:flex;gap:8px;align-items:center;background:#141416;border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:6px 6px 6px 14px;font:12px Inter,system-ui,sans-serif;color:#fff}
-    #oc-bar .oc-who{color:rgba(255,255,255,.6)}
+    #oc-bar{position:fixed;top:12px;right:12px;z-index:99998;display:flex;gap:8px;align-items:center;background:var(--oc-panel);border:1px solid var(--oc-border-1);border-radius:999px;padding:6px 6px 6px 14px;font:12px Inter,system-ui,sans-serif;color:var(--oc-text)}
+    #oc-bar .oc-who{color:var(--oc-dim-6)}
     #oc-bar .oc-bar-icon{width:20px;height:20px;border-radius:5px;background:#fff;object-fit:contain;padding:1px}
     #oc-bar button{border:none;border-radius:999px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
-    #oc-bar .oc-admin-btn{background:#00a884;color:#fff}
-    #oc-bar .oc-logout-btn{background:rgba(255,255,255,.1);color:#fff}
-    #oc-admin{position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
-    #oc-admin .oc-panel{width:100%;max-width:640px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:24px}
+    #oc-bar .oc-admin-btn{background:var(--oc-brand);color:#fff}
+    #oc-bar .oc-logout-btn{background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-admin{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-admin .oc-panel{width:100%;max-width:640px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px}
     #oc-admin h2{font-size:16px;margin:0 0 16px;font-family:Inter,system-ui,sans-serif}
     #oc-admin .oc-tabs{display:flex;gap:8px;margin-bottom:16px}
-    #oc-admin .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:rgba(255,255,255,.06);color:rgba(255,255,255,.7);cursor:pointer;border:none;font-family:Inter,system-ui,sans-serif}
-    #oc-admin .oc-tab.oc-active{background:#00a884;color:#fff}
+    #oc-admin .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:var(--oc-border-06);color:var(--oc-dim-7);cursor:pointer;border:none;font-family:Inter,system-ui,sans-serif}
+    #oc-admin .oc-tab.oc-active{background:var(--oc-brand);color:#fff}
     #oc-admin table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px;font-family:Inter,system-ui,sans-serif}
-    #oc-admin th{text-align:left;color:rgba(255,255,255,.5);font-weight:600;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.1)}
-    #oc-admin td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+    #oc-admin th{text-align:left;color:var(--oc-dim-5);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--oc-border-1)}
+    #oc-admin td{padding:6px 8px;border-bottom:1px solid var(--oc-border-06)}
     #oc-admin form{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
-    #oc-admin form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:rgba(255,255,255,.5);margin-bottom:-4px}
-    #oc-admin input,#oc-admin select{padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;font-family:Inter,system-ui,sans-serif}
+    #oc-admin form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin-bottom:-4px}
+    #oc-admin input,#oc-admin select{padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:Inter,system-ui,sans-serif}
     #oc-admin .oc-full{grid-column:span 2}
-    #oc-admin .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;cursor:pointer}
-    #oc-admin .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
+    #oc-admin .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
+    #oc-admin .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
     #oc-admin .oc-panel{position:relative}
     #oc-admin .oc-msg{font-size:12px;margin-top:8px}
-    #oc-admin .oc-msg.oc-ok{color:#00d19a}
-    #oc-admin .oc-msg.oc-bad{color:#ff6b6b}
+    #oc-admin .oc-msg.oc-ok{color:var(--oc-success)}
+    #oc-admin .oc-msg.oc-bad{color:var(--oc-danger)}
     #oc-admin .oc-badge{font-size:10px;text-transform:uppercase;padding:2px 6px;border-radius:999px;margin-left:6px;vertical-align:middle}
-    #oc-admin .oc-badge-bad{background:rgba(255,107,107,.15);color:#ff6b6b}
-    #oc-security{position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
-    #oc-security .oc-panel{position:relative;width:100%;max-width:400px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:24px;font-family:Inter,system-ui,sans-serif}
-    #oc-security .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
-    #oc-security label{display:block;font-size:11px;text-transform:uppercase;color:rgba(255,255,255,.5);margin:12px 0 6px}
-    #oc-security input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
-    #oc-security .oc-submit{width:100%;padding:10px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;cursor:pointer}
+    #oc-admin .oc-badge-bad{background:var(--oc-badge-bad-bg);color:var(--oc-danger)}
+    #oc-security{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-security .oc-panel{position:relative;width:100%;max-width:400px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px;font-family:Inter,system-ui,sans-serif}
+    #oc-security .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
+    #oc-security label{display:block;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-security input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
+    #oc-security .oc-submit{width:100%;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
     #oc-security .oc-msg{font-size:12px;margin-top:8px}
-    #oc-security .oc-msg.oc-bad{color:#ff6b6b}
-    #oc-products{position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
-    #oc-products .oc-panel{position:relative;width:100%;max-width:640px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:24px;font-family:Inter,system-ui,sans-serif}
-    #oc-products .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
+    #oc-security .oc-msg.oc-bad{color:var(--oc-danger)}
+    #oc-products{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-products .oc-panel{position:relative;width:100%;max-width:640px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px;font-family:Inter,system-ui,sans-serif}
+    #oc-products .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
     #oc-products h2{font-size:16px;margin:0 0 16px}
     #oc-products .oc-tabs{display:flex;gap:8px;margin-bottom:16px}
-    #oc-products .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:rgba(255,255,255,.06);color:rgba(255,255,255,.7);cursor:pointer;border:none;font-family:inherit}
-    #oc-products .oc-tab.oc-active{background:#00a884;color:#fff}
+    #oc-products .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:var(--oc-border-06);color:var(--oc-dim-7);cursor:pointer;border:none;font-family:inherit}
+    #oc-products .oc-tab.oc-active{background:var(--oc-brand);color:#fff}
     #oc-products table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px}
-    #oc-products th{text-align:left;color:rgba(255,255,255,.5);font-weight:600;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.1)}
-    #oc-products td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+    #oc-products th{text-align:left;color:var(--oc-dim-5);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--oc-border-1)}
+    #oc-products td{padding:6px 8px;border-bottom:1px solid var(--oc-border-06)}
     #oc-products form{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
-    #oc-products form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:rgba(255,255,255,.5);margin-bottom:-4px}
-    #oc-products input,#oc-products select,#oc-products textarea{padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;font-family:inherit}
+    #oc-products form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin-bottom:-4px}
+    #oc-products input,#oc-products select,#oc-products textarea{padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit}
     #oc-products .oc-full{grid-column:span 2}
-    #oc-products .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;cursor:pointer}
+    #oc-products .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
     #oc-products .oc-msg{font-size:12px;margin-top:8px}
-    #oc-products .oc-msg.oc-ok{color:#00d19a}
-    #oc-products .oc-msg.oc-bad{color:#ff6b6b}
-    #oc-products .oc-back{background:none;border:none;color:#00a884;font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
-    #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:rgba(255,255,255,.1);color:#fff}
-    #oc-channel-wizard{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
-    #oc-channel-wizard .oc-panel{position:relative;width:100%;max-width:480px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:28px;font-family:Inter,system-ui,sans-serif}
-    #oc-channel-wizard .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:rgba(255,255,255,.6);font-size:18px;cursor:pointer}
+    #oc-products .oc-msg.oc-ok{color:var(--oc-success)}
+    #oc-products .oc-msg.oc-bad{color:var(--oc-danger)}
+    #oc-products .oc-back{background:none;border:none;color:var(--oc-brand);font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
+    #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-channel-wizard{position:fixed;inset:0;z-index:99999;background:var(--oc-overlay-75);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-channel-wizard .oc-panel{position:relative;width:100%;max-width:480px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-channel-wizard .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
     #oc-channel-wizard h2{font-size:16px;margin:0 0 4px}
-    #oc-channel-wizard p.oc-sub{font-size:12px;color:rgba(255,255,255,.5);margin:0 0 18px}
+    #oc-channel-wizard p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 18px}
     #oc-channel-wizard .oc-chgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    #oc-channel-wizard .oc-chcard{text-align:left;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);border-radius:12px;padding:12px 14px;cursor:pointer;color:#fff;font-family:inherit}
-    #oc-channel-wizard .oc-chcard:hover{border-color:#00a884;background:rgba(0,168,132,.08)}
+    #oc-channel-wizard .oc-chcard{text-align:left;border:1px solid var(--oc-border-1);background:var(--oc-card-bg-subtle);border-radius:12px;padding:12px 14px;cursor:pointer;color:var(--oc-text);font-family:inherit}
+    #oc-channel-wizard .oc-chcard:hover{border-color:var(--oc-brand);background:var(--oc-brand-hover-bg)}
     #oc-channel-wizard .oc-chcard .oc-chname{font-size:13px;font-weight:600;display:block}
-    #oc-channel-wizard .oc-chcard .oc-chstatus{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:rgba(255,255,255,.4);display:block;margin-top:4px}
-    #oc-channel-wizard .oc-chcard .oc-chstatus.oc-configured{color:#00d19a}
+    #oc-channel-wizard .oc-chcard .oc-chstatus{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--oc-dim-4);display:block;margin-top:4px}
+    #oc-channel-wizard .oc-chcard .oc-chstatus.oc-configured{color:var(--oc-success)}
     #oc-channel-wizard .oc-chcard.oc-disabled{opacity:.45;cursor:default}
-    #oc-channel-wizard .oc-chcard.oc-disabled:hover{border-color:rgba(255,255,255,.1);background:rgba(255,255,255,.03)}
-    #oc-channel-wizard label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:12px 0 6px}
-    #oc-channel-wizard input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
+    #oc-channel-wizard .oc-chcard.oc-disabled:hover{border-color:var(--oc-border-1);background:var(--oc-card-bg-subtle)}
+    #oc-channel-wizard label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-channel-wizard input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
     #oc-channel-wizard .oc-row{display:flex;gap:8px;margin-top:20px}
-    #oc-channel-wizard .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
-    #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.7);font-weight:500;font-size:13px;cursor:pointer}
-    #oc-channel-wizard .oc-err{margin-top:10px;font-size:12px;color:#ff6b6b}
-    #oc-channel-wizard .oc-help{font-size:11px;color:rgba(255,255,255,.45);margin-bottom:14px;line-height:1.5}
-    #oc-onboarding{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
-    #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:#141416;color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-channel-wizard .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
+    #oc-channel-wizard .oc-help{font-size:11px;color:var(--oc-dim-45);margin-bottom:14px;line-height:1.5}
+    #oc-onboarding{position:fixed;inset:0;z-index:99998;background:var(--oc-overlay-7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
     #oc-onboarding .oc-steps{display:flex;gap:6px;margin-bottom:18px}
-    #oc-onboarding .oc-step-dot{flex:1;height:3px;border-radius:2px;background:rgba(255,255,255,.12)}
-    #oc-onboarding .oc-step-dot.oc-done{background:#00a884}
+    #oc-onboarding .oc-step-dot{flex:1;height:3px;border-radius:2px;background:var(--oc-border-12)}
+    #oc-onboarding .oc-step-dot.oc-done{background:var(--oc-brand)}
     #oc-onboarding h2{font-size:16px;margin:0 0 4px}
-    #oc-onboarding p.oc-sub{font-size:12px;color:rgba(255,255,255,.5);margin:0 0 18px}
-    #oc-onboarding label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:12px 0 6px}
-    #oc-onboarding input,#oc-onboarding select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px}
+    #oc-onboarding p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 18px}
+    #oc-onboarding label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-onboarding input,#oc-onboarding select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
     #oc-onboarding .oc-row{display:flex;gap:8px;margin-top:20px}
-    #oc-onboarding .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:#00a884;color:#fff;font-weight:600;font-size:13px;cursor:pointer}
-    #oc-onboarding .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.7);font-weight:500;font-size:13px;cursor:pointer}
-    #oc-onboarding .oc-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:rgba(255,255,255,.4);background:none;border:none;cursor:pointer;width:100%}
-    #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:#ff6b6b}
-    #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:#00a884;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
+    #oc-onboarding .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:var(--oc-dim-4);background:none;border:none;cursor:pointer;width:100%}
+    #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
+    #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:var(--oc-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
   </style>
   <script>
   (function(){
@@ -153,6 +208,18 @@ Error generating stack: `+u.message+`
     function loadSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e){ return null; } }
     function saveSession(s){ localStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
     function clearSession(){ localStorage.removeItem(SESSION_KEY); }
+
+    // Light/dark theme - applied via a data-theme attribute on <html> so the
+    // CSS custom properties defined in the <style> block above can switch
+    // per-theme. A tiny inline script at the very top of <body> mirrors this
+    // read (before this bundle even parses) so the page never flashes the
+    // wrong theme on first paint.
+    var THEME_KEY = 'octave_theme';
+    function getTheme(){ try { return localStorage.getItem(THEME_KEY) || 'dark'; } catch(e){ return 'dark'; } }
+    function setTheme(t){
+      try { localStorage.setItem(THEME_KEY, t); } catch(e){}
+      document.documentElement.setAttribute('data-theme', t);
+    }
 
     async function doFetch(session, path, opts){
       var isFormData = (typeof FormData !== 'undefined') && opts.body instanceof FormData;
@@ -302,6 +369,7 @@ Error generating stack: `+u.message+`
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
+        '<button class="oc-theme-toggle" id="oc-toggle-theme" title="Switch theme" type="button">' + (getTheme() === 'light' ? '&#9789;' : '&#9788;') + '</button>' +
         '<button class="oc-logout-btn" id="oc-logout">Logout</button>';
       document.body.appendChild(bar);
 
@@ -314,6 +382,10 @@ Error generating stack: `+u.message+`
       }
       document.getElementById('oc-open-security').addEventListener('click', function(){ renderSecurity(session); });
       document.getElementById('oc-open-products').addEventListener('click', function(){ renderProducts(session); });
+      document.getElementById('oc-toggle-theme').addEventListener('click', function(){
+        setTheme(getTheme() === 'light' ? 'dark' : 'light');
+        renderBar(session);
+      });
     }
 
     function renderSecurity(session){

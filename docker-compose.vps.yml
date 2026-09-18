@@ -13,14 +13,12 @@ volumes:
 services:
   clamav:
     image: clamav/clamav:latest
-    container_name: orgcomms-clamav
     restart: unless-stopped
     networks: [backend]
     volumes:
       - clamav_data:/var/lib/clamav
   postgres:
     image: postgres:15-alpine
-    container_name: orgcomms-postgres
     restart: unless-stopped
     networks: [db]
     user: "999:999"
@@ -50,7 +48,6 @@ services:
       start_period: 15s
   redis:
     image: redis:7-alpine
-    container_name: orgcomms-redis
     restart: unless-stopped
     networks: [db]
     user: "999:999"
@@ -74,7 +71,6 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: orgcomms-api
     restart: unless-stopped
     networks: [frontend, backend, db]
     user: "1001:1001"
@@ -121,7 +117,6 @@ services:
     build:
       context: ./hermes
       dockerfile: Dockerfile
-    container_name: orgcomms-hermes
     restart: unless-stopped
     networks: [backend, db]
     user: "1001:1001"
@@ -144,7 +139,6 @@ services:
     build:
       context: ./paperclip
       dockerfile: Dockerfile
-    container_name: orgcomms-paperclip
     restart: unless-stopped
     networks: [backend]
     user: "1001:1001"
@@ -179,7 +173,6 @@ services:
     build:
       context: ./transformer
       dockerfile: Dockerfile
-    container_name: orgcomms-transformer-worker
     restart: unless-stopped
     networks: [backend]
     user: "1001:1001"
@@ -198,7 +191,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: orgcomms-frontend
     restart: unless-stopped
     networks: [frontend]
     ports:

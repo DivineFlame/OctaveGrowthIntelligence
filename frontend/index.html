@@ -233,6 +233,17 @@ Error generating stack: `+u.message+`
     function saveSession(s){ localStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
     function clearSession(){ localStorage.removeItem(SESSION_KEY); }
 
+    // HTML-escapes a value before it's spliced into an innerHTML template
+    // string. Most of the strings rendered this way are attacker-reachable
+    // stored data (a product name, an uploaded file's original filename, a
+    // tenant/company name from signup, a member's email) - none of that was
+    // being escaped anywhere in this file, so a product named
+    // `<img src=x onerror=alert(document.cookie)>` would execute for every
+    // admin who opened Products. Used everywhere a stored/user-supplied
+    // field (not a fixed, code-defined string) is interpolated into markup.
+    var ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); }
+
     // Light/dark theme - applied via a data-theme attribute on <html> so the
     // CSS custom properties defined in the <style> block above can switch
     // per-theme. A tiny inline script at the very top of <body> mirrors this
@@ -389,7 +400,7 @@ Error generating stack: `+u.message+`
       var canManageUsers = MANAGER_ROLES.indexOf(session.user.role) !== -1;
       bar.innerHTML =
         '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
-        '<span class="oc-who">' + session.user.email + ' &middot; ' + session.user.role + (session.tenant ? ' &middot; ' + session.tenant.name : '') + '</span>' +
+        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(session.user.role) + (session.tenant ? ' &middot; ' + esc(session.tenant.name) : '') + '</span>' +
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
@@ -433,7 +444,7 @@ Error generating stack: `+u.message+`
           var status = await api(session, '/auth/2fa/status');
           if (status.enabled) {
             body.innerHTML =
-              '<p style="font-size:13px">2FA is <strong style="color:#00d19a">enabled</strong> on your account.</p>' +
+              '<p style="font-size:13px">2FA is <strong style="color:var(--oc-success)">enabled</strong> on your account.</p>' +
               '<label>Current Password</label><input id="oc-2fa-password" type="password">' +
               '<button class="oc-submit" id="oc-2fa-disable" style="margin-top:10px">Disable 2FA</button>' +
               '<div class="oc-msg" id="oc-2fa-msg"></div>';
@@ -446,12 +457,12 @@ Error generating stack: `+u.message+`
             });
           } else {
             body.innerHTML =
-              '<p style="font-size:13px">2FA is <strong style="color:rgba(255,255,255,.6)">disabled</strong>.</p>' +
+              '<p style="font-size:13px">2FA is <strong style="color:var(--oc-dim-6)">disabled</strong>.</p>' +
               '<button class="oc-submit" id="oc-2fa-start">Enable 2FA</button>' +
               '<div id="oc-2fa-setup" style="display:none;margin-top:12px">' +
-                '<p style="font-size:12px;color:rgba(255,255,255,.6)">Scan with your authenticator app:</p>' +
+                '<p style="font-size:12px;color:var(--oc-dim-6)">Scan with your authenticator app:</p>' +
                 '<img id="oc-2fa-qr" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
-                '<p style="font-size:11px;color:rgba(255,255,255,.5);word-break:break-all" id="oc-2fa-secret"></p>' +
+                '<p style="font-size:11px;color:var(--oc-dim-5);word-break:break-all" id="oc-2fa-secret"></p>' +
                 '<label>Enter the 6-digit code to confirm</label>' +
                 '<input id="oc-2fa-code" maxlength="6">' +
                 '<button class="oc-submit" id="oc-2fa-confirm" style="margin-top:10px">Verify &amp; Enable</button>' +
@@ -474,7 +485,7 @@ Error generating stack: `+u.message+`
               } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
             });
           }
-        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
       loadStatus();
     }
@@ -536,7 +547,7 @@ Error generating stack: `+u.message+`
           '<div class="oc-panel">' +
             steps(1) +
             '<h2>Assign a Product Admin</h2>' +
-            '<p class="oc-sub">"' + state.productName + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your tenant.</p>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your tenant.</p>' +
             '<div id="oc-ob-step2-body">Loading&hellip;</div>' +
           '</div>';
 
@@ -544,7 +555,7 @@ Error generating stack: `+u.message+`
           var body = document.getElementById('oc-ob-step2-body');
           try {
             var users = await api(session, '/users');
-            var options = users.map(function(u){ return '<option value="' + u.id + '"' + (u.id === session.user.id ? ' selected' : '') + '>' + u.email + ' (' + u.role + ')</option>'; }).join('');
+            var options = users.map(function(u){ return '<option value="' + u.id + '"' + (u.id === session.user.id ? ' selected' : '') + '>' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('');
             body.innerHTML =
               '<form id="oc-ob-member">' +
                 '<label>Product Admin</label>' +
@@ -568,7 +579,7 @@ Error generating stack: `+u.message+`
                 renderStep3();
               } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
             });
-          } catch(e){ body.innerHTML = '<div class="oc-err" style="display:block">' + e.message + '</div>'; }
+          } catch(e){ body.innerHTML = '<div class="oc-err" style="display:block">' + esc(e.message) + '</div>'; }
         })();
       }
 
@@ -610,7 +621,7 @@ Error generating stack: `+u.message+`
             steps(4) +
             '<div class="oc-done-icon">&#10003;</div>' +
             '<h2>You\'re all set</h2>' +
-            '<p class="oc-sub">"' + state.productName + '" is ready. Add more users, configure the rest of its channels, or enable Agents (Premium plans) from the Products panel anytime.</p>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" is ready. Add more users, configure the rest of its channels, or enable Agents (Premium plans) from the Products panel anytime.</p>' +
             '<div class="oc-row">' +
               '<button class="oc-primary" id="oc-ob-open-products">Open Products</button>' +
             '</div>' +
@@ -659,11 +670,11 @@ Error generating stack: `+u.message+`
         try {
           var products = await api(session, '/products');
           var rows = products.map(function(p){
-            return '<tr><td>' + p.name + '</td><td>' + (p.description || '') + '</td><td><button class="oc-pbtn" data-id="' + p.id + '" data-name="' + String(p.name).replace(/"/g,'&quot;') + '">Manage</button></td></tr>';
+            return '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.description || '') + '</td><td><button class="oc-pbtn" data-id="' + p.id + '" data-name="' + esc(p.name) + '">Manage</button></td></tr>';
           }).join('');
           body.innerHTML =
             '<h2>Products &amp; Services</h2>' +
-            '<table><tr><th>Name</th><th>Description</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:rgba(255,255,255,.5)">No products yet</td></tr>') + '</table>' +
+            '<table><tr><th>Name</th><th>Description</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:var(--oc-dim-5)">No products yet</td></tr>') + '</table>' +
             (isTenantAdmin ?
               '<form id="oc-create-product">' +
                 '<label class="oc-full">Create Product/Service</label>' +
@@ -687,14 +698,14 @@ Error generating stack: `+u.message+`
               loadList();
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
           });
-        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
       async function loadDetail(productId, productName){
         var body = document.getElementById('oc-products-body');
         body.innerHTML =
           '<button class="oc-back" id="oc-back-to-list">&larr; Back to Products</button>' +
-          '<h2 style="font-size:14px">' + productName + '</h2>' +
+          '<h2 style="font-size:14px">' + esc(productName) + '</h2>' +
           '<div class="oc-tabs">' +
             '<button class="oc-tab oc-active" data-tab="members">Members</button>' +
             '<button class="oc-tab" data-tab="channels">Channels</button>' +
@@ -728,7 +739,7 @@ Error generating stack: `+u.message+`
             var members = await api(session, '/products/' + productId + '/members');
             var canAdmin = isTenantAdmin || members.some(function(m){ return m.user_id === session.user.id && m.role === 'ADMIN'; });
             var rows = members.map(function(m){
-              return '<tr><td>' + m.email + '</td><td>' + m.role + '</td><td>' + (canAdmin ? '<button class="oc-pbtn" data-uid="' + m.user_id + '">Remove</button>' : '') + '</td></tr>';
+              return '<tr><td>' + esc(m.email) + '</td><td>' + esc(m.role) + '</td><td>' + (canAdmin ? '<button class="oc-pbtn" data-uid="' + m.user_id + '">Remove</button>' : '') + '</td></tr>';
             }).join('');
 
             var pickerHtml = '<input name="user_id" placeholder="User ID" class="oc-full" required>';
@@ -737,11 +748,11 @@ Error generating stack: `+u.message+`
               try { tenantUsers = await api(session, '/users'); } catch(e) { tenantUsers = null; }
             }
             if (tenantUsers) {
-              pickerHtml = '<select name="user_id" class="oc-full">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + u.email + ' (' + u.role + ')</option>'; }).join('') + '</select>';
+              pickerHtml = '<select name="user_id" class="oc-full">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
             }
 
             el.innerHTML =
-              '<table><tr><th>User</th><th>Role</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:rgba(255,255,255,.5)">No members yet</td></tr>') + '</table>' +
+              '<table><tr><th>User</th><th>Role</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:var(--oc-dim-5)">No members yet</td></tr>') + '</table>' +
               (canAdmin ?
                 '<form id="oc-add-member">' +
                   '<label class="oc-full">Add Member</label>' +
@@ -768,7 +779,7 @@ Error generating stack: `+u.message+`
                 loadMembers();
               } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
             });
-          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 
         // Renders the channel-config fields for one channel into a
@@ -902,7 +913,7 @@ Error generating stack: `+u.message+`
                 loadChannels();
               });
             });
-          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 
         // Real content pipeline: upload -> generate per-channel variants ->
@@ -924,8 +935,8 @@ Error generating stack: `+u.message+`
           var canAct = canApproveContent && v.status === 'PENDING_APPROVAL';
           return '<div class="oc-variant-row">' +
               '<div>' +
-                '<span class="oc-variant-ch">' + v.channel + '</span>' +
-                '<span class="oc-variant-spec">' + (v.spec || '') + (v.publish_error ? ' &middot; ' + v.publish_error : '') + '</span>' +
+                '<span class="oc-variant-ch">' + esc(v.channel) + '</span>' +
+                '<span class="oc-variant-spec">' + esc(v.spec || '') + (v.publish_error ? ' &middot; ' + esc(v.publish_error) : '') + '</span>' +
               '</div>' +
               '<div class="oc-variant-actions">' +
                 '<span class="oc-status-pill oc-status-' + v.status + '">' + v.status.replace(/_/g,' ') + '</span>' +
@@ -942,8 +953,8 @@ Error generating stack: `+u.message+`
           return '<div class="oc-asset-card" data-asset="' + a.id + '">' +
               '<div class="oc-asset-head">' +
                 '<div>' +
-                  '<div class="oc-asset-name">' + a.file_name + '</div>' +
-                  '<div class="oc-asset-meta">' + fmtBytes(a.file_size) + ' &middot; ' + a.mime_type + ' &middot; ' +
+                  '<div class="oc-asset-name">' + esc(a.file_name) + '</div>' +
+                  '<div class="oc-asset-meta">' + fmtBytes(a.file_size) + ' &middot; ' + esc(a.mime_type) + ' &middot; ' +
                     (a.virus_scan_status === 'CLEAN' ? 'scan clean' : '<span class="oc-scan-bad">' + a.virus_scan_status + '</span>') +
                   '</div>' +
                 '</div>' +
@@ -1012,7 +1023,7 @@ Error generating stack: `+u.message+`
                 } catch(e){ alert(e.message); }
               });
             });
-          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 
         async function loadProductAgents(){
@@ -1022,18 +1033,18 @@ Error generating stack: `+u.message+`
             var enabled = await api(session, '/products/' + productId + '/agents');
             var available = await api(session, '/agents');
             var rows = enabled.map(function(a){
-              return '<tr><td>' + a.name + '</td><td>' + (a.model || '&mdash;') + '</td>' +
-                '<td><button class="oc-run-agent" data-id="' + a.id + '" data-name="' + a.name.replace(/"/g,'&quot;') + '">Run</button></td>' +
+              return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '&mdash;') + '</td>' +
+                '<td><button class="oc-run-agent" data-id="' + a.id + '" data-name="' + esc(a.name) + '">Run</button></td>' +
                 '<td><button class="oc-view-runs" data-id="' + a.id + '">History</button></td>' +
                 '<td><button class="oc-pbtn" data-id="' + a.id + '">Disable</button></td></tr>';
             }).join('');
             el.innerHTML =
-              '<table><tr><th>Agent</th><th>Model</th><th></th><th></th><th></th></tr>' + (rows || '<tr><td colspan="5" style="color:rgba(255,255,255,.5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
+              '<table><tr><th>Agent</th><th>Model</th><th></th><th></th><th></th></tr>' + (rows || '<tr><td colspan="5" style="color:var(--oc-dim-5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
               '<div id="oc-agent-runs"></div>' +
               (available.length ?
                 '<form id="oc-enable-agent">' +
                   '<label class="oc-full">Enable an Agent</label>' +
-                  '<select name="agent_id" class="oc-full">' + available.map(function(a){ return '<option value="' + a.id + '">' + a.name + '</option>'; }).join('') + '</select>' +
+                  '<select name="agent_id" class="oc-full">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
                   '<button class="oc-submit" type="submit">Enable</button>' +
                   '<div class="oc-msg oc-full" id="oc-pagent-msg"></div>' +
                 '</form>'
@@ -1042,11 +1053,11 @@ Error generating stack: `+u.message+`
             var runsBox = document.getElementById('oc-agent-runs');
             function renderRuns(agentId, runs){
               runsBox.innerHTML =
-                '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:16px 0 8px">Recent runs</h4>' +
+                '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:16px 0 8px">Recent runs</h4>' +
                 (runs.length ? runs.map(function(r){
-                  return '<div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px">' +
-                    '<div style="color:rgba(255,255,255,.5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + r.trigger_type + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'#00d19a':'#ff6b6b') + '">' + r.status + '</span></div>' +
-                    '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? (r.output_text||'').replace(/</g,'&lt;') : ('Error: ' + (r.error||'').replace(/</g,'&lt;'))) + '</div>' +
+                  return '<div style="border:1px solid var(--oc-border-08);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px">' +
+                    '<div style="color:var(--oc-dim-5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + esc(r.trigger_type) + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'var(--oc-success)':'var(--oc-danger)') + '">' + esc(r.status) + '</span></div>' +
+                    '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? esc(r.output_text||'') : ('Error: ' + esc(r.error||''))) + '</div>' +
                   '</div>';
                 }).join('') : '<div class="oc-msg">No runs yet.</div>');
             }
@@ -1092,7 +1103,7 @@ Error generating stack: `+u.message+`
                 loadProductAgents();
               } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
             });
-          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 
         loadMembers();
@@ -1146,8 +1157,8 @@ Error generating stack: `+u.message+`
         try {
           var tenants = await api(session, '/tenants');
           var rows = tenants.map(function(t){
-            return '<tr><td>' + t.name + '</td><td>' + t.subdomain + '</td><td>' + t.plan + '</td>' +
-              '<td><button class="oc-pick-tenant" data-id="' + t.id + '" data-name="' + t.name + '">Manage users</button></td></tr>';
+            return '<tr><td>' + esc(t.name) + '</td><td>' + esc(t.subdomain) + '</td><td>' + esc(t.plan) + '</td>' +
+              '<td><button class="oc-pick-tenant" data-id="' + t.id + '" data-name="' + esc(t.name) + '">Manage users</button></td></tr>';
           }).join('');
           el.innerHTML =
             '<table><tr><th>Name</th><th>Subdomain</th><th>Plan</th><th></th></tr>' + rows + '</table>' +
@@ -1176,7 +1187,7 @@ Error generating stack: `+u.message+`
               loadTenants();
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
           });
-        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
       async function loadUsers(){
@@ -1186,15 +1197,15 @@ Error generating stack: `+u.message+`
           var roles = await api(session, '/roles');
           var qs = (isSuperAdmin && selectedTenantId) ? ('?tenant_id=' + encodeURIComponent(selectedTenantId)) : '';
           var users = await api(session, '/users' + qs);
-          var roleOptions = roles.map(function(r){ return '<option value="' + r.name + '">' + r.name + '</option>'; }).join('');
+          var roleOptions = roles.map(function(r){ return '<option value="' + esc(r.name) + '">' + esc(r.name) + '</option>'; }).join('');
           var rows = users.map(function(u){
             var isSelf = u.id === session.user.id;
-            return '<tr><td>' + u.email + (u.disabled ? ' <span class="oc-badge oc-badge-bad">disabled</span>' : '') + '</td><td>' +
+            return '<tr><td>' + esc(u.email) + (u.disabled ? ' <span class="oc-badge oc-badge-bad">disabled</span>' : '') + '</td><td>' +
               '<select class="oc-role-select" data-id="' + u.id + '">' +
-                roles.map(function(r){ return '<option value="' + r.name + '"' + (r.name===u.role?' selected':'') + '>' + r.name + '</option>'; }).join('') +
+                roles.map(function(r){ return '<option value="' + esc(r.name) + '"' + (r.name===u.role?' selected':'') + '>' + esc(r.name) + '</option>'; }).join('') +
               '</select></td><td><button class="oc-save-role" data-id="' + u.id + '">Save</button></td>' +
               '<td><button class="oc-toggle-status" data-id="' + u.id + '" data-disabled="' + !!u.disabled + '"' + (isSelf ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button></td>' +
-              '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + u.email.replace(/"/g,'&quot;') + '">Reset Password</button></td></tr>';
+              '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button></td></tr>';
           }).join('');
           el.innerHTML =
             (isSuperAdmin ? '<div class="oc-msg" style="margin-bottom:8px">Managing tenant: ' + (selectedTenantId || session.user.tenant_id) + '</div>' : '') +
@@ -1250,7 +1261,7 @@ Error generating stack: `+u.message+`
               loadUsers();
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
           });
-        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
       async function loadWebhooks(){
@@ -1275,7 +1286,7 @@ Error generating stack: `+u.message+`
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
           });
         } catch(e){
-          el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '<br>No secret yet? Rotate once to provision one.</div>' +
+          el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '<br>No secret yet? Rotate once to provision one.</div>' +
             '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>';
           el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
             try { await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' }); loadWebhooks(); } catch(e2){ alert(e2.message); }
@@ -1289,10 +1300,10 @@ Error generating stack: `+u.message+`
         try {
           var connections = await api(session, '/llm-connections');
           var agents = await api(session, '/agents');
-          var connOptions = connections.map(function(c){ return '<option value="' + c.id + '">' + c.name + ' (' + c.provider + ')</option>'; }).join('');
+          var connOptions = connections.map(function(c){ return '<option value="' + c.id + '">' + esc(c.name) + ' (' + esc(c.provider) + ')</option>'; }).join('');
           el.innerHTML =
-            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:0 0 8px">LLM Connections</h4>' +
-            '<table><tr><th>Name</th><th>Provider</th></tr>' + connections.map(function(c){ return '<tr><td>' + c.name + '</td><td>' + c.provider + '</td></tr>'; }).join('') + '</table>' +
+            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:0 0 8px">LLM Connections</h4>' +
+            '<table><tr><th>Name</th><th>Provider</th></tr>' + connections.map(function(c){ return '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.provider) + '</td></tr>'; }).join('') + '</table>' +
             '<form id="oc-create-connection">' +
               '<label class="oc-full">Add LLM Connection</label>' +
               '<input name="name" placeholder="Connection name" required>' +
@@ -1302,15 +1313,15 @@ Error generating stack: `+u.message+`
               '<button class="oc-submit" type="submit">Add</button>' +
               '<div class="oc-msg oc-full" id="oc-connection-msg"></div>' +
             '</form>' +
-            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.5);margin:20px 0 8px">Agents</h4>' +
-            '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + a.name + '</td><td>' + (a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
+            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:20px 0 8px">Agents</h4>' +
+            '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
             (connections.length ?
               '<form id="oc-create-agent">' +
                 '<label class="oc-full">Create Agent</label>' +
                 '<input name="name" placeholder="Agent name" required>' +
                 '<select name="llm_connection_id" class="oc-full">' + connOptions + '</select>' +
                 '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full">' +
-                '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;font-size:13px;font-family:inherit"></textarea>' +
+                '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit"></textarea>' +
                 '<button class="oc-submit" type="submit">Create</button>' +
                 '<div class="oc-msg" id="oc-agent-msg"></div>' +
               '</form>'
@@ -1342,7 +1353,7 @@ Error generating stack: `+u.message+`
               loadAgentsTab();
             } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
           });
-        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + e.message + '</div>'; }
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
       if (isSuperAdmin) loadTenants();

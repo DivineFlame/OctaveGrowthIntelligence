@@ -583,3 +583,21 @@ code changes were needed.
   Redis are actually reachable, and that the auth/RBAC boundaries on a
   handful of representative routes (`/leads`, `/users`, `/auth/login`, the
   internal publish route) still reject the way they're supposed to.
+- **Fixed stored/reflected XSS across the hand-written frontend.** Nothing
+  in `frontend/index.html`'s vanilla-JS chrome (login, top bar, Admin,
+  Products, the Content tab, the Agents/LLM-connections panels) escaped
+  dynamic values before splicing them into `innerHTML` — a product name, an
+  uploaded file's original filename, a tenant/company name from signup, a
+  member's email, an LLM connection name, or even a server error message
+  that echoes back raw request input (e.g. `` `Unknown channel: ${channel}` ``)
+  would all execute as markup if they contained HTML. Added a shared
+  `esc()` helper and applied it at every such site. (The separate,
+  minified React bundle mounted at `#root` is out of scope, as always — no
+  source is available for it in this repo.)
+- **Finished the light/dark theme conversion.** A handful of inline
+  `style="color:..."` values in JS-generated markup (the 2FA panel, agent
+  run cards, empty-state table rows, the Content tab's Agents/LLM
+  Connections headings) were still hardcoded dark-theme colors left over
+  from before the theme system existed — invisible-on-white in light mode.
+  Switched to the same `var(--oc-*)` custom properties the rest of the UI
+  uses.

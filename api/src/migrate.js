@@ -25,7 +25,8 @@ const MIGRATIONS_IN_ORDER = [
   'migrate-products-agents.sql',
   'migrate-agent-execution.sql',
   'migrate-channel-publish.sql',
-  'migrate-force-rls.sql'
+  'migrate-force-rls.sql',
+  'migrate-content-variants-indexes.sql'
 ];
 
 async function main() {

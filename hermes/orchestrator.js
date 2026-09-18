@@ -1,8 +1,18 @@
 const redis = require('redis');
+const fs = require('fs');
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const redisClient = redis.createClient({ url: process.env.REDIS_URL });
 redisClient.connect();
+
+// Heartbeat file for Docker's HEALTHCHECK (see Dockerfile) - this is a
+// background worker with no HTTP server to poll, so `restart:
+// unless-stopped` alone only catches an actual process crash, not a hang
+// (e.g. stuck waiting on a Redis call that never resolves or rejects).
+// Touched once per loop iteration below; the healthcheck fails once the
+// file goes stale.
+const HEARTBEAT_FILE = '/tmp/heartbeat';
+function beat() { try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())); } catch (e) {} }
 
 // Two real jobs left here - 'scout', 'transformer' and 'compliance' used to
 // exist as agent types too, but they only ever returned hardcoded canned
@@ -68,12 +78,14 @@ async function runAgent(type, payload) {
 
 async function loop() {
   console.log('Hermes Agents started - publisher, lead_intake');
+  beat();
   while (true) {
     try {
       const pub = await redisClient.brPop('publisher:queue', 1);
       if (pub) await runAgent('publisher', JSON.parse(pub.element));
       const lead = await redisClient.brPop('webhook:incoming', 1);
       if (lead) await runAgent('lead_intake', JSON.parse(lead.element));
+      beat();
     } catch(e){ console.error('Hermes error', e.message); await new Promise(r=>setTimeout(r,1000)); }
   }
 }

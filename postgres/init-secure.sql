@@ -34,6 +34,8 @@ CREATE TRIGGER no_update_audit BEFORE UPDATE OR DELETE ON audit_logs FOR EACH RO
 CREATE TABLE IF NOT EXISTS hermes_agents (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, agent_type VARCHAR(50), status VARCHAR(20) DEFAULT 'IDLE', last_run TIMESTAMPTZ, config JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_content_tenant ON content_assets(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_content_variants_asset ON content_variants(asset_id);
+CREATE INDEX IF NOT EXISTS idx_content_variants_tenant ON content_variants(tenant_id);
 
 -- Products/Services: tenant-scoped, created by a Tenant Admin (DEPT_ADMIN/
 -- IT_ADMIN/SUPER_ADMIN - the existing tenant-management roles).

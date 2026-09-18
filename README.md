@@ -561,3 +561,25 @@ code changes were needed.
   inspecting the actual image config) so it needed no override, just the
   `condition: service_healthy` wiring on the services that depend on it.
   Applied identically to both compose files.
+- **Added the missing `content_variants` indexes.** It had nothing beyond
+  its primary key, so every lookup by `asset_id` (`GET
+  /products/:id/content`, the publish route, the transform route's
+  post-resize `UPDATE`) and every RLS/tenant-scoped query was a sequential
+  scan — fine today, a real cost as it grows. Added
+  `postgres/migrate-content-variants-indexes.sql` (registered in
+  `api/src/migrate.js`) and the same two indexes directly in
+  `init-secure.sql` for fresh installs.
+- **`hermes-orchestrator` had no healthcheck at all.** It's a background
+  worker with no HTTP server, so `restart: unless-stopped` only caught an
+  actual process crash, not a hang (stuck on something that never resolves
+  or rejects, with no error to log). It now writes a heartbeat file once
+  per loop iteration (every ~2s in the healthy case — two sequential
+  `brPop` calls with 1s timeouts each), and `hermes/Dockerfile`'s
+  `HEALTHCHECK` fails once that file goes stale.
+- **Added `scripts/smoke-test.sh`.** There's no test suite in this repo at
+  all yet — this isn't one either, but it's a fast, dependency-free check
+  you can run right after a deploy (`./scripts/smoke-test.sh
+  https://api.yourdomain.com`) to confirm `/health` reports Postgres and
+  Redis are actually reachable, and that the auth/RBAC boundaries on a
+  handful of representative routes (`/leads`, `/users`, `/auth/login`, the
+  internal publish route) still reject the way they're supposed to.

@@ -269,13 +269,13 @@
             '<h1>' + (isSignup ? 'Create Super Admin Account' : 'Sign In') + '</h1>' +
             '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your tenant' : 'Sign in to your tenant') + '</p>' +
             '<form id="oc-auth-form">' +
-              (isSignup ? '<label>Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
-              '<label>Email</label>' +
+              (isSignup ? '<label for="oc-company">Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
+              '<label for="oc-email">Email</label>' +
               '<input id="oc-email" type="email" required>' +
-              '<label>Password</label>' +
+              '<label for="oc-password">Password</label>' +
               '<input id="oc-password" type="password" minlength="12" required>' +
-              (isSignup ? '<label>Confirm Password</label><input id="oc-password-confirm" type="password" minlength="12" required>' : '') +
-              (!isSignup ? '<div id="oc-totp-wrap" style="display:none"><label>2FA Code</label><input id="oc-totp"></div>' : '') +
+              (isSignup ? '<label for="oc-password-confirm">Confirm Password</label><input id="oc-password-confirm" type="password" minlength="12" required>' : '') +
+              (!isSignup ? '<div id="oc-totp-wrap" style="display:none"><label for="oc-totp">2FA Code</label><input id="oc-totp"></div>' : '') +
               '<button class="oc-primary" type="submit">' + (isSignup ? 'Create Account' : 'Sign In') + '</button>' +
               '<div class="oc-err" role="alert" aria-live="assertive" id="oc-err" style="display:none"></div>' +
             '</form>' +
@@ -397,7 +397,7 @@
             '<button class="oc-submit" id="oc-data-erase-start" type="button" style="background:var(--oc-danger);border-color:var(--oc-danger)">Erase my account&hellip;</button>' +
             '<div id="oc-data-erase-confirm" style="display:none;margin-top:10px">' +
               '<p style="font-size:12px;color:var(--oc-dim-6)">This disables your login and removes your personal identifiers from your account. It does not remove content or records you\'ve already created - see the export above for what those are. This cannot be undone. Enter your password to confirm.</p>' +
-              '<label>Current Password</label><input id="oc-erase-password" type="password">' +
+              '<label for="oc-erase-password">Current Password</label><input id="oc-erase-password" type="password">' +
               '<button class="oc-submit" id="oc-data-erase-confirm-btn" type="button" style="margin-top:10px;background:var(--oc-danger);border-color:var(--oc-danger)">Permanently erase my account</button>' +
             '</div>' +
             '<div class="oc-msg" aria-live="polite" id="oc-data-erase-msg"></div>' +
@@ -442,7 +442,7 @@
           if (status.enabled) {
             body.innerHTML =
               '<p style="font-size:13px">2FA is <strong style="color:var(--oc-success)">enabled</strong> on your account.</p>' +
-              '<label>Current Password</label><input id="oc-2fa-password" type="password">' +
+              '<label for="oc-2fa-password">Current Password</label><input id="oc-2fa-password" type="password">' +
               '<button class="oc-submit" id="oc-2fa-disable" style="margin-top:10px">Disable 2FA</button>' +
               '<div class="oc-msg" aria-live="polite" id="oc-2fa-msg"></div>';
             document.getElementById('oc-2fa-disable').addEventListener('click', async function(){
@@ -460,7 +460,7 @@
                 '<p style="font-size:12px;color:var(--oc-dim-6)">Scan with your authenticator app:</p>' +
                 '<img id="oc-2fa-qr" alt="Two-factor authentication QR code - scan with your authenticator app" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
                 '<p style="font-size:11px;color:var(--oc-dim-5);word-break:break-all" id="oc-2fa-secret"></p>' +
-                '<label>Enter the 6-digit code to confirm</label>' +
+                '<label for="oc-2fa-code">Enter the 6-digit code to confirm</label>' +
                 '<input id="oc-2fa-code" maxlength="6">' +
                 '<button class="oc-submit" id="oc-2fa-confirm" style="margin-top:10px">Verify &amp; Enable</button>' +
               '</div>' +
@@ -517,10 +517,10 @@
             '<h2>Welcome — let\'s set up your first Product</h2>' +
             '<p class="oc-sub">A Product/Service is what your channels, leads, and content get organized under. You can create more later.</p>' +
             '<form id="oc-ob-product">' +
-              '<label>Product/Service Name</label>' +
-              '<input name="name" placeholder="e.g. Acme Marketing" required>' +
-              '<label>Description (optional)</label>' +
-              '<input name="description" placeholder="What is this product/service for?">' +
+              '<label for="oc-onboard-product-name">Product/Service Name</label>' +
+              '<input id="oc-onboard-product-name" name="name" placeholder="e.g. Acme Marketing" required>' +
+              '<label for="oc-onboard-product-desc">Description (optional)</label>' +
+              '<input id="oc-onboard-product-desc" name="description" placeholder="What is this product/service for?">' +
               '<div class="oc-row"><button type="submit" class="oc-primary">Create &amp; Continue</button></div>' +
               '<div class="oc-err" role="alert" aria-live="assertive" id="oc-ob-err1" style="display:none"></div>' +
             '</form>' +
@@ -557,8 +557,8 @@
             var options = users.map(function(u){ return '<option value="' + u.id + '"' + (u.id === session.user.id ? ' selected' : '') + '>' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('');
             body.innerHTML =
               '<form id="oc-ob-member">' +
-                '<label>Product Admin</label>' +
-                '<select name="user_id">' + options + '</select>' +
+                '<label for="oc-onboard-product-admin">Product Admin</label>' +
+                '<select id="oc-onboard-product-admin" name="user_id">' + options + '</select>' +
                 '<div class="oc-row">' +
                   '<button type="button" class="oc-secondary" id="oc-ob-back2">Back</button>' +
                   '<button type="submit" class="oc-primary">Assign &amp; Continue</button>' +
@@ -590,10 +590,10 @@
             '<h2>Configure your first channel</h2>' +
             '<p class="oc-sub">Optional — every channel already exists for this product and can be configured anytime from the Products panel. Do one now if you want.</p>' +
             '<form id="oc-ob-channel">' +
-              '<label>Channel</label>' +
-              '<select name="channel">' + channels.map(function(c){ return '<option value="' + c + '">' + c + '</option>'; }).join('') + '</select>' +
-              '<label>Note (optional)</label>' +
-              '<input name="note" placeholder="No real platform integration yet — this is a placeholder">' +
+              '<label for="oc-onboard-channel">Channel</label>' +
+              '<select id="oc-onboard-channel" name="channel">' + channels.map(function(c){ return '<option value="' + c + '">' + c + '</option>'; }).join('') + '</select>' +
+              '<label for="oc-onboard-channel-note">Note (optional)</label>' +
+              '<input id="oc-onboard-channel-note" name="note" placeholder="No real platform integration yet — this is a placeholder">' +
               '<div class="oc-row">' +
                 '<button type="button" class="oc-secondary" id="oc-ob-skip3">Skip</button>' +
                 '<button type="submit" class="oc-primary">Save &amp; Finish</button>' +
@@ -679,8 +679,8 @@
             (isTenantAdmin ?
               '<form id="oc-create-product">' +
                 '<label class="oc-full">Create Product/Service</label>' +
-                '<input name="name" placeholder="Name" required class="oc-full">' +
-                '<input name="description" placeholder="Description (optional)" class="oc-full">' +
+                '<input name="name" placeholder="Name" required class="oc-full" aria-label="Product/service name">' +
+                '<input name="description" placeholder="Description (optional)" class="oc-full" aria-label="Description (optional)">' +
                 '<button class="oc-submit" type="submit">Create</button>' +
                 '<div class="oc-msg oc-full" aria-live="polite" id="oc-product-msg"></div>' +
               '</form>' : '');
@@ -743,13 +743,13 @@
               return '<tr><td>' + esc(m.email) + '</td><td>' + esc(m.role) + '</td><td>' + (canAdmin ? '<button class="oc-pbtn" data-uid="' + m.user_id + '">Remove</button>' : '') + '</td></tr>';
             }).join('');
 
-            var pickerHtml = '<input name="user_id" placeholder="User ID" class="oc-full" required>';
+            var pickerHtml = '<input name="user_id" placeholder="User ID" class="oc-full" required aria-label="User ID">';
             var tenantUsers = null;
             if (canAdmin && isTenantAdmin) {
               try { tenantUsers = await api(session, '/users'); } catch(e) { tenantUsers = null; }
             }
             if (tenantUsers) {
-              pickerHtml = '<select name="user_id" class="oc-full">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
+              pickerHtml = '<select name="user_id" class="oc-full" aria-label="User">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
             }
 
             el.innerHTML =
@@ -758,7 +758,7 @@
                 '<form id="oc-add-member">' +
                   '<label class="oc-full">Add Member</label>' +
                   pickerHtml +
-                  '<select name="role"><option value="MEMBER">Member</option><option value="ADMIN">Product Admin</option></select>' +
+                  '<select name="role" aria-label="Role"><option value="MEMBER">Member</option><option value="ADMIN">Product Admin</option></select>' +
                   '<button class="oc-submit" type="submit">Add</button>' +
                   '<div class="oc-msg oc-full" aria-live="polite" id="oc-member-msg"></div>' +
                 '</form>' : '');
@@ -796,8 +796,8 @@
             s.fields.map(function(f){
               var val = existing[f.key] || '';
               var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
-              return '<label>' + f.label + (f.required ? ' *' : '') + '</label>' +
-                '<input name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
+              return '<label for="oc-cf-' + f.key + '">' + f.label + (f.required ? ' *' : '') + '</label>' +
+                '<input id="oc-cf-' + f.key + '" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
                 (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
             }).join('');
         }
@@ -979,7 +979,7 @@
             var assets = await api(session, '/products/' + productId + '/content');
             el.innerHTML =
               '<div class="oc-upload-row">' +
-                '<input type="file" id="oc-content-file">' +
+                '<input type="file" id="oc-content-file" aria-label="Choose a file to upload">' +
                 '<button class="oc-gen-btn" id="oc-content-upload-btn" type="button">Upload</button>' +
               '</div>' +
               '<div class="oc-msg" aria-live="polite" id="oc-content-upload-msg"></div>' +
@@ -1047,7 +1047,7 @@
               (available.length ?
                 '<form id="oc-enable-agent">' +
                   '<label class="oc-full">Enable an Agent</label>' +
-                  '<select name="agent_id" class="oc-full">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
+                  '<select name="agent_id" class="oc-full" aria-label="Agent">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
                   '<button class="oc-submit" type="submit">Enable</button>' +
                   '<div class="oc-msg oc-full" aria-live="polite" id="oc-pagent-msg"></div>' +
                 '</form>'
@@ -1169,9 +1169,9 @@
             '<table><tr><th>Name</th><th>Subdomain</th><th>Plan</th><th></th></tr>' + rows + '</table>' +
             '<form id="oc-create-tenant">' +
               '<label class="oc-full">Create Tenant</label>' +
-              '<input name="name" placeholder="Tenant name" required>' +
-              '<input name="subdomain" placeholder="subdomain" required>' +
-              '<select name="plan"><option value="starter">Starter</option><option value="premium">Premium</option></select>' +
+              '<input name="name" placeholder="Tenant name" required aria-label="Tenant name">' +
+              '<input name="subdomain" placeholder="subdomain" required aria-label="Subdomain">' +
+              '<select name="plan" aria-label="Plan"><option value="starter">Starter</option><option value="premium">Premium</option></select>' +
               '<button class="oc-submit" type="submit">Create</button>' +
               '<div class="oc-msg oc-full" aria-live="polite" id="oc-tenant-msg"></div>' +
             '</form>';
@@ -1206,7 +1206,7 @@
           var rows = users.map(function(u){
             var isSelf = u.id === session.user.id;
             return '<tr><td>' + esc(u.email) + (u.disabled ? ' <span class="oc-badge oc-badge-bad">disabled</span>' : '') + '</td><td>' +
-              '<select class="oc-role-select" data-id="' + u.id + '">' +
+              '<select class="oc-role-select" data-id="' + u.id + '" aria-label="Role for ' + esc(u.email) + '">' +
                 roles.map(function(r){ return '<option value="' + esc(r.name) + '"' + (r.name===u.role?' selected':'') + '>' + esc(r.name) + '</option>'; }).join('') +
               '</select></td><td><button class="oc-save-role" data-id="' + u.id + '">Save</button></td>' +
               '<td><button class="oc-toggle-status" data-id="' + u.id + '" data-disabled="' + !!u.disabled + '"' + (isSelf ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button></td>' +
@@ -1217,9 +1217,9 @@
             '<table><tr><th>Email</th><th>Role</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
             '<form id="oc-create-user">' +
               '<label class="oc-full">Create User</label>' +
-              '<input name="email" type="email" placeholder="email" required>' +
-              '<input name="password" type="password" placeholder="password (min 12 chars)" required minlength="12">' +
-              '<select name="role" class="oc-full">' + roleOptions + '</select>' +
+              '<input name="email" type="email" placeholder="email" required aria-label="Email">' +
+              '<input name="password" type="password" placeholder="password (min 12 chars)" required minlength="12" aria-label="Password">' +
+              '<select name="role" class="oc-full" aria-label="Role">' + roleOptions + '</select>' +
               '<button class="oc-submit" type="submit">Create</button>' +
               '<div class="oc-msg oc-full" aria-live="polite" id="oc-user-msg"></div>' +
             '</form>';
@@ -1275,7 +1275,7 @@
         try {
           var data = await api(session, '/integrations/webhook-urls');
           var rows = data.urls.map(function(u){
-            return '<tr><td>' + u.channel + '</td><td><input readonly class="oc-webhook-url-input" value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px"></td></tr>';
+            return '<tr><td>' + u.channel + '</td><td><input readonly class="oc-webhook-url-input" value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px" aria-label="Webhook URL for ' + u.channel + '"></td></tr>';
           }).join('');
           el.innerHTML =
             '<table><tr><th>Channel</th><th>Webhook URL</th></tr>' + rows + '</table>' +
@@ -1314,10 +1314,10 @@
             '<table><tr><th>Name</th><th>Provider</th></tr>' + connections.map(function(c){ return '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.provider) + '</td></tr>'; }).join('') + '</table>' +
             '<form id="oc-create-connection">' +
               '<label class="oc-full">Add LLM Connection</label>' +
-              '<input name="name" placeholder="Connection name" required>' +
-              '<select name="provider" id="oc-conn-provider"><option value="anthropic">Anthropic (Claude)</option><option value="sarvam">Sarvam AI</option><option value="openai_compatible">OpenAI-compatible (Groq, Together, etc.)</option></select>' +
-              '<input name="api_key" type="password" placeholder="API key" required>' +
-              '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none">' +
+              '<input name="name" placeholder="Connection name" required aria-label="Connection name">' +
+              '<select name="provider" id="oc-conn-provider" aria-label="Provider"><option value="anthropic">Anthropic (Claude)</option><option value="sarvam">Sarvam AI</option><option value="openai_compatible">OpenAI-compatible (Groq, Together, etc.)</option></select>' +
+              '<input name="api_key" type="password" placeholder="API key" required aria-label="API key">' +
+              '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none" aria-label="Base URL">' +
               '<button class="oc-submit" type="submit">Add</button>' +
               '<div class="oc-msg oc-full" aria-live="polite" id="oc-connection-msg"></div>' +
             '</form>' +
@@ -1326,9 +1326,9 @@
             (connections.length ?
               '<form id="oc-create-agent">' +
                 '<label class="oc-full">Create Agent</label>' +
-                '<input name="name" placeholder="Agent name" required>' +
-                '<select name="llm_connection_id" class="oc-full">' + connOptions + '</select>' +
-                '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full">' +
+                '<input name="name" placeholder="Agent name" required aria-label="Agent name">' +
+                '<select name="llm_connection_id" class="oc-full" aria-label="LLM connection">' + connOptions + '</select>' +
+                '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full" aria-label="Model">' +
                 '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit"></textarea>' +
                 '<button class="oc-submit" type="submit">Create</button>' +
                 '<div class="oc-msg" aria-live="polite" id="oc-agent-msg"></div>' +

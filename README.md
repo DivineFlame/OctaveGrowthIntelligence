@@ -1251,3 +1251,34 @@ code changes were needed.
   just the source) and an HTML-parse check on the assembled output; the
   CSP hash was unaffected since only the React app's own source changed,
   not any inline `<script>` block.
+- **Linked every form field in `frontend/overlay.html` to a real,
+  programmatically-associated label.** The earlier accessibility pass on
+  this file (see above) covered ARIA roles, live regions, and keyboard
+  handling, but left one gap flagged rather than done blind: most of the
+  overlay's ~12 forms relied on placeholder text or a bare adjacent
+  `<label>` with no `for`/`id` link, which means a screen reader
+  announcing focus on the field reads nothing describing what it's for.
+  Fixed across every form (login/signup gate, security/2FA/data-erasure
+  modals, onboarding wizard, products modal, add-member form, the
+  channel-wizard's dynamic per-channel fields, admin panel's tenant/user/
+  webhook/LLM-connection/agent forms): fields that already had a real
+  adjacent `<label>` and an `id` got `for="<id>"` added to link them
+  (safe, purely additive); fields with only a `name` attribute (no `id`)
+  either got a new `id` + `for`-linked label, or - where a persistent
+  visible label didn't fit the layout (compact inline fields, a
+  read-only webhook URL cell, the bare user-ID picker) - an `aria-label`
+  directly on the input, the same pattern already used for icon-only
+  buttons. Verified first that every form-submit handler in this file
+  reads fields via `new FormData(ev.target)` (by `name`, never by `id`),
+  so adding `id` attributes to previously `name`-only inputs cannot
+  break any existing JS. Deliberately left untouched: the `<label
+  class="oc-full">Section Heading</label>` pattern used as a styled form
+  title (e.g. "Create Tenant", "Add LLM Connection") rather than a
+  per-field label - retagging those risked a CSS regression via the
+  shared `.oc-full` class for no accessibility benefit, since they don't
+  describe one specific following field. Verified with a clean
+  `npm run build` (confirmed all 42 new `for=`/`aria-label` attributes
+  made it into the assembled, minified output, not just the source),
+  `node --check` on the extracted inline script, and regenerated the CSP
+  sha256 hash in `nginx/orgcomms-vps.conf` (only the overlay's inline
+  script hash changed; the app-shell script hashes were unaffected).

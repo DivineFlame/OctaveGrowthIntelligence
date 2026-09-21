@@ -389,9 +389,51 @@
           '<button class="oc-close" id="oc-security-close" aria-label="Close">&times;</button>' +
           '<h2 style="margin:0 0 16px">Two-Factor Authentication</h2>' +
           '<div id="oc-2fa-body">Loading&hellip;</div>' +
+          '<hr style="border:none;border-top:1px solid var(--oc-border-08);margin:20px 0">' +
+          '<h2 style="margin:0 0 12px">My Data</h2>' +
+          '<button class="oc-submit" id="oc-data-export" type="button">Export my data</button>' +
+          '<div class="oc-msg" aria-live="polite" id="oc-data-export-msg"></div>' +
+          '<div style="margin-top:16px">' +
+            '<button class="oc-submit" id="oc-data-erase-start" type="button" style="background:var(--oc-danger);border-color:var(--oc-danger)">Erase my account&hellip;</button>' +
+            '<div id="oc-data-erase-confirm" style="display:none;margin-top:10px">' +
+              '<p style="font-size:12px;color:var(--oc-dim-6)">This disables your login and removes your personal identifiers from your account. It does not remove content or records you\'ve already created - see the export above for what those are. This cannot be undone. Enter your password to confirm.</p>' +
+              '<label>Current Password</label><input id="oc-erase-password" type="password">' +
+              '<button class="oc-submit" id="oc-data-erase-confirm-btn" type="button" style="margin-top:10px;background:var(--oc-danger);border-color:var(--oc-danger)">Permanently erase my account</button>' +
+            '</div>' +
+            '<div class="oc-msg" aria-live="polite" id="oc-data-erase-msg"></div>' +
+          '</div>' +
         '</div>';
       document.body.appendChild(wrap);
       document.getElementById('oc-security-close').addEventListener('click', function(){ wrap.remove(); });
+
+      document.getElementById('oc-data-export').addEventListener('click', async function(){
+        var msg = document.getElementById('oc-data-export-msg');
+        msg.className = 'oc-msg'; msg.textContent = '';
+        try {
+          var data = await api(session, '/me/export');
+          var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'orgcomms-my-data-' + new Date().toISOString().slice(0, 10) + '.json';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          msg.textContent = 'Downloaded.';
+        } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+      });
+      document.getElementById('oc-data-erase-start').addEventListener('click', function(){
+        document.getElementById('oc-data-erase-confirm').style.display = 'block';
+      });
+      document.getElementById('oc-data-erase-confirm-btn').addEventListener('click', async function(){
+        var msg = document.getElementById('oc-data-erase-msg');
+        try {
+          await api(session, '/me/erase', { method: 'POST', body: { password: document.getElementById('oc-erase-password').value } });
+          clearSession();
+          location.reload();
+        } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+      });
 
       async function loadStatus(){
         var body = document.getElementById('oc-2fa-body');

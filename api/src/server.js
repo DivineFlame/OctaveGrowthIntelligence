@@ -724,6 +724,119 @@ app.get('/tenants/me', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
+// ===== Self-service GDPR data export/erasure =====
+// Two rights, two different feasible implementations:
+//   - Export (Art. 15, "right of access"): straightforward - gather
+//     everything this app holds tied to the caller's own account and hand
+//     it back as JSON. No destructive step, no edge cases.
+//   - Erasure (Art. 17, "right to erasure"): NOT a hard DELETE of the
+//     users row. content_assets.uploaded_by, content_variants.approved_by,
+//     approvals.requested_by/approved_by, agent_runs.triggered_by, and
+//     audit_logs.user_id all reference users(id) with no ON DELETE clause
+//     (default NO ACTION) - a user who has ever uploaded, approved, run an
+//     agent, or done anything else logged can't be hard-deleted without
+//     breaking those foreign keys, and audit_logs is deliberately
+//     append-only (see its no_update_audit trigger in init-secure.sql), so
+//     rewriting history to remove them isn't the right move either.
+//     Anonymizing in place - scrub the identifying fields, disable login -
+//     satisfies the request while keeping every record that references
+//     this row intact and the audit trail truthful. This is a recognized,
+//     legitimate way to satisfy Art. 17 when full deletion would break
+//     other legitimate records (see leads' pii_erased_at, same reasoning,
+//     below).
+
+// Self-service data export - any authenticated user can export everything
+// this app holds tied to their own account, without needing an admin to
+// run a query for them.
+app.get('/me/export', authMiddleware, async (req, res) => {
+  try {
+    const { rows: userRows } = await pool.query(
+      'SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE id=$1',
+      [req.user.id]
+    );
+    if (!userRows.length) return res.status(404).json({ error: 'User not found' });
+
+    const { rows: tenantRows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants WHERE id=$1`, [req.user.tenant_id]);
+
+    const { rows: memberships } = await pool.query(
+      `SELECT pm.product_id, p.name AS product_name, pm.role, pm.created_at
+       FROM product_members pm JOIN products p ON p.id = pm.product_id
+       WHERE pm.user_id=$1`,
+      [req.user.id]
+    );
+
+    // RLS-protected tables - scoped through withTenantClient like every
+    // other query against them, filtered down to rows this user
+    // specifically authored/actioned rather than the whole tenant's data.
+    const [assets, approvedVariants, runs, auditRows] = await Promise.all([
+      withTenantClient(req.user.tenant_id, (client) =>
+        client.query('SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at FROM content_assets WHERE uploaded_by=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.user.id, req.user.tenant_id])
+      ).then(r => r.rows),
+      withTenantClient(req.user.tenant_id, (client) =>
+        client.query('SELECT id, asset_id, channel, title, status, published_url, published_at, created_at FROM content_variants WHERE approved_by=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.user.id, req.user.tenant_id])
+      ).then(r => r.rows),
+      withTenantClient(req.user.tenant_id, (client) =>
+        client.query('SELECT id, product_id, agent_id, lead_id, trigger_type, status, created_at FROM agent_runs WHERE triggered_by=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 500', [req.user.id, req.user.tenant_id])
+      ).then(r => r.rows),
+      pool.query('SELECT id, action, resource_type, resource_id, result, created_at FROM audit_logs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500', [req.user.id]).then(r => r.rows)
+    ]);
+
+    await auditLog(req.user.tenant_id, req.user.id, 'SELF_EXPORT_DATA', 'user', req.user.id, req, 'SUCCESS');
+
+    res.json({
+      exported_at: new Date().toISOString(),
+      user: userRows[0],
+      tenant: tenantRows[0] || null,
+      product_memberships: memberships,
+      content_uploaded: assets,
+      content_approved: approvedVariants,
+      agent_runs_triggered: runs,
+      audit_log: auditRows
+    });
+  } catch(e){ serverError(res, e); }
+});
+
+// Self-service account erasure - requires the caller's current password
+// (this is a destructive, hard-to-undo action reachable by anyone who
+// merely has a still-valid access token, e.g. a forgotten logged-in
+// browser tab; re-confirming the password is the same bar POST
+// /auth/2fa/disable already sets for a comparable action). Rate-limited
+// like every other auth-adjacent endpoint (authLimiter) since it's a
+// repeatable password-guessing surface otherwise.
+app.post('/me/erase', authMiddleware, authLimiter, async (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: 'password is required to confirm account erasure' });
+  try {
+    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1 AND tenant_id=$2', [req.user.id, req.user.tenant_id]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    const ok = await bcrypt.compare(password, rows[0].password_hash);
+    if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+
+    // Refuse to erase the tenant's last usable account - not a GDPR
+    // exception, a plain operational one: erasing disables login, and a
+    // tenant with zero enabled accounts has no way back into this app at
+    // all. Same reasoning PATCH /users/:userId/status already applies to
+    // disabling yourself, applied here to this stricter, self-service
+    // action too.
+    const { rows: activeOthers } = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM users WHERE tenant_id=$1 AND disabled=false AND id != $2',
+      [req.user.tenant_id, req.user.id]
+    );
+    if (activeOthers[0].n === 0) {
+      return res.status(400).json({ error: 'You are the only active account left in this tenant - have another admin created (or re-enabled) before erasing your own account.' });
+    }
+
+    const unusableHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+    const anonymizedEmail = `erased-${req.user.id}@erased.invalid`;
+    await pool.query(
+      `UPDATE users SET email=$1, password_hash=$2, two_fa_secret=NULL, two_fa_enabled=false, disabled=true WHERE id=$3 AND tenant_id=$4`,
+      [anonymizedEmail, unusableHash, req.user.id, req.user.tenant_id]
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'SELF_ERASE_ACCOUNT', 'user', req.user.id, req, 'SUCCESS');
+    res.json({ erased: true });
+  } catch(e){ serverError(res, e); }
+});
+
 // Roles - List available roles (for user-creation role picker)
 app.get('/roles', authMiddleware, async (req, res) => {
   try {
@@ -1324,6 +1437,62 @@ app.get('/leads', authMiddleware, async (req, res) => {
     );
     const out = req.user.can_view_revenue ? rows : rows.map(({ value_inr, ...rest }) => rest);
     res.json(out);
+  } catch(e){ serverError(res, e); }
+});
+
+// Leads - data subject export/erasure. Leads are external individuals
+// (prospects/contacts) with no login of their own - if one of them emails
+// the tenant asking "what do you have on me" or "delete my data", a
+// tenant manager handles it on their behalf through these two routes
+// rather than the lead being able to self-serve like a `users` row can
+// via GET/POST /me/*.
+app.get('/leads/:id/export', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  try {
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id])
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
+    const { rows: runs } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('SELECT id, agent_id, product_id, trigger_type, status, created_at FROM agent_runs WHERE lead_id=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.params.id, req.user.tenant_id])
+    );
+    await auditLog(req.user.tenant_id, req.user.id, 'EXPORT_LEAD_DATA', 'lead', req.params.id, req, 'SUCCESS');
+    res.json({ exported_at: new Date().toISOString(), lead: rows[0], agent_runs: runs });
+  } catch(e){ serverError(res, e); }
+});
+
+// Erases a lead's personal identifiers in place rather than deleting the
+// row: agent_runs.lead_id references leads(id) with no ON DELETE clause
+// (default NO ACTION), so a lead with any agent run against it can't be
+// hard-deleted without breaking that foreign key - and even where it
+// could be, deleting the row entirely would also destroy the
+// non-personal aggregate fields (source_channel/status/value_inr) a
+// tenant legitimately keeps for its own reporting once the personal
+// identifiers are gone. pii_erased_at (see postgres/migrate-gdpr-erasure.sql)
+// is the durable record of when this happened, since a NULL column alone
+// doesn't prove erasure was ever actually requested/performed versus the
+// field simply never being filled in.
+app.delete('/leads/:id', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+  try {
+    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query(
+        `UPDATE leads SET contact_name=NULL, phone=NULL, email=NULL, company_name=NULL, pii_erased_at=NOW()
+         WHERE id=$1 AND tenant_id=$2 AND pii_erased_at IS NULL RETURNING id, pii_erased_at`,
+        [req.params.id, req.user.tenant_id]
+      )
+    );
+    if (rows.length) {
+      await auditLog(req.user.tenant_id, req.user.id, 'ERASE_LEAD_PII', 'lead', req.params.id, req, 'SUCCESS');
+      return res.json({ erased: true, already_erased: false, erased_at: rows[0].pii_erased_at });
+    }
+    // No row updated: either this lead doesn't exist, or it was already
+    // erased by an earlier request - distinguish the two so a repeat
+    // request (e.g. a retried client) gets an honest "already done"
+    // instead of a misleading 404.
+    const { rows: existing } = await withTenantClient(req.user.tenant_id, (client) =>
+      client.query('SELECT id, pii_erased_at FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id])
+    );
+    if (!existing.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
+    res.json({ erased: true, already_erased: true, erased_at: existing[0].pii_erased_at });
   } catch(e){ serverError(res, e); }
 });
 

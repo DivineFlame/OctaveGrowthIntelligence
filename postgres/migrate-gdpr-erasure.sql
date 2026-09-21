@@ -1,0 +1,20 @@
+-- Support for GDPR-style self-service data export/erasure (see README.md
+-- "Hardening notes" and GET /me/export, POST /me/erase, GET
+-- /leads/:id/export, DELETE /leads/:id in server.js).
+--
+-- pii_erased_at records *when* a lead's personal-identifier fields
+-- (contact_name/phone/email/company_name) were scrubbed by DELETE
+-- /leads/:id, without deleting the row itself - agent_runs.lead_id
+-- references leads(id) with no ON DELETE clause (default NO ACTION), so a
+-- lead with any agent run against it can't be hard-deleted without
+-- breaking that foreign key. Anonymizing in place (scrub the identifying
+-- columns, keep the row and its id) satisfies an erasure request while
+-- preserving referential integrity and non-personal aggregate fields
+-- (source_channel/status/value_inr) for legitimate business reporting -
+-- this timestamp is the audit record that erasure actually happened and
+-- when, since audit_logs alone records the action but not which columns a
+-- future reader should expect to already be NULL.
+--
+-- Idempotent - safe to re-run (fresh deploys already get this column via
+-- init-secure.sql).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS pii_erased_at TIMESTAMPTZ;

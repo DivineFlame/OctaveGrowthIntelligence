@@ -476,6 +476,13 @@ If your database predates this feature, run
 `postgres/migrate-user-disabled.sql` once first (same pattern as the other
 migrations — adds `users.disabled BOOLEAN DEFAULT false`).
 
+A third, user-initiated lifecycle action also exists: **self-service data
+export and account erasure**, `GET /me/export` and `POST /me/erase`
+(any logged-in user, own account only — no admin role needed), reachable
+from the Security modal's "My Data" section. See "Hardening notes" below
+for what erasure actually does (anonymize in place, not a hard delete)
+and why.
+
 ## Dependency note
 
 `multer` was on the vulnerable 1.x line (`npm` flags known CVEs on install);
@@ -1093,3 +1100,60 @@ code changes were needed.
   same real-protocol-testing-without-a-live-account approach used for
   Redis-backed rate limiting earlier in this list. Suite is now 79
   tests across 9 files.
+- **Added GDPR-style self-service data export and erasure.** This app
+  holds two different kinds of personal data with two different feasible
+  ways to satisfy an access/erasure request, so it's two features, not
+  one:
+  - **Staff accounts (`users`).** `GET /me/export` lets any logged-in
+    user download everything this app holds tied to their own account -
+    profile, tenant, product memberships, content they've uploaded or
+    approved, agent runs they triggered, and their own audit log entries
+    - as JSON (Art. 15, right of access). `POST /me/erase` (password-
+    confirmed, rate-limited like every other auth-adjacent route) is
+    self-service erasure (Art. 17) - but it anonymizes in place rather
+    than hard-deleting the row: `content_assets.uploaded_by`,
+    `content_variants.approved_by`, `approvals.requested_by`/
+    `approved_by`, `agent_runs.triggered_by`, and `audit_logs.user_id`
+    all reference `users(id)` with no `ON DELETE` clause (default `NO
+    ACTION`), so any user who has ever uploaded, approved, or triggered
+    anything logged can't be hard-deleted without breaking those foreign
+    keys - and `audit_logs` is deliberately append-only (see its
+    `no_update_audit` trigger), so rewriting history to remove them
+    isn't the right move either. Erasure scrubs the email to an
+    unguessable `erased-<id>@erased.invalid`, replaces the password hash
+    with an unusable random one, clears 2FA, and disables login -
+    refused only if the caller is the tenant's last active account
+    (same reasoning `PATCH /users/:userId/status` already applies to
+    disabling yourself, applied here to a stricter, self-service
+    action). Both routes shipped with a UI, not just an API: a "My Data"
+    section in the overlay's existing Security modal
+    (`frontend/overlay.html`) - "Export my data" downloads the JSON
+    directly in the browser; "Erase my account" requires typing your
+    password to confirm, then signs you out.
+  - **Leads.** External individuals (prospects/contacts collected via
+    webhook or CSV upload) have no login of their own, so if one emails
+    a tenant asking to see or delete their data, a tenant manager
+    (`USER_MANAGER_ROLES`) now has `GET /leads/:id/export` and `DELETE
+    /leads/:id` to act on their behalf. Deletion also anonymizes rather
+    than removes the row, for the same foreign-key reason
+    (`agent_runs.lead_id` references `leads(id)` with no `ON DELETE`
+    clause) plus a second one: the row's non-personal aggregate fields
+    (`source_channel`/`status`/`value_inr`) are legitimate business
+    records once the personal identifiers are gone, not something an
+    erasure request should also destroy. Added
+    `leads.pii_erased_at` (`postgres/migrate-gdpr-erasure.sql`) as the
+    durable record that erasure actually happened and when - a `NULL`
+    `contact_name`/`phone`/`email` alone doesn't prove a request was
+    ever made versus the field just never being filled in. Deliberately
+    API-only, no new UI: this codebase has no leads *list* screen at
+    all yet (leads only ever feed a count into a stat tile - see
+    `frontend/app/src/App.jsx`), so building one from scratch was out of
+    scope for this change; a tenant manager runs these via `curl`/
+    Postman today, same as this app's other admin-only, UI-less routes.
+
+  `server.js` isn't safely unit-testable as a whole (see "Added a real
+  test suite, starting from zero" above) - these routes were verified by
+  hand (`node --check`, a full HTML-parse and JS-syntax check on the
+  rebuilt frontend, tracing every query against the actual schema) rather
+  than by a new automated test, consistent with how every other `server.js`
+  route addition in this list has been verified.

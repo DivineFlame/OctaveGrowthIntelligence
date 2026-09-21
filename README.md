@@ -1233,3 +1233,21 @@ code changes were needed.
   `withTenantClient()`'s own comment in `server.js` warns about. All 22
   integration tests pass against real services; the existing 80 unit
   tests are unaffected and still run without them.
+- **Fixed a keyboard accessibility gap in the React app's upload
+  dropzone.** `ContentPipeline.jsx`'s "drop a file here" control was a
+  plain `<div onClick={...}>` with a `className="hidden"` (so
+  `display:none`, removed from both the tab order and the accessibility
+  tree) `<input type="file">` inside it - a mouse click worked, but there
+  was no way to open the file picker with a keyboard at all, and a
+  screen reader had no indication this region was interactive. This is
+  the same class of gap the overlay UI's accessibility pass (above) found
+  and fixed, just in the other frontend. Added `role="button"`,
+  `tabIndex={0}`, a descriptive `aria-label`, an `onKeyDown` handler for
+  Enter/Space (a `div` isn't natively keyboard-activatable the way a real
+  `<button>` is - `role="button"` alone only changes what a screen reader
+  announces, not what actually responds to a key press), and a visible
+  focus ring. Verified with a clean `npm run build` (confirmed the new
+  `aria-label`/keyboard-handler text made it into the built bundle, not
+  just the source) and an HTML-parse check on the assembled output; the
+  CSP hash was unaffected since only the React app's own source changed,
+  not any inline `<script>` block.

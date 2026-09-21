@@ -223,6 +223,10 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
       </div>
 
       <div
+        role="button"
+        tabIndex={0}
+        aria-label="Upload content: drop a file here, or press Enter to choose one"
+        aria-busy={uploading}
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);
@@ -230,10 +234,25 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
         onClick={() => inputRef.current && inputRef.current.click()}
-        className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-[12px] border-2 border-dashed px-4 py-8 text-center transition-colors
+        onKeyDown={(e) => {
+          // A div isn't natively focusable or clickable-by-keyboard the way
+          // a real <button> is - role="button" + tabIndex alone only get a
+          // screen reader to announce it as one; Enter/Space activation has
+          // to be wired up by hand, same as any custom interactive widget.
+          // Without this, a keyboard-only user could tab to this control
+          // but had no way to actually open the file picker - the hidden
+          // <input type="file"> below isn't itself reachable (display:none
+          // removes it from the tab order and the accessibility tree), so
+          // this div was the only way in, and it didn't work.
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            if (inputRef.current) inputRef.current.click();
+          }
+        }}
+        className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-[12px] border-2 border-dashed px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand
           ${dragOver ? 'border-brand bg-brand/5' : 'border-black/10 dark:border-white/15'}`}
       >
-        <Upload className="h-5 w-5 text-zinc-400 dark:text-white/40" />
+        <Upload className="h-5 w-5 text-zinc-400 dark:text-white/40" aria-hidden="true" />
         <p className="text-[13px] text-zinc-600 dark:text-white/70">
           {uploading ? 'Uploading…' : 'Drop raw video, images, script, or brand brief'}
         </p>
@@ -241,6 +260,8 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
         <input
           ref={inputRef}
           type="file"
+          tabIndex={-1}
+          aria-hidden="true"
           className="hidden"
           onChange={(e) => {
             const file = e.target.files && e.target.files[0];

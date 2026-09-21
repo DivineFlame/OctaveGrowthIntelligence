@@ -23,6 +23,7 @@ const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
 const { processLeadCsvRecords } = require('./csv-leads');
 const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
+const { createLimiters } = require('./rate-limiters');
 const metrics = require('./metrics');
 const errorTracking = require('./error-tracking');
 require('dotenv').config({ path: '../.env.production' });
@@ -328,34 +329,9 @@ app.use(express.urlencoded({ extended: true }));
 // Rate limiting - nothing enforced this before; the original security docs
 // assumed an nginx layer that doesn't exist under Dokploy. Applied per
 // route below, not globally, so limits can differ by sensitivity.
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 10,
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  message: { error: 'Too many attempts, try again later' }
-});
-const uploadLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  limit: 10,
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  message: { error: 'Too many uploads, slow down' }
-});
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 120,
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  message: { error: 'Too many requests' }
-});
-const generalLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 300,
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  message: { error: 'Too many requests' }
-});
+// Redis-backed (see rate-limiters.js) so the limit is real across however
+// many replicas of this service are running, not per-replica.
+const { authLimiter, uploadLimiter, webhookLimiter, generalLimiter } = createLimiters(redisClient);
 app.use(generalLimiter);
 
 // Storage for uploads - VPS local

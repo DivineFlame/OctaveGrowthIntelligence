@@ -961,3 +961,35 @@ code changes were needed.
     simulated through the exact multi-stage Docker layout) producing a
     valid, byte-checked assembled `index.html` before this was written
     back to the repo.
+- **Made rate limiting Redis-backed, for real horizontal-scaling
+  readiness.** All four `express-rate-limit` limiters (`authLimiter`,
+  `uploadLimiter`, `webhookLimiter`, `generalLimiter`) used the package's
+  default in-memory store - fine with exactly one `api` replica (which is
+  all `docker-compose.vps.yml` runs today), but a silent trap the moment
+  it's ever scaled beyond that: each replica keeps its own separate
+  count, so N replicas means the *effective* limit becomes N times what's
+  configured, with nothing anywhere to warn about it. Added
+  `api/src/rate-limiters.js` (`createLimiters(redisClient)`), backing all
+  four with `rate-limit-redis` against the same Redis client `server.js`
+  already holds open - the limit is now real regardless of replica count.
+  `passOnStoreError: true` keeps the same fallback the in-memory store
+  implicitly had: if Redis is unreachable, requests fail *open* (allowed
+  through, un-limited) rather than every request 500ing - losing rate
+  limiting during a Redis outage is the same risk this app already had
+  before Redis was in the loop here at all; turning a Redis blip into a
+  full API outage would be strictly worse.
+  Writing the real test for this (`api/test/rate-limiters.test.js`,
+  spinning up a real Express server per test and driving it with `fetch`,
+  since a full real-Redis integration harness isn't available in this
+  environment - see the "Route/DB integration testing" gap below) caught
+  a genuine bug before it shipped: `rate-limit-redis`'s `RedisStore`
+  constructor eagerly fires an *unawaited* `SCRIPT LOAD` promise, which
+  becomes an unhandled promise rejection (able to crash the whole process
+  under Node's default policy) if Redis isn't reachable at that exact
+  instant - including at server boot, before `redisClient.connect()` has
+  necessarily resolved. `rate-limiters.js` now explicitly marks those
+  promises handled (without consuming them - `rate-limit-redis`'s own
+  later `await` inside `retryableIncrement` still sees the same
+  rejection, which is what `passOnStoreError` actually catches) so a
+  slow-to-connect or briefly-down Redis at startup can no longer take the
+  API down with it. Suite is now 74 tests across 9 files.

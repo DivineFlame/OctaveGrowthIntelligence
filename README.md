@@ -1010,3 +1010,17 @@ code changes were needed.
   `docker-compose.vps.yml`. Defaults are unchanged from what node-postgres
   already did, so this is purely making an existing default visible and
   tunable, not a behavior change on its own.
+- **Added a disaster recovery runbook (`docs/disaster-recovery.md`).**
+  This repo already had real backup/restore tooling
+  (`postgres-backup` sidecar, `scripts/backup-vps.sh`/`restore-vps.sh`)
+  but no single document tying it together into "the VPS is gone, now
+  what" steps, and no accounting of what *isn't* covered. Written from
+  what's actually in the compose file and scripts, not an idealized
+  setup - it flags two real gaps found while writing it: `.env.production`
+  (and therefore `ENCRYPTION_KEY` - unrecoverable if lost, since it's
+  what integration secrets in Postgres are encrypted with) has no backup
+  anywhere outside the VPS itself, and Redis (`redisdata`) holds real
+  in-flight job queues (`sarvam:queue:*`, `publisher:queue`,
+  `webhook:incoming` - see `api/src/server.js`'s `redisClient.lPush`
+  calls), not just cache, with no backup and no scripted recovery for
+  jobs stranded mid-queue if it's lost.

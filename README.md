@@ -993,3 +993,20 @@ code changes were needed.
   rejection, which is what `passOnStoreError` actually catches) so a
   slow-to-connect or briefly-down Redis at startup can no longer take the
   API down with it. Suite is now 74 tests across 9 files.
+- **Made the Postgres connection pool's size an explicit, documented
+  setting instead of an invisible library default.** `new Pool({...})` in
+  `api/src/server.js` never set `max`, so it silently used
+  node-postgres's own built-in default of 10 connections - fine as a
+  number, but nobody deploying this would know it exists or how to
+  change it, and getting it wrong in either direction is a real failure
+  mode: too low and requests queue or time out waiting for a free client
+  under load; too high and this one service can exhaust Postgres's own
+  `max_connections` (default 100) once it isn't the only thing
+  connecting (`migrate.js`, `psql`/backup tooling, etc. all count against
+  the same limit). Added `DB_POOL_MAX` (default 10, unchanged behavior),
+  `DB_POOL_IDLE_TIMEOUT_MS` (default 30000) and
+  `DB_POOL_CONNECTION_TIMEOUT_MS` (default 5000) as optional env vars,
+  documented in `.env.vps.example` and wired through
+  `docker-compose.vps.yml`. Defaults are unchanged from what node-postgres
+  already did, so this is purely making an existing default visible and
+  tunable, not a behavior change on its own.

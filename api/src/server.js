@@ -63,9 +63,22 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 3001;
 
 // DB - Postgres with RLS
+//
+// Pool sizing was previously left unset, which silently defaults to
+// node-postgres's built-in max of 10 - fine for one replica at low
+// traffic, but an undocumented magic number that nobody deploying this
+// would know to tune, and the wrong number in either direction is a real
+// failure mode: too low and requests queue/time out waiting for a client
+// under load; too high and this service alone can exhaust Postgres's own
+// max_connections (default 100) once it's not the only thing connecting.
+// Made explicit and env-configurable so it's a documented deployment
+// knob instead of an invisible library default - see .env.vps.example.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgres://${process.env.POSTGRES_USER}:${process.env.POSTGRES_PASSWORD}@postgres:5432/${process.env.POSTGRES_DB}`,
-  ssl: false
+  ssl: false,
+  max: Number(process.env.DB_POOL_MAX) || 10,
+  idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000,
+  connectionTimeoutMillis: Number(process.env.DB_POOL_CONNECTION_TIMEOUT_MS) || 5000
 });
 
 // pool.query() picks an arbitrary connection out of the pool for every call,

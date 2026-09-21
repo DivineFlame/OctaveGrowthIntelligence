@@ -200,6 +200,11 @@ services:
       # api/src/error-tracking.js is a complete no-op: no network calls, no
       # dependency on Sentry being reachable. See .env.vps.example.
       SENTRY_DSN: ${SENTRY_DSN:-}
+      # Optional - Postgres pool sizing, see .env.vps.example. Unset means
+      # server.js falls back to the same defaults these would set anyway.
+      DB_POOL_MAX: ${DB_POOL_MAX:-}
+      DB_POOL_IDLE_TIMEOUT_MS: ${DB_POOL_IDLE_TIMEOUT_MS:-}
+      DB_POOL_CONNECTION_TIMEOUT_MS: ${DB_POOL_CONNECTION_TIMEOUT_MS:-}
     volumes:
       - recordings:/app/recordings
       # Read-only: lets src/migrate.js apply postgres/migrate-*.sql against

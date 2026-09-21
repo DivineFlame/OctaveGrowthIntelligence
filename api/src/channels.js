@@ -18,10 +18,12 @@
 //     Instagram has something to fetch; see publishInstagram() below for
 //     the exact requirement (API_DOMAIN or APP_DOMAIN must be a real,
 //     internet-reachable domain, not localhost).
-//   - youtube: NOT implemented. YouTube Data API v3 upload is a resumable,
-//     multi-request upload protocol (very different shape from the others
-//     here) and needs a Google Cloud OAuth consent screen, not just an API
-//     key. Flagged clearly rather than faked.
+//   - youtube: real, using the YouTube Data API v3's resumable upload
+//     protocol - initiate a session, then PUT the video bytes to the URL
+//     it hands back. Needs a Google OAuth refresh_token (not a short-lived
+//     access token - see publishYouTube() and CHANNEL_SPECS.youtube.help),
+//     obtained once via Google's OAuth consent flow for the channel-owning
+//     account, outside this app.
 //   - quora: NOT implemented, and can't be - as of this writing, Quora has
 //     no public API for posting content at all. This channel stays a
 //     manual/placeholder entry permanently, not a gap to eventually fill.
@@ -82,9 +84,15 @@ const CHANNEL_SPECS = {
   },
   youtube: {
     label: 'YouTube',
-    implemented: false,
-    fields: [],
-    help: 'Not implemented - YouTube Data API v3 uploads use a resumable multi-request protocol and Google OAuth consent, a meaningfully different integration shape than the others. Configuring this channel saves the row but publishing to it will fail with a clear "not implemented" error until it is built.'
+    implemented: true,
+    fields: [
+      { key: 'client_id', label: 'Google OAuth Client ID', required: true },
+      { key: 'client_secret', label: 'Google OAuth Client Secret', required: true, secret: true },
+      { key: 'refresh_token', label: 'OAuth refresh token (see help)', required: true, secret: true },
+      { key: 'privacy_status', label: 'Privacy status (public/unlisted/private)', required: false, default: 'unlisted' },
+      { key: 'category_id', label: 'YouTube category ID (optional, default 22 = People & Blogs)', required: false, default: '22' }
+    ],
+    help: 'Uses the YouTube Data API v3 resumable upload protocol. Create an OAuth 2.0 Client ID in Google Cloud Console (Desktop app type is simplest) with the YouTube Data API v3 enabled, then run Google\'s OAuth consent flow once (with offline access) for the channel-owning Google account to get a refresh_token - store that here, not a short-lived access token, since access tokens expire in about an hour and this app refreshes one automatically on every publish. Only accepts video files; publishing a non-video asset to this channel fails with a clear error before any API call is made.'
   },
   quora: {
     label: 'Quora',
@@ -239,6 +247,66 @@ async function publishInstagram({ config, title, text, publicFileUrl }) {
   return { externalId: publishData.id, externalUrl: null };
 }
 
+// YouTube Data API v3's resumable upload: initiate a session (step 1)
+// which hands back a one-time upload URL, then PUT the actual video bytes
+// to it (step 2). Sent as a single PUT, not chunked - this app already
+// caps uploads at 100MB (see server.js's multer config), well within
+// what a one-shot PUT to this endpoint supports, so there's no need for
+// the chunked/resumable-on-failure complexity the protocol also allows.
+async function publishYouTube({ config, title, text, filePath, mimeType }) {
+  if (!filePath || !fs.existsSync(filePath)) throw new Error('YouTube requires a video file to upload - no file is attached to this content');
+  if (!(mimeType || '').startsWith('video/')) throw new Error(`YouTube only accepts video files, got "${mimeType || 'unknown type'}"`);
+
+  // Access tokens expire in ~1 hour, so this app never stores one - only
+  // the long-lived refresh_token, redeemed for a fresh access token on
+  // every publish (same reasoning as never persisting a short-lived
+  // credential when a longer-lived one can fetch it on demand).
+  const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: config.client_id,
+      client_secret: config.client_secret,
+      refresh_token: config.refresh_token,
+      grant_type: 'refresh_token'
+    })
+  });
+  const tokenData = await tokenResp.json().catch(() => ({}));
+  if (!tokenResp.ok) throw new Error(tokenData.error_description || tokenData.error || `YouTube OAuth token refresh failed (HTTP ${tokenResp.status})`);
+  const accessToken = tokenData.access_token;
+
+  const fileBuffer = fs.readFileSync(filePath);
+  const snippet = { title: (title || 'Untitled').slice(0, 100), description: text || '', categoryId: config.category_id || '22' };
+  const status = { privacyStatus: config.privacy_status || 'unlisted' };
+
+  const initResp = await fetch('https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'X-Upload-Content-Type': mimeType,
+      'X-Upload-Content-Length': String(fileBuffer.length)
+    },
+    body: JSON.stringify({ snippet, status })
+  });
+  if (!initResp.ok) {
+    const errData = await initResp.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `YouTube upload session init failed (HTTP ${initResp.status})`);
+  }
+  const uploadUrl = initResp.headers.get('location');
+  if (!uploadUrl) throw new Error('YouTube did not return a resumable upload URL');
+
+  const uploadResp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': mimeType, 'Content-Length': String(fileBuffer.length) },
+    body: fileBuffer
+  });
+  const uploadData = await uploadResp.json().catch(() => ({}));
+  if (!uploadResp.ok) throw new Error(uploadData.error?.message || `YouTube video upload failed (HTTP ${uploadResp.status})`);
+
+  return { externalId: uploadData.id, externalUrl: uploadData.id ? `https://www.youtube.com/watch?v=${uploadData.id}` : null };
+}
+
 async function publishLinkedIn({ config, title, text }) {
   const body = {
     author: config.organization_urn,
@@ -282,6 +350,7 @@ async function publishToChannel(channel, { config, title, text, filePath, fileNa
     case 'facebook': return publishFacebook({ config, title, text, filePath, mimeType });
     case 'instagram': return publishInstagram({ config, title, text, publicFileUrl });
     case 'linkedin': return publishLinkedIn({ config, title, text });
+    case 'youtube': return publishYouTube({ config, title, text, filePath, mimeType });
     default: throw new Error(`No publisher wired up for channel: ${channel}`);
   }
 }

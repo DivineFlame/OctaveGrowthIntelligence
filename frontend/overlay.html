@@ -277,7 +277,7 @@
               (isSignup ? '<label>Confirm Password</label><input id="oc-password-confirm" type="password" minlength="12" required>' : '') +
               (!isSignup ? '<div id="oc-totp-wrap" style="display:none"><label>2FA Code</label><input id="oc-totp"></div>' : '') +
               '<button class="oc-primary" type="submit">' + (isSignup ? 'Create Account' : 'Sign In') + '</button>' +
-              '<div class="oc-err" id="oc-err" style="display:none"></div>' +
+              '<div class="oc-err" role="alert" aria-live="assertive" id="oc-err" style="display:none"></div>' +
             '</form>' +
             (signupAvailable ? '<p class="oc-switch"><a href="#" id="oc-switch-link">' + (isSignup ? 'Already have an account? Sign in' : 'First time here? Create the Super Admin account') + '</a></p>' : '') +
           '</div>';
@@ -357,7 +357,7 @@
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
-        '<button class="oc-theme-toggle" id="oc-toggle-theme" title="Switch theme" type="button">' + (getTheme() === 'light' ? '&#9789;' : '&#9788;') + '</button>' +
+        '<button class="oc-theme-toggle" id="oc-toggle-theme" title="Switch theme" aria-label="Switch theme" type="button">' + (getTheme() === 'light' ? '&#9789;' : '&#9788;') + '</button>' +
         '<button class="oc-logout-btn" id="oc-logout">Logout</button>';
       document.body.appendChild(bar);
 
@@ -382,9 +382,11 @@
       var wrap = document.createElement('div');
       wrap.id = 'oc-security';
       wrap.className = 'oc-admin-overlay';
+      wrap.setAttribute('role', 'dialog');
+      wrap.setAttribute('aria-modal', 'true');
       wrap.innerHTML =
         '<div class="oc-panel" style="max-width:400px">' +
-          '<button class="oc-close" id="oc-security-close">&times;</button>' +
+          '<button class="oc-close" id="oc-security-close" aria-label="Close">&times;</button>' +
           '<h2 style="margin:0 0 16px">Two-Factor Authentication</h2>' +
           '<div id="oc-2fa-body">Loading&hellip;</div>' +
         '</div>';
@@ -400,7 +402,7 @@
               '<p style="font-size:13px">2FA is <strong style="color:var(--oc-success)">enabled</strong> on your account.</p>' +
               '<label>Current Password</label><input id="oc-2fa-password" type="password">' +
               '<button class="oc-submit" id="oc-2fa-disable" style="margin-top:10px">Disable 2FA</button>' +
-              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+              '<div class="oc-msg" aria-live="polite" id="oc-2fa-msg"></div>';
             document.getElementById('oc-2fa-disable').addEventListener('click', async function(){
               var msg = document.getElementById('oc-2fa-msg');
               try {
@@ -414,13 +416,13 @@
               '<button class="oc-submit" id="oc-2fa-start">Enable 2FA</button>' +
               '<div id="oc-2fa-setup" style="display:none;margin-top:12px">' +
                 '<p style="font-size:12px;color:var(--oc-dim-6)">Scan with your authenticator app:</p>' +
-                '<img id="oc-2fa-qr" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
+                '<img id="oc-2fa-qr" alt="Two-factor authentication QR code - scan with your authenticator app" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
                 '<p style="font-size:11px;color:var(--oc-dim-5);word-break:break-all" id="oc-2fa-secret"></p>' +
                 '<label>Enter the 6-digit code to confirm</label>' +
                 '<input id="oc-2fa-code" maxlength="6">' +
                 '<button class="oc-submit" id="oc-2fa-confirm" style="margin-top:10px">Verify &amp; Enable</button>' +
               '</div>' +
-              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+              '<div class="oc-msg" aria-live="polite" id="oc-2fa-msg"></div>';
             document.getElementById('oc-2fa-start').addEventListener('click', async function(){
               var msg = document.getElementById('oc-2fa-msg');
               try {
@@ -454,6 +456,8 @@
       if (existing) existing.remove();
       var wrap = document.createElement('div');
       wrap.id = 'oc-onboarding';
+      wrap.setAttribute('role', 'dialog');
+      wrap.setAttribute('aria-modal', 'true');
       document.body.appendChild(wrap);
 
       var state = { productId: null, productName: '' };
@@ -476,7 +480,7 @@
               '<label>Description (optional)</label>' +
               '<input name="description" placeholder="What is this product/service for?">' +
               '<div class="oc-row"><button type="submit" class="oc-primary">Create &amp; Continue</button></div>' +
-              '<div class="oc-err" id="oc-ob-err1" style="display:none"></div>' +
+              '<div class="oc-err" role="alert" aria-live="assertive" id="oc-ob-err1" style="display:none"></div>' +
             '</form>' +
             '<button class="oc-skip" id="oc-ob-skip1">Skip setup for now</button>' +
           '</div>';
@@ -517,7 +521,7 @@
                   '<button type="button" class="oc-secondary" id="oc-ob-back2">Back</button>' +
                   '<button type="submit" class="oc-primary">Assign &amp; Continue</button>' +
                 '</div>' +
-                '<div class="oc-err" id="oc-ob-err2" style="display:none"></div>' +
+                '<div class="oc-err" role="alert" aria-live="assertive" id="oc-ob-err2" style="display:none"></div>' +
               '</form>' +
               '<button class="oc-skip" id="oc-ob-skip2">Skip setup for now</button>';
             document.getElementById('oc-ob-skip2').addEventListener('click', function(){ dismissOnboarding(session); });
@@ -532,7 +536,7 @@
                 renderStep3();
               } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
             });
-          } catch(e){ body.innerHTML = '<div class="oc-err" style="display:block">' + esc(e.message) + '</div>'; }
+          } catch(e){ body.innerHTML = '<div class="oc-err" role="alert" aria-live="assertive" style="display:block">' + esc(e.message) + '</div>'; }
         })();
       }
 
@@ -552,7 +556,7 @@
                 '<button type="button" class="oc-secondary" id="oc-ob-skip3">Skip</button>' +
                 '<button type="submit" class="oc-primary">Save &amp; Finish</button>' +
               '</div>' +
-              '<div class="oc-err" id="oc-ob-err3" style="display:none"></div>' +
+              '<div class="oc-err" role="alert" aria-live="assertive" id="oc-ob-err3" style="display:none"></div>' +
             '</form>' +
           '</div>';
         document.getElementById('oc-ob-skip3').addEventListener('click', renderStep4);
@@ -608,9 +612,11 @@
       var isTenantAdmin = MANAGER_ROLES.indexOf(session.user.role) !== -1;
       var wrap = document.createElement('div');
       wrap.id = 'oc-products';
+      wrap.setAttribute('role', 'dialog');
+      wrap.setAttribute('aria-modal', 'true');
       wrap.innerHTML =
         '<div class="oc-panel">' +
-          '<button class="oc-close" id="oc-products-close">&times;</button>' +
+          '<button class="oc-close" id="oc-products-close" aria-label="Close">&times;</button>' +
           '<h2>Products &amp; Services</h2>' +
           '<div id="oc-products-body">Loading&hellip;</div>' +
         '</div>';
@@ -634,7 +640,7 @@
                 '<input name="name" placeholder="Name" required class="oc-full">' +
                 '<input name="description" placeholder="Description (optional)" class="oc-full">' +
                 '<button class="oc-submit" type="submit">Create</button>' +
-                '<div class="oc-msg oc-full" id="oc-product-msg"></div>' +
+                '<div class="oc-msg oc-full" aria-live="polite" id="oc-product-msg"></div>' +
               '</form>' : '');
 
           body.querySelectorAll('.oc-pbtn').forEach(function(btn){
@@ -712,7 +718,7 @@
                   pickerHtml +
                   '<select name="role"><option value="MEMBER">Member</option><option value="ADMIN">Product Admin</option></select>' +
                   '<button class="oc-submit" type="submit">Add</button>' +
-                  '<div class="oc-msg oc-full" id="oc-member-msg"></div>' +
+                  '<div class="oc-msg oc-full" aria-live="polite" id="oc-member-msg"></div>' +
                 '</form>' : '');
 
             el.querySelectorAll('.oc-pbtn').forEach(function(btn){
@@ -764,6 +770,8 @@
           if (existing) existing.remove();
           var modal = document.createElement('div');
           modal.id = 'oc-channel-wizard';
+          modal.setAttribute('role', 'dialog');
+          modal.setAttribute('aria-modal', 'true');
           document.body.appendChild(modal);
 
           function close(){ modal.remove(); }
@@ -773,7 +781,7 @@
             var all = Object.keys(spec);
             modal.innerHTML =
               '<div class="oc-panel">' +
-                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<button class="oc-close" id="oc-cw-close" aria-label="Close">&times;</button>' +
                 '<h2>Configure a Channel</h2>' +
                 '<p class="oc-sub">Pick a channel to connect. You can come back and edit any of these later.</p>' +
                 '<div class="oc-chgrid">' +
@@ -799,7 +807,7 @@
             var existingConfig = (configured[ch] && configured[ch].config) || {};
             modal.innerHTML =
               '<div class="oc-panel">' +
-                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<button class="oc-close" id="oc-cw-close" aria-label="Close">&times;</button>' +
                 '<button type="button" class="oc-secondary" id="oc-cw-back" style="margin-bottom:14px;padding:6px 12px;font-size:12px">&larr; Back</button>' +
                 '<h2>' + s.label + '</h2>' +
                 '<form id="oc-cw-form">' +
@@ -807,7 +815,7 @@
                   '<div class="oc-row">' +
                     '<button type="submit" class="oc-primary">Save</button>' +
                   '</div>' +
-                  '<div class="oc-err" id="oc-cw-err" style="display:none"></div>' +
+                  '<div class="oc-err" role="alert" aria-live="assertive" id="oc-cw-err" style="display:none"></div>' +
                 '</form>' +
               '</div>';
             document.getElementById('oc-cw-close').addEventListener('click', close);
@@ -918,7 +926,7 @@
                     CONTENT_CHANNELS.map(function(ch){ return '<label><input type="checkbox" value="' + ch + '"> ' + ch + '</label>'; }).join('') +
                   '</div>' +
                   '<button class="oc-gen-btn" data-generate="' + a.id + '" type="button">Generate Variants</button>') +
-              '<div class="oc-msg" data-msg="' + a.id + '"></div>' +
+              '<div class="oc-msg" aria-live="polite" data-msg="' + a.id + '"></div>' +
             '</div>';
         }
 
@@ -932,10 +940,10 @@
                 '<input type="file" id="oc-content-file">' +
                 '<button class="oc-gen-btn" id="oc-content-upload-btn" type="button">Upload</button>' +
               '</div>' +
-              '<div class="oc-msg" id="oc-content-upload-msg"></div>' +
+              '<div class="oc-msg" aria-live="polite" id="oc-content-upload-msg"></div>' +
               (assets.length ?
                 assets.map(renderAssetCard).join('')
-                : '<div class="oc-msg" style="color:var(--oc-dim-5)">No content uploaded for this product yet.</div>');
+                : '<div class="oc-msg" aria-live="polite" style="color:var(--oc-dim-5)">No content uploaded for this product yet.</div>');
 
             document.getElementById('oc-content-upload-btn').addEventListener('click', async function(){
               var input = document.getElementById('oc-content-file');
@@ -999,9 +1007,9 @@
                   '<label class="oc-full">Enable an Agent</label>' +
                   '<select name="agent_id" class="oc-full">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
                   '<button class="oc-submit" type="submit">Enable</button>' +
-                  '<div class="oc-msg oc-full" id="oc-pagent-msg"></div>' +
+                  '<div class="oc-msg oc-full" aria-live="polite" id="oc-pagent-msg"></div>' +
                 '</form>'
-              : '<div class="oc-msg">No agents have been created yet — a Super Admin creates these under Admin &rarr; Agents.</div>');
+              : '<div class="oc-msg" aria-live="polite">No agents have been created yet — a Super Admin creates these under Admin &rarr; Agents.</div>');
 
             var runsBox = document.getElementById('oc-agent-runs');
             function renderRuns(agentId, runs){
@@ -1012,7 +1020,7 @@
                     '<div style="color:var(--oc-dim-5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + esc(r.trigger_type) + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'var(--oc-success)':'var(--oc-danger)') + '">' + esc(r.status) + '</span></div>' +
                     '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? esc(r.output_text||'') : ('Error: ' + esc(r.error||''))) + '</div>' +
                   '</div>';
-                }).join('') : '<div class="oc-msg">No runs yet.</div>');
+                }).join('') : '<div class="oc-msg" aria-live="polite">No runs yet.</div>');
             }
 
             el.querySelectorAll('.oc-view-runs').forEach(function(btn){
@@ -1072,9 +1080,11 @@
       var canSeeWebhooks = isSuperAdmin || session.user.role === 'IT_ADMIN';
       var wrap = document.createElement('div');
       wrap.id = 'oc-admin';
+      wrap.setAttribute('role', 'dialog');
+      wrap.setAttribute('aria-modal', 'true');
       wrap.innerHTML =
         '<div class="oc-panel">' +
-          '<button class="oc-close" id="oc-admin-close">&times;</button>' +
+          '<button class="oc-close" id="oc-admin-close" aria-label="Close">&times;</button>' +
           '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><img src="/octave-icon.png" alt="Octave" style="width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px"><h2 style="margin:0">Tenant &amp; User Administration</h2></div>' +
           '<div class="oc-tabs">' +
             (isSuperAdmin ? '<button class="oc-tab oc-active" data-tab="tenants">Tenants</button>' : '') +
@@ -1121,7 +1131,7 @@
               '<input name="subdomain" placeholder="subdomain" required>' +
               '<select name="plan"><option value="starter">Starter</option><option value="premium">Premium</option></select>' +
               '<button class="oc-submit" type="submit">Create</button>' +
-              '<div class="oc-msg oc-full" id="oc-tenant-msg"></div>' +
+              '<div class="oc-msg oc-full" aria-live="polite" id="oc-tenant-msg"></div>' +
             '</form>';
           el.querySelectorAll('.oc-pick-tenant').forEach(function(btn){
             btn.addEventListener('click', function(){
@@ -1161,7 +1171,7 @@
               '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button></td></tr>';
           }).join('');
           el.innerHTML =
-            (isSuperAdmin ? '<div class="oc-msg" style="margin-bottom:8px">Managing tenant: ' + (selectedTenantId || session.user.tenant_id) + '</div>' : '') +
+            (isSuperAdmin ? '<div class="oc-msg" aria-live="polite" style="margin-bottom:8px">Managing tenant: ' + (selectedTenantId || session.user.tenant_id) + '</div>' : '') +
             '<table><tr><th>Email</th><th>Role</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
             '<form id="oc-create-user">' +
               '<label class="oc-full">Create User</label>' +
@@ -1169,7 +1179,7 @@
               '<input name="password" type="password" placeholder="password (min 12 chars)" required minlength="12">' +
               '<select name="role" class="oc-full">' + roleOptions + '</select>' +
               '<button class="oc-submit" type="submit">Create</button>' +
-              '<div class="oc-msg oc-full" id="oc-user-msg"></div>' +
+              '<div class="oc-msg oc-full" aria-live="polite" id="oc-user-msg"></div>' +
             '</form>';
           el.querySelectorAll('.oc-save-role').forEach(function(btn){
             btn.addEventListener('click', async function(){
@@ -1228,7 +1238,7 @@
           el.innerHTML =
             '<table><tr><th>Channel</th><th>Webhook URL</th></tr>' + rows + '</table>' +
             '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>' +
-            '<div class="oc-msg" id="oc-webhook-msg"></div>';
+            '<div class="oc-msg" aria-live="polite" id="oc-webhook-msg"></div>';
           Array.prototype.forEach.call(el.querySelectorAll('.oc-webhook-url-input'), function(inp){
             inp.addEventListener('click', function(){ inp.select(); });
           });
@@ -1267,7 +1277,7 @@
               '<input name="api_key" type="password" placeholder="API key" required>' +
               '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none">' +
               '<button class="oc-submit" type="submit">Add</button>' +
-              '<div class="oc-msg oc-full" id="oc-connection-msg"></div>' +
+              '<div class="oc-msg oc-full" aria-live="polite" id="oc-connection-msg"></div>' +
             '</form>' +
             '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:20px 0 8px">Agents</h4>' +
             '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
@@ -1279,9 +1289,9 @@
                 '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full">' +
                 '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit"></textarea>' +
                 '<button class="oc-submit" type="submit">Create</button>' +
-                '<div class="oc-msg" id="oc-agent-msg"></div>' +
+                '<div class="oc-msg" aria-live="polite" id="oc-agent-msg"></div>' +
               '</form>'
-            : '<div class="oc-msg" style="margin-top:8px">Add an LLM connection first before creating an agent.</div>');
+            : '<div class="oc-msg" aria-live="polite" style="margin-top:8px">Add an LLM connection first before creating an agent.</div>');
 
           var connForm = document.getElementById('oc-create-connection');
           var providerSel = document.getElementById('oc-conn-provider');

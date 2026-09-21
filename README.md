@@ -1024,3 +1024,72 @@ code changes were needed.
   `webhook:incoming` - see `api/src/server.js`'s `redisClient.lPush`
   calls), not just cache, with no backup and no scripted recovery for
   jobs stranded mid-queue if it's lost.
+- **Basic accessibility pass on the overlay UI
+  (`frontend/overlay.html`).** This is the hand-written vanilla-JS app
+  (auth gate, top bar, admin panel, products/channels/onboarding/security
+  modals) that owns most of the interactive surface - it had almost no
+  ARIA beyond a handful of `alt` attributes on images. Fixed, all
+  additive (no markup restructuring, no behavior change - every existing
+  `id`/`class` a JS `getElementById`/`querySelector` or CSS selector
+  depends on is untouched):
+  - The five `&times;` icon-only close buttons and the emoji-only theme
+    toggle had no accessible name at all - a screen reader announced
+    them as "button" with no indication of what they do. Added
+    `aria-label="Close"` / `aria-label="Switch theme"`.
+  - The 2FA setup QR code `<img>` had no `alt` text - added one
+    describing what it is, not just that it's an image.
+  - The six modal overlays (security/2FA, onboarding, products, channel
+    wizard, admin) are created via `document.createElement('div')` and
+    never marked as dialogs - added `role="dialog"` +
+    `aria-modal="true"` via `setAttribute` right after each one's `id`
+    is set.
+  - The ~20 inline status/error message containers (`.oc-err`,
+    `.oc-msg`/`.oc-msg.oc-full`) update via `.textContent`/`.innerHTML`
+    with nothing telling assistive tech that content changed - added
+    `role="alert" aria-live="assertive"` to the error containers and
+    `aria-live="polite"` to the general status ones, so a screen reader
+    announces a validation error or a completed action without the user
+    needing to go find it.
+
+  Changing `overlay.html`'s inline `<script>` content changes its CSP
+  sha256 hash (see `nginx/orgcomms-vps.conf`'s `script-src`) -
+  regenerated via `scripts/gen-csp-hashes.sh` and updated; the two
+  bootstrap-script hashes were unaffected since only `overlay.html`
+  changed, not `frontend/app/scripts/assemble.js`. Verified with a clean
+  `npm run build` producing valid HTML (`html.parser` round-trip) and
+  syntactically valid JS (`node --check` on the extracted inline
+  script), and by diffing the built asset hashes to confirm the React
+  app itself (`frontend/app/src/`) was untouched.
+
+  This is a first pass, not a full audit - form `<input>`s still rely on
+  `placeholder` text rather than associated `<label>` elements in most
+  of this file, which is a larger, riskier rewrite of markup structure
+  better done as its own follow-up.
+- **Implemented real YouTube publishing; left Quora as a documented,
+  permanent gap.** `api/src/channels.js` previously marked both
+  `youtube` and `quora` `implemented: false`. They're not the same kind
+  of gap: Quora has no public API for posting content at all - nothing
+  to build, ever, so it stays a manual/placeholder channel by design.
+  YouTube does have a real API, so it's now real: `publishYouTube()`
+  speaks the YouTube Data API v3's resumable upload protocol
+  (initiate a session, then `PUT` the video bytes to the URL it hands
+  back), authenticating via a stored OAuth `refresh_token` that's
+  redeemed for a fresh access token on every publish (access tokens
+  expire in about an hour; this app never stores one directly, the same
+  reasoning applied everywhere else credentials are handled here).
+  New required config fields: `client_id`, `client_secret`,
+  `refresh_token` (from a one-time Google OAuth consent flow for the
+  channel-owning account, done outside this app), plus optional
+  `privacy_status` (defaults to `unlisted`, not `public` - publishing
+  shouldn't go live by surprise) and `category_id`. Rejects a non-video
+  asset with a clear error before making any API call, rather than
+  letting Google's API reject it after the fact. Both the React app's
+  channel picker and the overlay's channel wizard already drive their
+  "implemented"/"soon" UI off `GET /channels/spec` dynamically, so
+  YouTube lights up automatically - no frontend change needed.
+  Verified with new tests mocking `global.fetch` to check the actual
+  three-call HTTP sequence (token refresh -> session init -> byte
+  upload) end to end, not just that some function gets called - the
+  same real-protocol-testing-without-a-live-account approach used for
+  Redis-backed rate limiting earlier in this list. Suite is now 79
+  tests across 9 files.

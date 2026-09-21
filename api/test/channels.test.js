@@ -28,12 +28,21 @@ test('validateChannelConfig rejects an unknown channel', () => {
   assert.throws(() => validateChannelConfig('carrier_pigeon', {}), /Unknown channel: carrier_pigeon/);
 });
 
-test('validateChannelConfig is a no-op for unimplemented channels (youtube, quora)', () => {
+test('validateChannelConfig is a no-op for quora (permanently unimplemented)', () => {
   // Configuring an unimplemented channel is allowed to save a row - it's
-  // only publishToChannel that refuses to actually send anything (see
-  // below) - so validation must not throw here even with an empty config.
-  assert.doesNotThrow(() => validateChannelConfig('youtube', {}));
+  // only publishToChannel that refuses to actually send anything - so
+  // validation must not throw here even with an empty config. youtube
+  // used to be included in this test before it was implemented; now that
+  // it has real required fields, an empty config correctly throws (see
+  // the next test) just like any other implemented channel.
   assert.doesNotThrow(() => validateChannelConfig('quora', {}));
+});
+
+test('validateChannelConfig treats youtube like any other implemented channel - empty config is rejected', () => {
+  assert.throws(
+    () => validateChannelConfig('youtube', {}),
+    /missing required field\(s\): client_id, client_secret, refresh_token/
+  );
 });
 
 test('validateChannelConfig lists every missing required field by name', () => {
@@ -92,11 +101,116 @@ test('publishToChannel refuses an unimplemented channel with a clear error, neve
   // This is the exact bug class this codebase's README documents fixing
   // elsewhere (Paperclip's old /transform endpoint used to fabricate a
   // fake success response) - this test pins the honest-failure behavior
-  // for youtube/quora so it can't quietly regress into a fake success.
-  return Promise.all([
-    assert.rejects(() => publishToChannel('youtube', { config: {} }), /not implemented yet/),
-    assert.rejects(() => publishToChannel('quora', { config: {} }), /not implemented yet/)
-  ]);
+  // for quora (permanently unimplemented - Quora has no posting API) so
+  // it can't quietly regress into a fake success. youtube used to be
+  // pinned here too before it was implemented - see the youtube-specific
+  // tests below instead.
+  return assert.rejects(() => publishToChannel('quora', { config: {} }), /not implemented yet/);
+});
+
+// --- YouTube: real resumable-upload publishing --------------------------
+// No live Google credentials exist in this environment (same situation as
+// every other real-API channel here - see facebook/instagram/linkedin
+// above, none of which are hit against the real API in tests either), so
+// these mock `global.fetch` to verify the actual HTTP protocol this code
+// speaks: refresh a token, initiate a resumable upload session, PUT the
+// file to the URL that session hands back - not just that some function
+// gets called.
+const fsForYoutubeTests = require('fs');
+const osForYoutubeTests = require('os');
+const pathForYoutubeTests = require('path');
+
+async function withTempVideoFile(fn) {
+  // fn(filePath) returns a Promise (every caller below passes an async
+  // publishToChannel(...) chain) - must be awaited before the temp file
+  // is deleted, otherwise cleanup races the async publishYouTube() call
+  // that's still reading the file mid-flight and it 404s on its own
+  // fixture. A bare `try { return fn(filePath) } finally { rmSync }`
+  // does NOT wait for that promise; only `await` does.
+  const filePath = pathForYoutubeTests.join(osForYoutubeTests.tmpdir(), `oc-yt-test-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
+  fsForYoutubeTests.writeFileSync(filePath, Buffer.from('fake mp4 bytes for a test, never actually decoded'));
+  try {
+    return await fn(filePath);
+  } finally {
+    fsForYoutubeTests.rmSync(filePath, { force: true });
+  }
+}
+
+test('publishToChannel(youtube): rejects when no file is attached', () => {
+  return assert.rejects(
+    () => publishToChannel('youtube', { config: {}, title: 't', text: '', filePath: null, mimeType: null }),
+    /requires a video file/
+  );
+});
+
+test('publishToChannel(youtube): rejects a non-video file with a clear error, before any network call', () => {
+  return withTempVideoFile((filePath) => {
+    const originalFetch = global.fetch;
+    let fetchCalled = false;
+    global.fetch = async () => { fetchCalled = true; throw new Error('fetch should not have been called'); };
+    return assert.rejects(
+      () => publishToChannel('youtube', { config: {}, title: 't', text: '', filePath, mimeType: 'image/png' }),
+      /only accepts video files/
+    ).finally(() => {
+      global.fetch = originalFetch;
+      assert.equal(fetchCalled, false, 'a non-video mimeType must be rejected before the OAuth token call');
+    });
+  });
+});
+
+test('publishToChannel(youtube): a failed OAuth token refresh surfaces Google\'s own error message', () => {
+  return withTempVideoFile((filePath) => {
+    const originalFetch = global.fetch;
+    global.fetch = async (url) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/token');
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' })
+      };
+    };
+    return assert.rejects(
+      () => publishToChannel('youtube', {
+        config: { client_id: 'id', client_secret: 'secret', refresh_token: 'stale' },
+        title: 't', text: '', filePath, mimeType: 'video/mp4'
+      }),
+      /Token has been expired or revoked/
+    ).finally(() => { global.fetch = originalFetch; });
+  });
+});
+
+test('publishToChannel(youtube): full resumable upload flow - refresh token, init session, PUT bytes, return id/url', () => {
+  return withTempVideoFile((filePath) => {
+    const originalFetch = global.fetch;
+    const calls = [];
+    global.fetch = async (url, opts) => {
+      calls.push({ url, opts });
+      if (url === 'https://oauth2.googleapis.com/token') {
+        return { ok: true, json: async () => ({ access_token: 'fresh-access-token' }) };
+      }
+      if (String(url).startsWith('https://www.googleapis.com/upload/youtube/v3/videos')) {
+        assert.equal(opts.headers.Authorization, 'Bearer fresh-access-token', 'must use the just-refreshed access token, not a stored one');
+        return {
+          ok: true,
+          headers: { get: (name) => (name === 'location' ? 'https://upload.example.com/session/xyz' : null) }
+        };
+      }
+      if (url === 'https://upload.example.com/session/xyz') {
+        assert.equal(opts.method, 'PUT');
+        return { ok: true, json: async () => ({ id: 'dQw4w9WgXcQ' }) };
+      }
+      throw new Error(`unexpected fetch call in test: ${url}`);
+    };
+
+    return publishToChannel('youtube', {
+      config: { client_id: 'id', client_secret: 'secret', refresh_token: 'rt', privacy_status: 'private' },
+      title: 'Test video', text: 'A description', filePath, mimeType: 'video/mp4'
+    }).then((result) => {
+      assert.equal(result.externalId, 'dQw4w9WgXcQ');
+      assert.equal(result.externalUrl, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+      assert.equal(calls.length, 3, 'expected exactly 3 HTTP calls: token refresh, session init, byte upload');
+    }).finally(() => { global.fetch = originalFetch; });
+  });
 });
 
 test('publishToChannel refuses an unknown channel', () => {

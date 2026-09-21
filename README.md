@@ -483,6 +483,57 @@ from the Security modal's "My Data" section. See "Hardening notes" below
 for what erasure actually does (anonymize in place, not a hard delete)
 and why.
 
+## Testing
+
+Two tiers, run differently, for a reason:
+
+- **Unit tests** (`api/test/*.test.js`, 80 as of this writing): pure
+  functions and routes tested against fake/mocked pg and Redis clients -
+  no external dependency, run anywhere, always run by plain `npm test`.
+  See "Added a real test suite, starting from zero" below for why most of
+  `server.js` isn't in this tier.
+- **Integration tests** (`api/test/integration/routes.integration.js`):
+  the same app's real routes, but driven against a **real** Postgres and
+  Redis - the things a mock genuinely cannot verify: that FORCE ROW LEVEL
+  SECURITY actually stops a cross-tenant `GET /leads`, that the
+  `audit_logs` `no_update_audit` trigger actually rejects an `UPDATE`,
+  that the Redis-backed rate limiter actually blocks a client after 10
+  requests (not just that it fails open when Redis is unreachable - the
+  mocked-client tests in `rate-limiters.test.js` could only ever prove
+  that half), that the full migration chain applies cleanly against a
+  freshly-`init-secure.sql`'d database, and that `POST /me/erase`/`DELETE
+  /leads/:id` genuinely mutate rows rather than just returning `{ erased:
+  true }`.
+
+  This file spawns the real `api/src/server.js` as a child process
+  against whatever `DATABASE_URL`/`REDIS_URL` you give it, then drives it
+  with real HTTP requests. It's **not** run by plain `npm test` - it
+  self-skips with a clear reason if `DATABASE_URL`/`REDIS_URL` aren't
+  set, so a laptop without a spare Postgres+Redis sees one skipped test,
+  not a failure. To actually run it:
+
+  ```sh
+  # once, against a disposable database - never a real one, some of
+  # these tests are destructive by design:
+  psql -U orgcomms_test -d orgcomms_test -f postgres/init-secure.sql
+  cd api && MIGRATIONS_DIR=../postgres node src/migrate.js
+
+  DATABASE_URL=postgres://orgcomms_test:<password>@localhost:5432/orgcomms_test \
+  REDIS_URL=redis://localhost:6379 \
+  npm run test:integration
+  ```
+
+  `.github/workflows/api-tests.yml` runs both tiers on every push/PR now
+  - the `integration-test` job spins up real `postgres:15-alpine` and
+  `redis:7-alpine` service containers (matching
+  `docker-compose.vps.yml`'s actual versions), applies the schema exactly
+  the way a real deploy does (`init-secure.sql` then `migrate.js`), and
+  runs this suite against them. This was previously a real gap - no
+  Docker/Postgres/Redis was available in the environment these hardening
+  passes were done in, so every fix up to this one could only be verified
+  against mocks; this closes that gap for good, in CI, on every future
+  change, not just as a one-off.
+
 ## Dependency note
 
 `multer` was on the vulnerable 1.x line (`npm` flags known CVEs on install);
@@ -988,7 +1039,7 @@ code changes were needed.
   Writing the real test for this (`api/test/rate-limiters.test.js`,
   spinning up a real Express server per test and driving it with `fetch`,
   since a full real-Redis integration harness isn't available in this
-  environment - see the "Route/DB integration testing" gap below) caught
+  environment at the time - see "Testing" above, now fixed) caught
   a genuine bug before it shipped: `rate-limit-redis`'s `RedisStore`
   constructor eagerly fires an *unawaited* `SCRIPT LOAD` promise, which
   becomes an unhandled promise rejection (able to crash the whole process
@@ -1157,3 +1208,28 @@ code changes were needed.
   rebuilt frontend, tracing every query against the actual schema) rather
   than by a new automated test, consistent with how every other `server.js`
   route addition in this list has been verified.
+- **Added real Postgres/Redis integration testing - the "no Docker in
+  this environment" gap that every entry above this one had to work
+  around.** Every hardening pass before this one that touched
+  RLS/triggers/Redis-backed behavior (Redis-backed rate limiting, the
+  GDPR routes just above) could only be verified against a mocked
+  pg/Redis client, because no real instance of either existed in the
+  environment doing the work - documented honestly each time, but a real
+  gap. Root access in this particular session's environment made it
+  possible to actually install and run real Postgres 16 + Redis directly
+  (`apt-get install postgresql redis-server`) and use them for real -
+  see "Testing" above for what `api/test/integration/routes.integration.js`
+  actually verifies and how to run it, and `.github/workflows/api-tests.yml`
+  for the service-container CI job that keeps it running on every future
+  push, so this doesn't stay a one-off. A genuinely new bug was
+  worth calling out from writing these: seeding test data directly
+  against the RLS-protected `leads` table via a raw `pg` client needed an
+  explicit `SET app.tenant_id` before every query on that connection,
+  same as `withTenantClient()` already has to do in `server.js` itself -
+  a stale `app.tenant_id` left over from a previous query on the same
+  long-lived connection silently filtered out the very row a later test
+  was looking for (RLS returned zero rows, not an error), which is a
+  precise, real illustration of exactly the connection-affinity bug
+  `withTenantClient()`'s own comment in `server.js` warns about. All 22
+  integration tests pass against real services; the existing 80 unit
+  tests are unaffected and still run without them.

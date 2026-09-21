@@ -909,3 +909,55 @@ code changes were needed.
     including that a malformed `SENTRY_DSN` is caught rather than crashing
     startup, and that `captureError` never throws when tracking is
     disabled. Suite is now 70 tests across 8 files.
+- **Rebuilt the frontend's React app from real, buildable source - and
+  fixed the dark/light theme not applying to it.** `frontend/index.html`
+  used to contain a fully-built, minified React + Tailwind bundle
+  (~200KB of compiled JS) with no source anywhere in the repository -
+  any change meant hand-editing compiled output, and it couldn't be
+  audited or rebuilt. Investigating a report that the site's dark/light
+  theme toggle didn't affect this app's screens confirmed why: the
+  toggle sets a `data-theme` attribute on `<html>` (see
+  `frontend/overlay.html`), but the old bundle never referenced
+  `data-theme` anywhere, never added Tailwind's `dark` class to
+  anything (Tailwind here uses the `.dark *` class-strategy selector,
+  not a media query), and its compiled CSS had exactly 2 `dark:`
+  utility rules in the whole 200KB+ file. Toggling the theme visibly
+  re-themed the auth gate and admin panel and did nothing to the actual
+  product screens underneath.
+  - Added `frontend/app/`: a real Vite + React + Tailwind project (see
+    `frontend/app/README.md` for the full architecture). Every
+    component uses paired light/dark Tailwind classes, and
+    `frontend/app/src/lib/theme.js` bridges the site's `data-theme`
+    attribute onto Tailwind's `dark` class via a `MutationObserver`,
+    which is the piece that was simply never wired up before.
+  - The old bundle also made zero real API calls (no `fetch`, no
+    `axios`, no `XMLHttpRequest` anywhere in it) - it was a static,
+    unwired mockup sitting on top of a fully functional backend.
+    `frontend/app/src/lib/api.js` wires it to the real API (products,
+    content upload/transform/approve, channel specs, leads,
+    integrations), sharing the same `localStorage` session and 401 ->
+    refresh -> retry logic as `frontend/overlay.html`'s own `api()`
+    helper, so both halves of the page share one session lifecycle.
+  - `frontend/index.html` is now **generated**, not hand-edited:
+    `frontend/app/scripts/assemble.js` runs after `vite build` and
+    splices the built (external, hashed) `<script>`/`<link>` tags into
+    `frontend/overlay.html` - which is preserved byte-for-byte, still
+    the hand-written source of truth for the auth gate, admin panel,
+    products/channels/onboarding/security UI. `frontend/index.html` is
+    now gitignored (Docker builds it fresh every time - see below) so
+    it can't go stale relative to its real source the way a committed
+    copy eventually would have.
+  - `frontend/Dockerfile` is now a real multi-stage build (`node:20-alpine`
+    build stage running `npm ci && npm run build`, then the built output
+    copied into the `nginx:alpine` stage) instead of just copying a
+    pre-built file into the image.
+  - Because the built React bundle is now an external same-origin
+    `<script src>` instead of inline, it needs no CSP hash at all
+    (`script-src 'self'` already covers it) - `nginx/orgcomms-vps.conf`'s
+    CSP dropped from 4 sha256 hashes to 3 (the two small bootstrap
+    scripts plus `overlay.html`'s own script, all still inline and still
+    exact-hash-pinned, same reasoning as before).
+  - Verified with a clean `npm ci && npm run build` (both directly and
+    simulated through the exact multi-stage Docker layout) producing a
+    valid, byte-checked assembled `index.html` before this was written
+    back to the repo.

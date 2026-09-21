@@ -1,0 +1,1347 @@
+  <style>
+    :root{
+      --oc-bg:#0a0a0b;
+      --oc-panel:#141416;
+      --oc-text:#fff;
+      --oc-border-06:rgba(255,255,255,.06);
+      --oc-border-08:rgba(255,255,255,.08);
+      --oc-border-1:rgba(255,255,255,.1);
+      --oc-border-12:rgba(255,255,255,.12);
+      --oc-input-bg:rgba(255,255,255,.04);
+      --oc-card-bg-subtle:rgba(255,255,255,.03);
+      --oc-dim-4:rgba(255,255,255,.4);
+      --oc-dim-45:rgba(255,255,255,.45);
+      --oc-dim-5:rgba(255,255,255,.5);
+      --oc-dim-6:rgba(255,255,255,.6);
+      --oc-dim-7:rgba(255,255,255,.7);
+      --oc-overlay-6:rgba(0,0,0,.6);
+      --oc-overlay-7:rgba(0,0,0,.7);
+      --oc-overlay-75:rgba(0,0,0,.75);
+      --oc-brand:#00a884;
+      --oc-danger:#ff6b6b;
+      --oc-success:#00d19a;
+      --oc-badge-bad-bg:rgba(255,107,107,.15);
+      --oc-brand-hover-bg:rgba(0,168,132,.08);
+    }
+    :root[data-theme="light"]{
+      --oc-bg:#f0f0f3;
+      --oc-panel:#ffffff;
+      --oc-text:#17181c;
+      --oc-border-06:rgba(0,0,0,.06);
+      --oc-border-08:rgba(0,0,0,.09);
+      --oc-border-1:rgba(0,0,0,.11);
+      --oc-border-12:rgba(0,0,0,.14);
+      --oc-input-bg:rgba(0,0,0,.035);
+      --oc-card-bg-subtle:rgba(0,0,0,.025);
+      --oc-dim-4:rgba(0,0,0,.45);
+      --oc-dim-45:rgba(0,0,0,.5);
+      --oc-dim-5:rgba(0,0,0,.55);
+      --oc-dim-6:rgba(0,0,0,.62);
+      --oc-dim-7:rgba(0,0,0,.7);
+      --oc-overlay-6:rgba(0,0,0,.35);
+      --oc-overlay-7:rgba(0,0,0,.4);
+      --oc-overlay-75:rgba(0,0,0,.45);
+      --oc-badge-bad-bg:rgba(255,107,107,.12);
+      --oc-brand-hover-bg:rgba(0,168,132,.1);
+    }
+    body{background:var(--oc-bg)}
+    #oc-bar .oc-theme-toggle{background:var(--oc-border-1);color:var(--oc-text);font-size:14px;padding:6px 9px;line-height:1}
+    #oc-gate *{box-sizing:border-box;font-family:Inter,system-ui,sans-serif}
+    #oc-gate{position:fixed;inset:0;z-index:99999;background:var(--oc-bg);color:var(--oc-text);display:flex;align-items:center;justify-content:center}
+    #oc-gate .oc-card{width:100%;max-width:380px;background:var(--oc-panel);border:1px solid var(--oc-border-08);border-radius:16px;padding:28px}
+    #oc-gate .oc-logo{display:block;max-width:200px;width:100%;height:auto;margin:0 auto 16px;background:#fff;border-radius:12px;padding:10px}
+    #oc-gate h1{font-size:18px;font-weight:700;margin:0 0 4px;text-align:center}
+    #oc-gate p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 20px}
+    #oc-gate label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:14px 0 6px}
+    #oc-gate input,#oc-gate select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;outline:none}
+    #oc-gate input:focus,#oc-gate select:focus{border-color:var(--oc-brand)}
+    #oc-gate button.oc-primary{margin-top:20px;width:100%;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-gate button.oc-primary:disabled{opacity:.5;cursor:default}
+    #oc-gate .oc-err{margin-top:12px;font-size:12px;color:var(--oc-danger)}
+    #oc-gate .oc-switch{text-align:center;margin-top:16px;font-size:12px}
+    #oc-gate .oc-switch a{color:var(--oc-brand);text-decoration:none;font-weight:600}
+    #oc-gate .oc-switch a:hover{text-decoration:underline}
+    #oc-bar{position:fixed;top:12px;right:12px;z-index:99998;display:flex;gap:8px;align-items:center;background:var(--oc-panel);border:1px solid var(--oc-border-1);border-radius:999px;padding:6px 6px 6px 14px;font:12px Inter,system-ui,sans-serif;color:var(--oc-text)}
+    #oc-bar .oc-who{color:var(--oc-dim-6)}
+    #oc-bar .oc-bar-icon{width:20px;height:20px;border-radius:5px;background:#fff;object-fit:contain;padding:1px}
+    #oc-bar button{border:none;border-radius:999px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer}
+    #oc-bar .oc-admin-btn{background:var(--oc-brand);color:#fff}
+    #oc-bar .oc-logout-btn{background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-admin{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-admin .oc-panel{width:100%;max-width:640px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px}
+    #oc-admin h2{font-size:16px;margin:0 0 16px;font-family:Inter,system-ui,sans-serif}
+    #oc-admin .oc-tabs{display:flex;gap:8px;margin-bottom:16px}
+    #oc-admin .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:var(--oc-border-06);color:var(--oc-dim-7);cursor:pointer;border:none;font-family:Inter,system-ui,sans-serif}
+    #oc-admin .oc-tab.oc-active{background:var(--oc-brand);color:#fff}
+    #oc-admin table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px;font-family:Inter,system-ui,sans-serif}
+    #oc-admin th{text-align:left;color:var(--oc-dim-5);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--oc-border-1)}
+    #oc-admin td{padding:6px 8px;border-bottom:1px solid var(--oc-border-06)}
+    #oc-admin form{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+    #oc-admin form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin-bottom:-4px}
+    #oc-admin input,#oc-admin select{padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:Inter,system-ui,sans-serif}
+    #oc-admin .oc-full{grid-column:span 2}
+    #oc-admin .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
+    #oc-admin .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
+    #oc-admin .oc-panel{position:relative}
+    #oc-admin .oc-msg{font-size:12px;margin-top:8px}
+    #oc-admin .oc-msg.oc-ok{color:var(--oc-success)}
+    #oc-admin .oc-msg.oc-bad{color:var(--oc-danger)}
+    #oc-admin .oc-badge{font-size:10px;text-transform:uppercase;padding:2px 6px;border-radius:999px;margin-left:6px;vertical-align:middle}
+    #oc-admin .oc-badge-bad{background:var(--oc-badge-bad-bg);color:var(--oc-danger)}
+    #oc-security{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-security .oc-panel{position:relative;width:100%;max-width:400px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px;font-family:Inter,system-ui,sans-serif}
+    #oc-security .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
+    #oc-security label{display:block;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-security input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
+    #oc-security .oc-submit{width:100%;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
+    #oc-security .oc-msg{font-size:12px;margin-top:8px}
+    #oc-security .oc-msg.oc-bad{color:var(--oc-danger)}
+    #oc-products{position:fixed;inset:0;z-index:99997;background:var(--oc-overlay-6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+    #oc-products .oc-panel{position:relative;width:100%;max-width:640px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:24px;font-family:Inter,system-ui,sans-serif}
+    #oc-products .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
+    #oc-products h2{font-size:16px;margin:0 0 16px}
+    #oc-products .oc-tabs{display:flex;gap:8px;margin-bottom:16px}
+    #oc-products .oc-tab{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;background:var(--oc-border-06);color:var(--oc-dim-7);cursor:pointer;border:none;font-family:inherit}
+    #oc-products .oc-tab.oc-active{background:var(--oc-brand);color:#fff}
+    #oc-products table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px}
+    #oc-products th{text-align:left;color:var(--oc-dim-5);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--oc-border-1)}
+    #oc-products td{padding:6px 8px;border-bottom:1px solid var(--oc-border-06)}
+    #oc-products form{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+    #oc-products form label{grid-column:span 2;font-size:11px;text-transform:uppercase;color:var(--oc-dim-5);margin-bottom:-4px}
+    #oc-products input,#oc-products select,#oc-products textarea{padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit}
+    #oc-products .oc-full{grid-column:span 2}
+    #oc-products .oc-submit{grid-column:span 2;padding:10px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;cursor:pointer}
+    #oc-products .oc-msg{font-size:12px;margin-top:8px}
+    #oc-products .oc-msg.oc-ok{color:var(--oc-success)}
+    #oc-products .oc-msg.oc-bad{color:var(--oc-danger)}
+    #oc-products .oc-back{background:none;border:none;color:var(--oc-brand);font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
+    #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-products .oc-upload-row{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+    #oc-products .oc-upload-row input[type=file]{flex:1;font-size:12px;padding:8px 10px;border-radius:8px;border:1px dashed var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text)}
+    #oc-products .oc-asset-card{border:1px solid var(--oc-border-08);border-radius:12px;padding:14px;margin-bottom:10px}
+    #oc-products .oc-asset-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+    #oc-products .oc-asset-name{font-size:13px;font-weight:600}
+    #oc-products .oc-asset-meta{font-size:11px;color:var(--oc-dim-5);margin-top:2px}
+    #oc-products .oc-scan-bad{color:var(--oc-danger);font-weight:600}
+    #oc-products .oc-variant-list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+    #oc-products .oc-variant-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--oc-card-bg-subtle);font-size:12px}
+    #oc-products .oc-variant-ch{font-weight:600;text-transform:capitalize}
+    #oc-products .oc-variant-spec{color:var(--oc-dim-5);font-size:11px;display:block}
+    #oc-products .oc-status-pill{font-size:10px;text-transform:uppercase;letter-spacing:.03em;padding:2px 8px;border-radius:999px;white-space:nowrap}
+    #oc-products .oc-status-PENDING_APPROVAL{background:var(--oc-badge-bad-bg);color:#e8a33d}
+    #oc-products .oc-status-APPROVED,#oc-products .oc-status-PUBLISHED{background:var(--oc-brand-hover-bg);color:var(--oc-success)}
+    #oc-products .oc-status-REJECTED,#oc-products .oc-status-PUBLISH_FAILED{background:var(--oc-badge-bad-bg);color:var(--oc-danger)}
+    #oc-products .oc-status-DRAFT{background:var(--oc-border-06);color:var(--oc-dim-6)}
+    #oc-products .oc-variant-actions{display:flex;gap:4px}
+    #oc-products .oc-vbtn{border:none;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer}
+    #oc-products .oc-vbtn-approve{background:var(--oc-success);color:#0a0a0b}
+    #oc-products .oc-vbtn-reject{background:var(--oc-danger);color:#fff}
+    #oc-products .oc-chpick{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+    #oc-products .oc-chpick label{display:flex;align-items:center;gap:5px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--oc-text);background:var(--oc-card-bg-subtle);border:1px solid var(--oc-border-08);border-radius:999px;padding:5px 10px;margin:0;cursor:pointer}
+    #oc-products .oc-chpick input{width:auto;padding:0}
+    #oc-products .oc-gen-btn{margin-top:10px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-brand);border-radius:999px;padding:6px 14px;font-size:11px;font-weight:600;cursor:pointer}
+    #oc-channel-wizard{position:fixed;inset:0;z-index:99999;background:var(--oc-overlay-75);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-channel-wizard .oc-panel{position:relative;width:100%;max-width:480px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-channel-wizard .oc-close{position:absolute;top:16px;right:20px;background:none;border:none;color:var(--oc-dim-6);font-size:18px;cursor:pointer}
+    #oc-channel-wizard h2{font-size:16px;margin:0 0 4px}
+    #oc-channel-wizard p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 18px}
+    #oc-channel-wizard .oc-chgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    #oc-channel-wizard .oc-chcard{text-align:left;border:1px solid var(--oc-border-1);background:var(--oc-card-bg-subtle);border-radius:12px;padding:12px 14px;cursor:pointer;color:var(--oc-text);font-family:inherit}
+    #oc-channel-wizard .oc-chcard:hover{border-color:var(--oc-brand);background:var(--oc-brand-hover-bg)}
+    #oc-channel-wizard .oc-chcard .oc-chname{font-size:13px;font-weight:600;display:block}
+    #oc-channel-wizard .oc-chcard .oc-chstatus{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--oc-dim-4);display:block;margin-top:4px}
+    #oc-channel-wizard .oc-chcard .oc-chstatus.oc-configured{color:var(--oc-success)}
+    #oc-channel-wizard .oc-chcard.oc-disabled{opacity:.45;cursor:default}
+    #oc-channel-wizard .oc-chcard.oc-disabled:hover{border-color:var(--oc-border-1);background:var(--oc-card-bg-subtle)}
+    #oc-channel-wizard label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-channel-wizard input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
+    #oc-channel-wizard .oc-row{display:flex;gap:8px;margin-top:20px}
+    #oc-channel-wizard .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-channel-wizard .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
+    #oc-channel-wizard .oc-help{font-size:11px;color:var(--oc-dim-45);margin-bottom:14px;line-height:1.5}
+    #oc-onboarding{position:fixed;inset:0;z-index:99998;background:var(--oc-overlay-7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+    #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
+    #oc-onboarding .oc-steps{display:flex;gap:6px;margin-bottom:18px}
+    #oc-onboarding .oc-step-dot{flex:1;height:3px;border-radius:2px;background:var(--oc-border-12)}
+    #oc-onboarding .oc-step-dot.oc-done{background:var(--oc-brand)}
+    #oc-onboarding h2{font-size:16px;margin:0 0 4px}
+    #oc-onboarding p.oc-sub{font-size:12px;color:var(--oc-dim-5);margin:0 0 18px}
+    #oc-onboarding label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:12px 0 6px}
+    #oc-onboarding input,#oc-onboarding select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
+    #oc-onboarding .oc-row{display:flex;gap:8px;margin-top:20px}
+    #oc-onboarding .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
+    #oc-onboarding .oc-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:var(--oc-dim-4);background:none;border:none;cursor:pointer;width:100%}
+    #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
+    #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:var(--oc-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
+  </style>
+  <script>
+  (function(){
+    var MANAGER_ROLES = ['SUPER_ADMIN','IT_ADMIN','DEPT_ADMIN'];
+    var API_BASE = 'https://api.octaveaiautomation.com';
+    var SESSION_KEY = 'orgcomms_session';
+
+    function loadSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e){ return null; } }
+    function saveSession(s){ localStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
+    function clearSession(){ localStorage.removeItem(SESSION_KEY); }
+
+    // HTML-escapes a value before it's spliced into an innerHTML template
+    // string. Most of the strings rendered this way are attacker-reachable
+    // stored data (a product name, an uploaded file's original filename, a
+    // tenant/company name from signup, a member's email) - none of that was
+    // being escaped anywhere in this file, so a product named
+    // `<img src=x onerror=alert(document.cookie)>` would execute for every
+    // admin who opened Products. Used everywhere a stored/user-supplied
+    // field (not a fixed, code-defined string) is interpolated into markup.
+    var ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); }
+
+    // Light/dark theme - applied via a data-theme attribute on <html> so the
+    // CSS custom properties defined in the <style> block above can switch
+    // per-theme. A tiny inline script at the very top of <body> mirrors this
+    // read (before this bundle even parses) so the page never flashes the
+    // wrong theme on first paint.
+    var THEME_KEY = 'octave_theme';
+    function getTheme(){ try { return localStorage.getItem(THEME_KEY) || 'dark'; } catch(e){ return 'dark'; } }
+    function setTheme(t){
+      try { localStorage.setItem(THEME_KEY, t); } catch(e){}
+      document.documentElement.setAttribute('data-theme', t);
+    }
+
+    async function doFetch(session, path, opts){
+      var isFormData = (typeof FormData !== 'undefined') && opts.body instanceof FormData;
+      var headers = Object.assign({}, isFormData ? {} : {'Content-Type':'application/json'}, opts.headers||{});
+      if (session && session.token) headers['Authorization'] = 'Bearer ' + session.token;
+      var res = await fetch(session.apiBase.replace(/\/$/,'') + path, {
+        method: opts.method || 'GET',
+        headers: headers,
+        body: isFormData ? opts.body : (opts.body ? JSON.stringify(opts.body) : undefined)
+      });
+      var data = null;
+      try { data = await res.json(); } catch(e){}
+      return { res: res, data: data };
+    }
+
+    async function api(session, path, opts){
+      opts = opts || {};
+      var first = await doFetch(session, path, opts);
+      if (first.res.status === 401 && session.refresh) {
+        try {
+          var refreshRes = await fetch(session.apiBase.replace(/\/$/,'') + '/auth/refresh', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ refresh: session.refresh })
+          });
+          var refreshData = await refreshRes.json();
+          if (refreshRes.ok && refreshData.token) {
+            session.token = refreshData.token;
+            localStorage.setItem('orgcomms_session', JSON.stringify(session));
+            first = await doFetch(session, path, opts);
+          } else {
+            localStorage.removeItem('orgcomms_session');
+            location.reload();
+            throw new Error('Session expired, please sign in again');
+          }
+        } catch(e) {
+          localStorage.removeItem('orgcomms_session');
+          location.reload();
+          throw e;
+        }
+      }
+      if (!first.res.ok) throw new Error((first.data && first.data.error) || ('Request failed: ' + first.res.status));
+      return first.data;
+    }
+
+    function renderLoginGate(){
+      var existing = document.getElementById('oc-gate');
+      if (existing) existing.remove();
+      var root = document.getElementById('root');
+      if (root) root.style.display = 'none';
+
+      var gate = document.createElement('div');
+      gate.id = 'oc-gate';
+      document.body.appendChild(gate);
+
+      function renderForm(mode, signupAvailable){
+        var isSignup = mode === 'signup';
+        gate.innerHTML =
+          '<div class="oc-card">' +
+            '<img src="/octave-logo.png" alt="Octave Growth Intelligence" class="oc-logo">' +
+            '<h1>' + (isSignup ? 'Create Super Admin Account' : 'Sign In') + '</h1>' +
+            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your tenant' : 'Sign in to your tenant') + '</p>' +
+            '<form id="oc-auth-form">' +
+              (isSignup ? '<label>Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
+              '<label>Email</label>' +
+              '<input id="oc-email" type="email" required>' +
+              '<label>Password</label>' +
+              '<input id="oc-password" type="password" minlength="12" required>' +
+              (isSignup ? '<label>Confirm Password</label><input id="oc-password-confirm" type="password" minlength="12" required>' : '') +
+              (!isSignup ? '<div id="oc-totp-wrap" style="display:none"><label>2FA Code</label><input id="oc-totp"></div>' : '') +
+              '<button class="oc-primary" type="submit">' + (isSignup ? 'Create Account' : 'Sign In') + '</button>' +
+              '<div class="oc-err" id="oc-err" style="display:none"></div>' +
+            '</form>' +
+            (signupAvailable ? '<p class="oc-switch"><a href="#" id="oc-switch-link">' + (isSignup ? 'Already have an account? Sign in' : 'First time here? Create the Super Admin account') + '</a></p>' : '') +
+          '</div>';
+
+        if (signupAvailable) {
+          document.getElementById('oc-switch-link').addEventListener('click', function(ev){
+            ev.preventDefault();
+            renderForm(isSignup ? 'login' : 'signup', signupAvailable);
+          });
+        }
+
+        document.getElementById('oc-auth-form').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var apiBase = API_BASE;
+          var email = document.getElementById('oc-email').value.trim();
+          var password = document.getElementById('oc-password').value;
+          var errEl = document.getElementById('oc-err');
+          errEl.style.display = 'none';
+          var btn = ev.target.querySelector('button');
+          btn.disabled = true;
+          try {
+            var endpoint, body;
+            if (isSignup) {
+              var confirmPassword = document.getElementById('oc-password-confirm').value;
+              if (password !== confirmPassword) throw new Error('Passwords do not match');
+              endpoint = '/auth/signup';
+              body = { email: email, password: password, company_name: document.getElementById('oc-company').value.trim() };
+            } else {
+              var totp = document.getElementById('oc-totp').value.trim();
+              endpoint = '/auth/login';
+              body = { email: email, password: password };
+              if (totp) body.totp = totp;
+            }
+            var authRes = await fetch(apiBase.replace(/\/$/,'') + endpoint, {
+              method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+            });
+            var authData = await authRes.json();
+            if (!authRes.ok) {
+              if (!isSignup && authData && authData.need_2fa) {
+                document.getElementById('oc-totp-wrap').style.display = 'block';
+                throw new Error('Enter your 2FA code and sign in again');
+              }
+              throw new Error((authData && authData.error) || (isSignup ? 'Signup failed' : 'Login failed'));
+            }
+            var session = { apiBase: apiBase, token: authData.token, refresh: authData.refresh, user: authData.user, tenant: null };
+            var tenantRes = await fetch(apiBase.replace(/\/$/,'') + '/tenants/me', { headers: { Authorization: 'Bearer ' + authData.token } });
+            if (tenantRes.ok) session.tenant = await tenantRes.json();
+            saveSession(session);
+            location.reload();
+          } catch(e){
+            errEl.textContent = e.message;
+            errEl.style.display = 'block';
+            btn.disabled = false;
+          }
+        });
+      }
+
+      renderForm('login', false);
+      fetch(API_BASE.replace(/\/$/,'') + '/auth/signup-status')
+        .then(function(r){ return r.ok ? r.json() : { available: false }; })
+        .then(function(status){ if (status.available) renderForm('login', true); })
+        .catch(function(){});
+    }
+
+    function renderBar(session){
+      var existing = document.getElementById('oc-bar');
+      if (existing) existing.remove();
+      var root = document.getElementById('root');
+      if (root) root.style.display = '';
+
+      var bar = document.createElement('div');
+      bar.id = 'oc-bar';
+      var canManageUsers = MANAGER_ROLES.indexOf(session.user.role) !== -1;
+      bar.innerHTML =
+        '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
+        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(session.user.role) + (session.tenant ? ' &middot; ' + esc(session.tenant.name) : '') + '</span>' +
+        '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
+        '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
+        (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
+        '<button class="oc-theme-toggle" id="oc-toggle-theme" title="Switch theme" type="button">' + (getTheme() === 'light' ? '&#9789;' : '&#9788;') + '</button>' +
+        '<button class="oc-logout-btn" id="oc-logout">Logout</button>';
+      document.body.appendChild(bar);
+
+      document.getElementById('oc-logout').addEventListener('click', function(){
+        clearSession();
+        location.reload();
+      });
+      if (canManageUsers) {
+        document.getElementById('oc-open-admin').addEventListener('click', function(){ renderAdmin(session); });
+      }
+      document.getElementById('oc-open-security').addEventListener('click', function(){ renderSecurity(session); });
+      document.getElementById('oc-open-products').addEventListener('click', function(){ renderProducts(session); });
+      document.getElementById('oc-toggle-theme').addEventListener('click', function(){
+        setTheme(getTheme() === 'light' ? 'dark' : 'light');
+        renderBar(session);
+      });
+    }
+
+    function renderSecurity(session){
+      var existing = document.getElementById('oc-security');
+      if (existing) existing.remove();
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-security';
+      wrap.className = 'oc-admin-overlay';
+      wrap.innerHTML =
+        '<div class="oc-panel" style="max-width:400px">' +
+          '<button class="oc-close" id="oc-security-close">&times;</button>' +
+          '<h2 style="margin:0 0 16px">Two-Factor Authentication</h2>' +
+          '<div id="oc-2fa-body">Loading&hellip;</div>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      document.getElementById('oc-security-close').addEventListener('click', function(){ wrap.remove(); });
+
+      async function loadStatus(){
+        var body = document.getElementById('oc-2fa-body');
+        try {
+          var status = await api(session, '/auth/2fa/status');
+          if (status.enabled) {
+            body.innerHTML =
+              '<p style="font-size:13px">2FA is <strong style="color:var(--oc-success)">enabled</strong> on your account.</p>' +
+              '<label>Current Password</label><input id="oc-2fa-password" type="password">' +
+              '<button class="oc-submit" id="oc-2fa-disable" style="margin-top:10px">Disable 2FA</button>' +
+              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+            document.getElementById('oc-2fa-disable').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                await api(session, '/auth/2fa/disable', { method: 'POST', body: { password: document.getElementById('oc-2fa-password').value } });
+                loadStatus();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          } else {
+            body.innerHTML =
+              '<p style="font-size:13px">2FA is <strong style="color:var(--oc-dim-6)">disabled</strong>.</p>' +
+              '<button class="oc-submit" id="oc-2fa-start">Enable 2FA</button>' +
+              '<div id="oc-2fa-setup" style="display:none;margin-top:12px">' +
+                '<p style="font-size:12px;color:var(--oc-dim-6)">Scan with your authenticator app:</p>' +
+                '<img id="oc-2fa-qr" style="display:block;margin:8px auto;border-radius:8px" width="180" height="180">' +
+                '<p style="font-size:11px;color:var(--oc-dim-5);word-break:break-all" id="oc-2fa-secret"></p>' +
+                '<label>Enter the 6-digit code to confirm</label>' +
+                '<input id="oc-2fa-code" maxlength="6">' +
+                '<button class="oc-submit" id="oc-2fa-confirm" style="margin-top:10px">Verify &amp; Enable</button>' +
+              '</div>' +
+              '<div class="oc-msg" id="oc-2fa-msg"></div>';
+            document.getElementById('oc-2fa-start').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                var setup = await api(session, '/auth/2fa/setup', { method: 'POST' });
+                document.getElementById('oc-2fa-qr').src = setup.qr;
+                document.getElementById('oc-2fa-secret').textContent = 'Manual entry key: ' + setup.secret;
+                document.getElementById('oc-2fa-setup').style.display = 'block';
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+            document.getElementById('oc-2fa-confirm').addEventListener('click', async function(){
+              var msg = document.getElementById('oc-2fa-msg');
+              try {
+                await api(session, '/auth/2fa/verify', { method: 'POST', body: { token: document.getElementById('oc-2fa-code').value } });
+                loadStatus();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          }
+        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+      loadStatus();
+    }
+
+    function dismissOnboarding(session){
+      try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+      var el = document.getElementById('oc-onboarding');
+      if (el) el.remove();
+    }
+
+    function renderOnboarding(session){
+      var existing = document.getElementById('oc-onboarding');
+      if (existing) existing.remove();
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-onboarding';
+      document.body.appendChild(wrap);
+
+      var state = { productId: null, productName: '' };
+
+      function steps(activeIndex){
+        var dots = '';
+        for (var i = 0; i < 4; i++) dots += '<div class="oc-step-dot' + (i < activeIndex ? ' oc-done' : '') + '"></div>';
+        return '<div class="oc-steps">' + dots + '</div>';
+      }
+
+      function renderStep1(){
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(0) +
+            '<h2>Welcome — let\'s set up your first Product</h2>' +
+            '<p class="oc-sub">A Product/Service is what your channels, leads, and content get organized under. You can create more later.</p>' +
+            '<form id="oc-ob-product">' +
+              '<label>Product/Service Name</label>' +
+              '<input name="name" placeholder="e.g. Acme Marketing" required>' +
+              '<label>Description (optional)</label>' +
+              '<input name="description" placeholder="What is this product/service for?">' +
+              '<div class="oc-row"><button type="submit" class="oc-primary">Create &amp; Continue</button></div>' +
+              '<div class="oc-err" id="oc-ob-err1" style="display:none"></div>' +
+            '</form>' +
+            '<button class="oc-skip" id="oc-ob-skip1">Skip setup for now</button>' +
+          '</div>';
+        document.getElementById('oc-ob-skip1').addEventListener('click', function(){ dismissOnboarding(session); });
+        document.getElementById('oc-ob-product').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var err = document.getElementById('oc-ob-err1');
+          err.style.display = 'none';
+          var fd = new FormData(ev.target);
+          try {
+            var product = await api(session, '/products', { method: 'POST', body: { name: fd.get('name'), description: fd.get('description') } });
+            state.productId = product.id;
+            state.productName = product.name;
+            renderStep2();
+          } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+        });
+      }
+
+      function renderStep2(){
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(1) +
+            '<h2>Assign a Product Admin</h2>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your tenant.</p>' +
+            '<div id="oc-ob-step2-body">Loading&hellip;</div>' +
+          '</div>';
+
+        (async function(){
+          var body = document.getElementById('oc-ob-step2-body');
+          try {
+            var users = await api(session, '/users');
+            var options = users.map(function(u){ return '<option value="' + u.id + '"' + (u.id === session.user.id ? ' selected' : '') + '>' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('');
+            body.innerHTML =
+              '<form id="oc-ob-member">' +
+                '<label>Product Admin</label>' +
+                '<select name="user_id">' + options + '</select>' +
+                '<div class="oc-row">' +
+                  '<button type="button" class="oc-secondary" id="oc-ob-back2">Back</button>' +
+                  '<button type="submit" class="oc-primary">Assign &amp; Continue</button>' +
+                '</div>' +
+                '<div class="oc-err" id="oc-ob-err2" style="display:none"></div>' +
+              '</form>' +
+              '<button class="oc-skip" id="oc-ob-skip2">Skip setup for now</button>';
+            document.getElementById('oc-ob-skip2').addEventListener('click', function(){ dismissOnboarding(session); });
+            document.getElementById('oc-ob-back2').addEventListener('click', renderStep1);
+            document.getElementById('oc-ob-member').addEventListener('submit', async function(ev){
+              ev.preventDefault();
+              var err = document.getElementById('oc-ob-err2');
+              err.style.display = 'none';
+              var fd = new FormData(ev.target);
+              try {
+                await api(session, '/products/' + state.productId + '/members', { method: 'POST', body: { user_id: fd.get('user_id'), role: 'ADMIN' } });
+                renderStep3();
+              } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+            });
+          } catch(e){ body.innerHTML = '<div class="oc-err" style="display:block">' + esc(e.message) + '</div>'; }
+        })();
+      }
+
+      function renderStep3(){
+        var channels = ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'];
+        wrap.innerHTML =
+          '<div class="oc-panel">' +
+            steps(2) +
+            '<h2>Configure your first channel</h2>' +
+            '<p class="oc-sub">Optional — every channel already exists for this product and can be configured anytime from the Products panel. Do one now if you want.</p>' +
+            '<form id="oc-ob-channel">' +
+              '<label>Channel</label>' +
+              '<select name="channel">' + channels.map(function(c){ return '<option value="' + c + '">' + c + '</option>'; }).join('') + '</select>' +
+              '<label>Note (optional)</label>' +
+              '<input name="note" placeholder="No real platform integration yet — this is a placeholder">' +
+              '<div class="oc-row">' +
+                '<button type="button" class="oc-secondary" id="oc-ob-skip3">Skip</button>' +
+                '<button type="submit" class="oc-primary">Save &amp; Finish</button>' +
+              '</div>' +
+              '<div class="oc-err" id="oc-ob-err3" style="display:none"></div>' +
+            '</form>' +
+          '</div>';
+        document.getElementById('oc-ob-skip3').addEventListener('click', renderStep4);
+        document.getElementById('oc-ob-channel').addEventListener('submit', async function(ev){
+          ev.preventDefault();
+          var err = document.getElementById('oc-ob-err3');
+          err.style.display = 'none';
+          var fd = new FormData(ev.target);
+          try {
+            await api(session, '/products/' + state.productId + '/channels', { method: 'POST', body: { channel: fd.get('channel'), config: { note: fd.get('note') } } });
+            renderStep4();
+          } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+        });
+      }
+
+      function renderStep4(){
+        wrap.innerHTML =
+          '<div class="oc-panel" style="text-align:center">' +
+            steps(4) +
+            '<div class="oc-done-icon">&#10003;</div>' +
+            '<h2>You\'re all set</h2>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" is ready. Add more users, configure the rest of its channels, or enable Agents (Premium plans) from the Products panel anytime.</p>' +
+            '<div class="oc-row">' +
+              '<button class="oc-primary" id="oc-ob-open-products">Open Products</button>' +
+            '</div>' +
+          '</div>';
+        try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+        document.getElementById('oc-ob-open-products').addEventListener('click', function(){
+          wrap.remove();
+          renderProducts(session);
+        });
+      }
+
+      renderStep1();
+    }
+
+    // Auto-triggers once for a Tenant Admin whose tenant has no products yet.
+    // Dismissible at any step; never nags again for that tenant once
+    // dismissed or once a product exists.
+    async function maybeShowOnboarding(session){
+      if (MANAGER_ROLES.indexOf(session.user.role) === -1) return;
+      var dismissKey = 'orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x');
+      try { if (localStorage.getItem(dismissKey)) return; } catch(e){}
+      try {
+        var products = await api(session, '/products');
+        if (Array.isArray(products) && products.length === 0) renderOnboarding(session);
+      } catch(e){}
+    }
+
+    function renderProducts(session){
+      var existing = document.getElementById('oc-products');
+      if (existing) existing.remove();
+      var isTenantAdmin = MANAGER_ROLES.indexOf(session.user.role) !== -1;
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-products';
+      wrap.innerHTML =
+        '<div class="oc-panel">' +
+          '<button class="oc-close" id="oc-products-close">&times;</button>' +
+          '<h2>Products &amp; Services</h2>' +
+          '<div id="oc-products-body">Loading&hellip;</div>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      document.getElementById('oc-products-close').addEventListener('click', function(){ wrap.remove(); });
+
+      async function loadList(){
+        var body = document.getElementById('oc-products-body');
+        body.innerHTML = 'Loading&hellip;';
+        try {
+          var products = await api(session, '/products');
+          var rows = products.map(function(p){
+            return '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.description || '') + '</td><td><button class="oc-pbtn" data-id="' + p.id + '" data-name="' + esc(p.name) + '">Manage</button></td></tr>';
+          }).join('');
+          body.innerHTML =
+            '<h2>Products &amp; Services</h2>' +
+            '<table><tr><th>Name</th><th>Description</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:var(--oc-dim-5)">No products yet</td></tr>') + '</table>' +
+            (isTenantAdmin ?
+              '<form id="oc-create-product">' +
+                '<label class="oc-full">Create Product/Service</label>' +
+                '<input name="name" placeholder="Name" required class="oc-full">' +
+                '<input name="description" placeholder="Description (optional)" class="oc-full">' +
+                '<button class="oc-submit" type="submit">Create</button>' +
+                '<div class="oc-msg oc-full" id="oc-product-msg"></div>' +
+              '</form>' : '');
+
+          body.querySelectorAll('.oc-pbtn').forEach(function(btn){
+            btn.addEventListener('click', function(){ loadDetail(btn.dataset.id, btn.dataset.name); });
+          });
+          var form = document.getElementById('oc-create-product');
+          if (form) form.addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-product-msg');
+            var fd = new FormData(ev.target);
+            try {
+              await api(session, '/products', { method: 'POST', body: { name: fd.get('name'), description: fd.get('description') } });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Created.';
+              loadList();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){ body.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+
+      async function loadDetail(productId, productName){
+        var body = document.getElementById('oc-products-body');
+        body.innerHTML =
+          '<button class="oc-back" id="oc-back-to-list">&larr; Back to Products</button>' +
+          '<h2 style="font-size:14px">' + esc(productName) + '</h2>' +
+          '<div class="oc-tabs">' +
+            '<button class="oc-tab oc-active" data-tab="members">Members</button>' +
+            '<button class="oc-tab" data-tab="channels">Channels</button>' +
+            '<button class="oc-tab" data-tab="content">Content</button>' +
+            '<button class="oc-tab" data-tab="agents">Agents</button>' +
+          '</div>' +
+          '<div id="oc-ptab-members"></div>' +
+          '<div id="oc-ptab-channels" style="display:none"></div>' +
+          '<div id="oc-ptab-content" style="display:none"></div>' +
+          '<div id="oc-ptab-agents" style="display:none"></div>';
+
+        document.getElementById('oc-back-to-list').addEventListener('click', loadList);
+        body.querySelectorAll('.oc-tab').forEach(function(tab){
+          tab.addEventListener('click', function(){
+            body.querySelectorAll('.oc-tab').forEach(function(t){ t.classList.remove('oc-active'); });
+            tab.classList.add('oc-active');
+            document.getElementById('oc-ptab-members').style.display = tab.dataset.tab === 'members' ? 'block' : 'none';
+            document.getElementById('oc-ptab-channels').style.display = tab.dataset.tab === 'channels' ? 'block' : 'none';
+            document.getElementById('oc-ptab-content').style.display = tab.dataset.tab === 'content' ? 'block' : 'none';
+            document.getElementById('oc-ptab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
+            if (tab.dataset.tab === 'channels') loadChannels();
+            if (tab.dataset.tab === 'content') loadContent();
+            if (tab.dataset.tab === 'agents') loadProductAgents();
+          });
+        });
+
+        async function loadMembers(){
+          var el = document.getElementById('oc-ptab-members');
+          el.innerHTML = 'Loading&hellip;';
+          try {
+            var members = await api(session, '/products/' + productId + '/members');
+            var canAdmin = isTenantAdmin || members.some(function(m){ return m.user_id === session.user.id && m.role === 'ADMIN'; });
+            var rows = members.map(function(m){
+              return '<tr><td>' + esc(m.email) + '</td><td>' + esc(m.role) + '</td><td>' + (canAdmin ? '<button class="oc-pbtn" data-uid="' + m.user_id + '">Remove</button>' : '') + '</td></tr>';
+            }).join('');
+
+            var pickerHtml = '<input name="user_id" placeholder="User ID" class="oc-full" required>';
+            var tenantUsers = null;
+            if (canAdmin && isTenantAdmin) {
+              try { tenantUsers = await api(session, '/users'); } catch(e) { tenantUsers = null; }
+            }
+            if (tenantUsers) {
+              pickerHtml = '<select name="user_id" class="oc-full">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
+            }
+
+            el.innerHTML =
+              '<table><tr><th>User</th><th>Role</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:var(--oc-dim-5)">No members yet</td></tr>') + '</table>' +
+              (canAdmin ?
+                '<form id="oc-add-member">' +
+                  '<label class="oc-full">Add Member</label>' +
+                  pickerHtml +
+                  '<select name="role"><option value="MEMBER">Member</option><option value="ADMIN">Product Admin</option></select>' +
+                  '<button class="oc-submit" type="submit">Add</button>' +
+                  '<div class="oc-msg oc-full" id="oc-member-msg"></div>' +
+                '</form>' : '');
+
+            el.querySelectorAll('.oc-pbtn').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                try { await api(session, '/products/' + productId + '/members/' + btn.dataset.uid, { method: 'DELETE' }); loadMembers(); }
+                catch(e){ alert(e.message); }
+              });
+            });
+            var form = document.getElementById('oc-add-member');
+            if (form) form.addEventListener('submit', async function(ev){
+              ev.preventDefault();
+              var msg = document.getElementById('oc-member-msg');
+              var fd = new FormData(ev.target);
+              try {
+                await api(session, '/products/' + productId + '/members', { method: 'POST', body: { user_id: fd.get('user_id'), role: fd.get('role') } });
+                msg.className = 'oc-msg oc-ok'; msg.textContent = 'Added.';
+                loadMembers();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+        }
+
+        // Renders the channel-config fields for one channel into a
+        // container element - shared by the wizard's config step.
+        function renderChannelFields(spec, ch, existingConfig){
+          var s = spec[ch];
+          if (!s) return '';
+          if (!s.implemented) {
+            return '<div class="oc-help">' + (s.help || 'Not implemented yet.') + '</div>';
+          }
+          var existing = existingConfig || {};
+          return (s.help ? '<div class="oc-help">' + s.help + '</div>' : '') +
+            s.fields.map(function(f){
+              var val = existing[f.key] || '';
+              var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+              return '<label>' + f.label + (f.required ? ' *' : '') + '</label>' +
+                '<input name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
+                (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
+            }).join('');
+        }
+
+        // A focused, two-step modal (pick a channel -> fill its fields) for
+        // configuring one channel at a time, instead of a single dropdown +
+        // form crammed into the tab (which also had a real usability bug -
+        // native <select> option lists render inconsistently, sometimes
+        // showing mostly blank rows, especially on mobile/some browsers).
+        function openChannelWizard(spec, configured, onSaved){
+          var existing = document.getElementById('oc-channel-wizard');
+          if (existing) existing.remove();
+          var modal = document.createElement('div');
+          modal.id = 'oc-channel-wizard';
+          document.body.appendChild(modal);
+
+          function close(){ modal.remove(); }
+          modal.addEventListener('click', function(ev){ if (ev.target === modal) close(); });
+
+          function renderPicker(){
+            var all = Object.keys(spec);
+            modal.innerHTML =
+              '<div class="oc-panel">' +
+                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<h2>Configure a Channel</h2>' +
+                '<p class="oc-sub">Pick a channel to connect. You can come back and edit any of these later.</p>' +
+                '<div class="oc-chgrid">' +
+                  all.map(function(ch){
+                    var s = spec[ch];
+                    var isConfigured = configured[ch] && configured[ch].status === 'configured';
+                    var disabled = !s.implemented;
+                    return '<button type="button" class="oc-chcard' + (disabled ? ' oc-disabled' : '') + '" data-ch="' + ch + '"' + (disabled ? ' disabled' : '') + '>' +
+                      '<span class="oc-chname">' + s.label + '</span>' +
+                      '<span class="oc-chstatus' + (isConfigured ? ' oc-configured' : '') + '">' + (disabled ? 'not available yet' : (isConfigured ? 'connected' : 'not connected')) + '</span>' +
+                    '</button>';
+                  }).join('') +
+                '</div>' +
+              '</div>';
+            document.getElementById('oc-cw-close').addEventListener('click', close);
+            modal.querySelectorAll('.oc-chcard:not(.oc-disabled)').forEach(function(card){
+              card.addEventListener('click', function(){ renderForm(card.dataset.ch); });
+            });
+          }
+
+          function renderForm(ch){
+            var s = spec[ch];
+            var existingConfig = (configured[ch] && configured[ch].config) || {};
+            modal.innerHTML =
+              '<div class="oc-panel">' +
+                '<button class="oc-close" id="oc-cw-close">&times;</button>' +
+                '<button type="button" class="oc-secondary" id="oc-cw-back" style="margin-bottom:14px;padding:6px 12px;font-size:12px">&larr; Back</button>' +
+                '<h2>' + s.label + '</h2>' +
+                '<form id="oc-cw-form">' +
+                  renderChannelFields(spec, ch, existingConfig) +
+                  '<div class="oc-row">' +
+                    '<button type="submit" class="oc-primary">Save</button>' +
+                  '</div>' +
+                  '<div class="oc-err" id="oc-cw-err" style="display:none"></div>' +
+                '</form>' +
+              '</div>';
+            document.getElementById('oc-cw-close').addEventListener('click', close);
+            document.getElementById('oc-cw-back').addEventListener('click', renderPicker);
+            var form = document.getElementById('oc-cw-form');
+            if (form.querySelector('input')) {
+              form.addEventListener('submit', async function(ev){
+                ev.preventDefault();
+                var err = document.getElementById('oc-cw-err');
+                err.style.display = 'none';
+                var fd = new FormData(ev.target);
+                var config = {};
+                s.fields.forEach(function(f){
+                  var v = fd.get(f.key);
+                  // Leave an unchanged secret alone (it renders as a masked
+                  // placeholder, never as real input text) rather than
+                  // overwriting a saved token with the literal mask string.
+                  if (v !== null && v !== '') config[f.key] = v;
+                });
+                try {
+                  await onSaved(ch, config);
+                  close();
+                } catch(e){ err.textContent = e.message; err.style.display = 'block'; }
+              });
+            } else {
+              // Not-implemented channel: nothing to submit, just a way back.
+              modal.querySelector('.oc-row').innerHTML = '';
+            }
+          }
+
+          renderPicker();
+        }
+
+        async function loadChannels(){
+          var el = document.getElementById('oc-ptab-channels');
+          el.innerHTML = 'Loading&hellip;';
+          try {
+            var channels = await api(session, '/products/' + productId + '/channels');
+            var spec = await api(session, '/channels/spec');
+            var configured = {};
+            channels.forEach(function(c){ configured[c.channel] = c; });
+            var all = Object.keys(spec);
+            var rows = all.map(function(ch){
+              var st = configured[ch] ? configured[ch].status : 'not_configured';
+              var label = (spec[ch] && spec[ch].label) || ch;
+              return '<tr><td>' + label + '</td><td>' + st + '</td></tr>';
+            }).join('');
+
+            el.innerHTML =
+              '<table><tr><th>Channel</th><th>Status</th></tr>' + rows + '</table>' +
+              '<button class="oc-submit" id="oc-open-channel-wizard" type="button">Configure a Channel</button>';
+
+            document.getElementById('oc-open-channel-wizard').addEventListener('click', function(){
+              openChannelWizard(spec, configured, async function(ch, config){
+                await api(session, '/products/' + productId + '/channels', { method: 'POST', body: { channel: ch, config: config } });
+                loadChannels();
+              });
+            });
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+        }
+
+        // Real content pipeline: upload -> generate per-channel variants ->
+        // approve/reject. Replaces the old dead-end upload-only flow (the
+        // separately-built widget this tab now supersedes) with the actual
+        // API surface (POST /content/upload, POST /content/:assetId/transform,
+        // POST /content/variants/:variantId/approve, GET /products/:id/content).
+        var CONTENT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+        var canApproveContent = ['SUPER_ADMIN', 'APPROVER', 'DEPT_ADMIN', 'IT_ADMIN'].indexOf(session.user.role) !== -1 || !!session.user.can_approve_content;
+
+        function fmtBytes(n){
+          if (!n && n !== 0) return '';
+          var units = ['B','KB','MB','GB']; var i = 0;
+          while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+          return n.toFixed(i ? 1 : 0) + ' ' + units[i];
+        }
+
+        function renderVariantRow(v){
+          var canAct = canApproveContent && v.status === 'PENDING_APPROVAL';
+          return '<div class="oc-variant-row">' +
+              '<div>' +
+                '<span class="oc-variant-ch">' + esc(v.channel) + '</span>' +
+                '<span class="oc-variant-spec">' + esc(v.spec || '') + (v.publish_error ? ' &middot; ' + esc(v.publish_error) : '') + '</span>' +
+              '</div>' +
+              '<div class="oc-variant-actions">' +
+                '<span class="oc-status-pill oc-status-' + v.status + '">' + v.status.replace(/_/g,' ') + '</span>' +
+                (canAct ?
+                  '<button class="oc-vbtn oc-vbtn-approve" data-approve="' + v.id + '" type="button">Approve</button>' +
+                  '<button class="oc-vbtn oc-vbtn-reject" data-reject="' + v.id + '" type="button">Reject</button>'
+                  : '') +
+              '</div>' +
+            '</div>';
+        }
+
+        function renderAssetCard(a){
+          var hasVariants = a.variants && a.variants.length > 0;
+          return '<div class="oc-asset-card" data-asset="' + a.id + '">' +
+              '<div class="oc-asset-head">' +
+                '<div>' +
+                  '<div class="oc-asset-name">' + esc(a.file_name) + '</div>' +
+                  '<div class="oc-asset-meta">' + fmtBytes(a.file_size) + ' &middot; ' + esc(a.mime_type) + ' &middot; ' +
+                    (a.virus_scan_status === 'CLEAN' ? 'scan clean' : '<span class="oc-scan-bad">' + a.virus_scan_status + '</span>') +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              (hasVariants ?
+                '<div class="oc-variant-list">' + a.variants.map(renderVariantRow).join('') + '</div>'
+                : '<div class="oc-chpick" data-chpick="' + a.id + '">' +
+                    CONTENT_CHANNELS.map(function(ch){ return '<label><input type="checkbox" value="' + ch + '"> ' + ch + '</label>'; }).join('') +
+                  '</div>' +
+                  '<button class="oc-gen-btn" data-generate="' + a.id + '" type="button">Generate Variants</button>') +
+              '<div class="oc-msg" data-msg="' + a.id + '"></div>' +
+            '</div>';
+        }
+
+        async function loadContent(){
+          var el = document.getElementById('oc-ptab-content');
+          el.innerHTML = 'Loading&hellip;';
+          try {
+            var assets = await api(session, '/products/' + productId + '/content');
+            el.innerHTML =
+              '<div class="oc-upload-row">' +
+                '<input type="file" id="oc-content-file">' +
+                '<button class="oc-gen-btn" id="oc-content-upload-btn" type="button">Upload</button>' +
+              '</div>' +
+              '<div class="oc-msg" id="oc-content-upload-msg"></div>' +
+              (assets.length ?
+                assets.map(renderAssetCard).join('')
+                : '<div class="oc-msg" style="color:var(--oc-dim-5)">No content uploaded for this product yet.</div>');
+
+            document.getElementById('oc-content-upload-btn').addEventListener('click', async function(){
+              var input = document.getElementById('oc-content-file');
+              var msg = document.getElementById('oc-content-upload-msg');
+              if (!input.files || !input.files[0]) { msg.className = 'oc-msg oc-bad'; msg.textContent = 'Choose a file first.'; return; }
+              var fd = new FormData();
+              fd.append('file', input.files[0]);
+              fd.append('product_id', productId);
+              msg.className = 'oc-msg'; msg.textContent = 'Uploading&hellip;';
+              try {
+                await api(session, '/content/upload', { method: 'POST', body: fd });
+                loadContent();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+
+            el.querySelectorAll('[data-generate]').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var assetId = btn.dataset.generate;
+                var picker = el.querySelector('[data-chpick="' + assetId + '"]');
+                var msg = el.querySelector('[data-msg="' + assetId + '"]');
+                var channels = Array.prototype.slice.call(picker.querySelectorAll('input:checked')).map(function(c){ return c.value; });
+                if (!channels.length) { msg.className = 'oc-msg oc-bad'; msg.textContent = 'Pick at least one channel.'; return; }
+                msg.className = 'oc-msg'; msg.textContent = 'Generating&hellip;';
+                try {
+                  await api(session, '/content/' + assetId + '/transform', { method: 'POST', body: { channels: channels } });
+                  loadContent();
+                } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+              });
+            });
+
+            el.querySelectorAll('[data-approve],[data-reject]').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var variantId = btn.dataset.approve || btn.dataset.reject;
+                var action = btn.dataset.approve ? 'APPROVE' : 'REJECT';
+                try {
+                  await api(session, '/content/variants/' + variantId + '/approve', { method: 'POST', body: { action: action } });
+                  loadContent();
+                } catch(e){ alert(e.message); }
+              });
+            });
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+        }
+
+        async function loadProductAgents(){
+          var el = document.getElementById('oc-ptab-agents');
+          el.innerHTML = 'Loading&hellip;';
+          try {
+            var enabled = await api(session, '/products/' + productId + '/agents');
+            var available = await api(session, '/agents');
+            var rows = enabled.map(function(a){
+              return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '&mdash;') + '</td>' +
+                '<td><button class="oc-run-agent" data-id="' + a.id + '" data-name="' + esc(a.name) + '">Run</button></td>' +
+                '<td><button class="oc-view-runs" data-id="' + a.id + '">History</button></td>' +
+                '<td><button class="oc-pbtn" data-id="' + a.id + '">Disable</button></td></tr>';
+            }).join('');
+            el.innerHTML =
+              '<table><tr><th>Agent</th><th>Model</th><th></th><th></th><th></th></tr>' + (rows || '<tr><td colspan="5" style="color:var(--oc-dim-5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
+              '<div id="oc-agent-runs"></div>' +
+              (available.length ?
+                '<form id="oc-enable-agent">' +
+                  '<label class="oc-full">Enable an Agent</label>' +
+                  '<select name="agent_id" class="oc-full">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
+                  '<button class="oc-submit" type="submit">Enable</button>' +
+                  '<div class="oc-msg oc-full" id="oc-pagent-msg"></div>' +
+                '</form>'
+              : '<div class="oc-msg">No agents have been created yet — a Super Admin creates these under Admin &rarr; Agents.</div>');
+
+            var runsBox = document.getElementById('oc-agent-runs');
+            function renderRuns(agentId, runs){
+              runsBox.innerHTML =
+                '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:16px 0 8px">Recent runs</h4>' +
+                (runs.length ? runs.map(function(r){
+                  return '<div style="border:1px solid var(--oc-border-08);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px">' +
+                    '<div style="color:var(--oc-dim-5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + esc(r.trigger_type) + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'var(--oc-success)':'var(--oc-danger)') + '">' + esc(r.status) + '</span></div>' +
+                    '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? esc(r.output_text||'') : ('Error: ' + esc(r.error||''))) + '</div>' +
+                  '</div>';
+                }).join('') : '<div class="oc-msg">No runs yet.</div>');
+            }
+
+            el.querySelectorAll('.oc-view-runs').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                try { renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs')); }
+                catch(e){ alert(e.message); }
+              });
+            });
+            el.querySelectorAll('.oc-run-agent').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                var leadId = prompt('Lead ID to run "' + btn.dataset.name + '" on (Cancel or leave blank to type free-form input instead):');
+                var input = null;
+                if (!leadId) {
+                  input = prompt('Input for the agent (e.g. a message to draft a reply to):');
+                  if (!input) return;
+                }
+                var origText = btn.textContent;
+                btn.textContent = 'Running…'; btn.disabled = true;
+                try {
+                  var run = await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/run', { method: 'POST', body: leadId ? { lead_id: leadId } : { input: input } });
+                  renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs'));
+                  if (run.status !== 'SUCCESS') alert('Agent run failed: ' + run.error);
+                } catch(e){ alert(e.message); }
+                finally { btn.textContent = origText; btn.disabled = false; }
+              });
+            });
+            el.querySelectorAll('.oc-pbtn').forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                try { await api(session, '/products/' + productId + '/agents/' + btn.dataset.id, { method: 'DELETE' }); loadProductAgents(); }
+                catch(e){ alert(e.message); }
+              });
+            });
+            var form = document.getElementById('oc-enable-agent');
+            if (form) form.addEventListener('submit', async function(ev){
+              ev.preventDefault();
+              var msg = document.getElementById('oc-pagent-msg');
+              var fd = new FormData(ev.target);
+              try {
+                await api(session, '/products/' + productId + '/agents', { method: 'POST', body: { agent_id: fd.get('agent_id') } });
+                msg.className = 'oc-msg oc-ok'; msg.textContent = 'Enabled.';
+                loadProductAgents();
+              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+            });
+          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+        }
+
+        loadMembers();
+      }
+
+      loadList();
+    }
+
+    function renderAdmin(session){
+      var existing = document.getElementById('oc-admin');
+      if (existing) existing.remove();
+      var isSuperAdmin = session.user.role === 'SUPER_ADMIN';
+      var canSeeWebhooks = isSuperAdmin || session.user.role === 'IT_ADMIN';
+      var wrap = document.createElement('div');
+      wrap.id = 'oc-admin';
+      wrap.innerHTML =
+        '<div class="oc-panel">' +
+          '<button class="oc-close" id="oc-admin-close">&times;</button>' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><img src="/octave-icon.png" alt="Octave" style="width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px"><h2 style="margin:0">Tenant &amp; User Administration</h2></div>' +
+          '<div class="oc-tabs">' +
+            (isSuperAdmin ? '<button class="oc-tab oc-active" data-tab="tenants">Tenants</button>' : '') +
+            '<button class="oc-tab' + (isSuperAdmin ? '' : ' oc-active') + '" data-tab="users">Users</button>' +
+            (canSeeWebhooks ? '<button class="oc-tab" data-tab="webhooks">Webhooks</button>' : '') +
+            (isSuperAdmin ? '<button class="oc-tab" data-tab="agents">Agents</button>' : '') +
+          '</div>' +
+          '<div id="oc-tab-tenants" style="display:' + (isSuperAdmin ? 'block' : 'none') + '"></div>' +
+          '<div id="oc-tab-users" style="display:' + (isSuperAdmin ? 'none' : 'block') + '"></div>' +
+          '<div id="oc-tab-webhooks" style="display:none"></div>' +
+          '<div id="oc-tab-agents" style="display:none"></div>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      document.getElementById('oc-admin-close').addEventListener('click', function(){ wrap.remove(); });
+
+      wrap.querySelectorAll('.oc-tab').forEach(function(tab){
+        tab.addEventListener('click', function(){
+          wrap.querySelectorAll('.oc-tab').forEach(function(t){ t.classList.remove('oc-active'); });
+          tab.classList.add('oc-active');
+          document.getElementById('oc-tab-tenants').style.display = tab.dataset.tab === 'tenants' ? 'block' : 'none';
+          document.getElementById('oc-tab-users').style.display = tab.dataset.tab === 'users' ? 'block' : 'none';
+          document.getElementById('oc-tab-webhooks').style.display = tab.dataset.tab === 'webhooks' ? 'block' : 'none';
+          document.getElementById('oc-tab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
+          if (tab.dataset.tab === 'agents' && isSuperAdmin) loadAgentsTab();
+        });
+      });
+
+      var selectedTenantId = session.user.tenant_id;
+
+      async function loadTenants(){
+        var el = document.getElementById('oc-tab-tenants');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var tenants = await api(session, '/tenants');
+          var rows = tenants.map(function(t){
+            return '<tr><td>' + esc(t.name) + '</td><td>' + esc(t.subdomain) + '</td><td>' + esc(t.plan) + '</td>' +
+              '<td><button class="oc-pick-tenant" data-id="' + t.id + '" data-name="' + esc(t.name) + '">Manage users</button></td></tr>';
+          }).join('');
+          el.innerHTML =
+            '<table><tr><th>Name</th><th>Subdomain</th><th>Plan</th><th></th></tr>' + rows + '</table>' +
+            '<form id="oc-create-tenant">' +
+              '<label class="oc-full">Create Tenant</label>' +
+              '<input name="name" placeholder="Tenant name" required>' +
+              '<input name="subdomain" placeholder="subdomain" required>' +
+              '<select name="plan"><option value="starter">Starter</option><option value="premium">Premium</option></select>' +
+              '<button class="oc-submit" type="submit">Create</button>' +
+              '<div class="oc-msg oc-full" id="oc-tenant-msg"></div>' +
+            '</form>';
+          el.querySelectorAll('.oc-pick-tenant').forEach(function(btn){
+            btn.addEventListener('click', function(){
+              selectedTenantId = btn.dataset.id;
+              wrap.querySelector('[data-tab="users"]').click();
+              loadUsers();
+            });
+          });
+          el.querySelector('#oc-create-tenant').addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-tenant-msg');
+            var fd = new FormData(ev.target);
+            try {
+              await api(session, '/tenants', { method: 'POST', body: { name: fd.get('name'), subdomain: fd.get('subdomain'), plan: fd.get('plan') } });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Tenant created.';
+              loadTenants();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+
+      async function loadUsers(){
+        var el = document.getElementById('oc-tab-users');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var roles = await api(session, '/roles');
+          var qs = (isSuperAdmin && selectedTenantId) ? ('?tenant_id=' + encodeURIComponent(selectedTenantId)) : '';
+          var users = await api(session, '/users' + qs);
+          var roleOptions = roles.map(function(r){ return '<option value="' + esc(r.name) + '">' + esc(r.name) + '</option>'; }).join('');
+          var rows = users.map(function(u){
+            var isSelf = u.id === session.user.id;
+            return '<tr><td>' + esc(u.email) + (u.disabled ? ' <span class="oc-badge oc-badge-bad">disabled</span>' : '') + '</td><td>' +
+              '<select class="oc-role-select" data-id="' + u.id + '">' +
+                roles.map(function(r){ return '<option value="' + esc(r.name) + '"' + (r.name===u.role?' selected':'') + '>' + esc(r.name) + '</option>'; }).join('') +
+              '</select></td><td><button class="oc-save-role" data-id="' + u.id + '">Save</button></td>' +
+              '<td><button class="oc-toggle-status" data-id="' + u.id + '" data-disabled="' + !!u.disabled + '"' + (isSelf ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button></td>' +
+              '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button></td></tr>';
+          }).join('');
+          el.innerHTML =
+            (isSuperAdmin ? '<div class="oc-msg" style="margin-bottom:8px">Managing tenant: ' + (selectedTenantId || session.user.tenant_id) + '</div>' : '') +
+            '<table><tr><th>Email</th><th>Role</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
+            '<form id="oc-create-user">' +
+              '<label class="oc-full">Create User</label>' +
+              '<input name="email" type="email" placeholder="email" required>' +
+              '<input name="password" type="password" placeholder="password (min 12 chars)" required minlength="12">' +
+              '<select name="role" class="oc-full">' + roleOptions + '</select>' +
+              '<button class="oc-submit" type="submit">Create</button>' +
+              '<div class="oc-msg oc-full" id="oc-user-msg"></div>' +
+            '</form>';
+          el.querySelectorAll('.oc-save-role').forEach(function(btn){
+            btn.addEventListener('click', async function(){
+              var sel = el.querySelector('.oc-role-select[data-id="' + btn.dataset.id + '"]');
+              try {
+                await api(session, '/users/' + btn.dataset.id + '/role', { method: 'PATCH', body: { role: sel.value } });
+                btn.textContent = 'Saved';
+                setTimeout(function(){ btn.textContent = 'Save'; }, 1500);
+              } catch(e){ alert(e.message); }
+            });
+          });
+          el.querySelectorAll('.oc-toggle-status').forEach(function(btn){
+            btn.addEventListener('click', async function(){
+              var nextDisabled = btn.dataset.disabled !== 'true';
+              if (nextDisabled && !confirm('Disable this user? They will be unable to log in until re-enabled.')) return;
+              try {
+                await api(session, '/users/' + btn.dataset.id + '/status', { method: 'PATCH', body: { disabled: nextDisabled } });
+                loadUsers();
+              } catch(e){ alert(e.message); }
+            });
+          });
+          el.querySelectorAll('.oc-reset-pw').forEach(function(btn){
+            btn.addEventListener('click', async function(){
+              var pw = prompt('New password for ' + btn.dataset.email + ' (min 12 characters):');
+              if (!pw) return;
+              if (pw.length < 12) { alert('Password must be at least 12 characters.'); return; }
+              try {
+                await api(session, '/users/' + btn.dataset.id + '/reset-password', { method: 'POST', body: { new_password: pw } });
+                alert('Password reset. Share the new password with ' + btn.dataset.email + ' through a secure channel.');
+              } catch(e){ alert(e.message); }
+            });
+          });
+          el.querySelector('#oc-create-user').addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-user-msg');
+            var fd = new FormData(ev.target);
+            var payload = { email: fd.get('email'), password: fd.get('password'), role: fd.get('role') };
+            if (isSuperAdmin && selectedTenantId) payload.tenant_id = selectedTenantId;
+            try {
+              await api(session, '/users', { method: 'POST', body: payload });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'User created.';
+              loadUsers();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+
+      async function loadWebhooks(){
+        var el = document.getElementById('oc-tab-webhooks');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var data = await api(session, '/integrations/webhook-urls');
+          var rows = data.urls.map(function(u){
+            return '<tr><td>' + u.channel + '</td><td><input readonly class="oc-webhook-url-input" value="' + u.url.replace(/"/g,'&quot;') + '" style="width:100%;font-size:11px"></td></tr>';
+          }).join('');
+          el.innerHTML =
+            '<table><tr><th>Channel</th><th>Webhook URL</th></tr>' + rows + '</table>' +
+            '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>' +
+            '<div class="oc-msg" id="oc-webhook-msg"></div>';
+          Array.prototype.forEach.call(el.querySelectorAll('.oc-webhook-url-input'), function(inp){
+            inp.addEventListener('click', function(){ inp.select(); });
+          });
+          el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
+            if (!confirm('Rotating invalidates every URL above — every configured channel will need the new URL. Continue?')) return;
+            var msg = document.getElementById('oc-webhook-msg');
+            try {
+              await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Rotated. URLs below are updated.';
+              loadWebhooks();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){
+          el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '<br>No secret yet? Rotate once to provision one.</div>' +
+            '<button class="oc-submit" id="oc-rotate-secret" style="max-width:220px">Rotate Secret</button>';
+          el.querySelector('#oc-rotate-secret').addEventListener('click', async function(){
+            try { await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' }); loadWebhooks(); } catch(e2){ alert(e2.message); }
+          });
+        }
+      }
+
+      async function loadAgentsTab(){
+        var el = document.getElementById('oc-tab-agents');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var connections = await api(session, '/llm-connections');
+          var agents = await api(session, '/agents');
+          var connOptions = connections.map(function(c){ return '<option value="' + c.id + '">' + esc(c.name) + ' (' + esc(c.provider) + ')</option>'; }).join('');
+          el.innerHTML =
+            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:0 0 8px">LLM Connections</h4>' +
+            '<table><tr><th>Name</th><th>Provider</th></tr>' + connections.map(function(c){ return '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.provider) + '</td></tr>'; }).join('') + '</table>' +
+            '<form id="oc-create-connection">' +
+              '<label class="oc-full">Add LLM Connection</label>' +
+              '<input name="name" placeholder="Connection name" required>' +
+              '<select name="provider" id="oc-conn-provider"><option value="anthropic">Anthropic (Claude)</option><option value="sarvam">Sarvam AI</option><option value="openai_compatible">OpenAI-compatible (Groq, Together, etc.)</option></select>' +
+              '<input name="api_key" type="password" placeholder="API key" required>' +
+              '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none">' +
+              '<button class="oc-submit" type="submit">Add</button>' +
+              '<div class="oc-msg oc-full" id="oc-connection-msg"></div>' +
+            '</form>' +
+            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:20px 0 8px">Agents</h4>' +
+            '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
+            (connections.length ?
+              '<form id="oc-create-agent">' +
+                '<label class="oc-full">Create Agent</label>' +
+                '<input name="name" placeholder="Agent name" required>' +
+                '<select name="llm_connection_id" class="oc-full">' + connOptions + '</select>' +
+                '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full">' +
+                '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit"></textarea>' +
+                '<button class="oc-submit" type="submit">Create</button>' +
+                '<div class="oc-msg" id="oc-agent-msg"></div>' +
+              '</form>'
+            : '<div class="oc-msg" style="margin-top:8px">Add an LLM connection first before creating an agent.</div>');
+
+          var connForm = document.getElementById('oc-create-connection');
+          var providerSel = document.getElementById('oc-conn-provider');
+          var baseUrlInput = document.getElementById('oc-conn-baseurl');
+          function syncBaseUrlVisibility(){ baseUrlInput.style.display = providerSel.value === 'openai_compatible' ? '' : 'none'; }
+          if (providerSel) { providerSel.addEventListener('change', syncBaseUrlVisibility); syncBaseUrlVisibility(); }
+          if (connForm) connForm.addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-connection-msg');
+            var fd = new FormData(ev.target);
+            try {
+              await api(session, '/llm-connections', { method: 'POST', body: { name: fd.get('name'), provider: fd.get('provider'), api_key: fd.get('api_key'), base_url: fd.get('base_url') } });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Connection added.';
+              loadAgentsTab();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+          var agentForm = document.getElementById('oc-create-agent');
+          if (agentForm) agentForm.addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-agent-msg');
+            var fd = new FormData(ev.target);
+            try {
+              await api(session, '/agents', { method: 'POST', body: { name: fd.get('name'), llm_connection_id: fd.get('llm_connection_id'), model: fd.get('model'), system_prompt: fd.get('system_prompt') } });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Agent created.';
+              loadAgentsTab();
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+
+      if (isSuperAdmin) loadTenants();
+      loadUsers();
+      if (canSeeWebhooks) loadWebhooks();
+    }
+
+    function boot(){
+      var session = loadSession();
+      if (!session || !session.token) {
+        renderLoginGate();
+      } else {
+        renderBar(session);
+        maybeShowOnboarding(session);
+      }
+    }
+
+    // Exposed so the main app bundle's own event handlers (leads upload,
+    // content upload, etc.) can make authenticated calls — same 401-refresh
+    // retry logic as everything in this script, not a separate code path.
+    window.__ORGCOMMS_API__ = function(path, opts){
+      var session = loadSession();
+      if (!session) { return Promise.reject(new Error('Not signed in')); }
+      return api(session, path, opts);
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
+  })();
+  </script>
+</body>
+</html>

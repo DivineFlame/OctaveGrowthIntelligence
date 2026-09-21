@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!--
+  Vite dev/build entry only - NOT the file that gets served in production.
+  `npm run build` builds this into dist/, then scripts/assemble.js splices
+  the built <script>/<link> tags into ../overlay.html (the preserved
+  auth-gate/admin/settings app) to produce ../index.html, the file nginx
+  actually serves. Edit this file for the React app's own markup/dev
+  experience; edit ../overlay.html for the auth/admin overlay.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OrgComms Studio (dev)</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

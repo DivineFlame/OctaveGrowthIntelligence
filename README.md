@@ -868,3 +868,44 @@ code changes were needed.
   return `false`), so that fix can never silently regress without a test
   failing immediately, rather than relying on someone noticing in
   production again. Suite is now 57 tests across 6 files.
+- **Added observability: request/latency/error metrics and optional error
+  tracking.** Before this, the only way to know the API was unhealthy was a
+  Docker healthcheck failing (`/health`, DB+Redis only) or someone noticing
+  a problem in production and grepping container logs after the fact -
+  nothing recorded request volume, latency, or error rate over time, and
+  no unhandled exception was captured anywhere beyond `console.error`.
+  Added two pieces:
+  - `api/src/metrics.js`: a small, dependency-free Prometheus-format
+    metrics module (counters + one latency histogram), deliberately
+    hand-rolled instead of adding `prom-client` - the app's needs here are
+    a handful of series, and this keeps it fully unit-testable as pure
+    functions with no new dependency to trust. Wired into `server.js` as
+    a request-timing middleware (records method/route/status/duration on
+    every response's `finish` event, using the matched Express route
+    pattern so `/users/:userId` doesn't fragment into one series per user
+    id) and exposed at `GET /metrics`. `serverError()` now also increments
+    an `orgcomms_errors_total` counter, so every 500 it handles is
+    reflected there. **Not publicly reachable** - `nginx/orgcomms-vps.conf`
+    explicitly denies `/metrics` on the public `api.*` server block, since
+    request-volume/route fingerprints are a minor leak with no upside if
+    left open; it's meant to be scraped from inside the Docker network
+    (a Prometheus container joined to the same compose network, or
+    `docker exec <api container> wget -qO- http://localhost:3000/metrics`).
+  - `api/src/error-tracking.js`: optional Sentry integration, following
+    the same pattern as the off-host backup shipping in
+    `postgres/backup/backup.sh` - entirely inert unless `SENTRY_DSN` is
+    set (see `.env.vps.example`), and any failure to initialize or report
+    (bad DSN, Sentry unreachable) is caught and logged, never thrown -
+    error tracking losing an error is bad, but nowhere near as bad as the
+    API refusing to boot or a request failing because the error *reporter*
+    broke. `serverError()` now calls `captureError(e)` on every 500 it
+    handles, so with a DSN configured, unhandled errors show up in Sentry
+    with a stack trace instead of only ever existing in a log line that
+    scrolls away. Added `@sentry/node` as a real dependency (used only
+    when `SENTRY_DSN` is set) and `SENTRY_DSN` as an optional pass-through
+    env var in `docker-compose.vps.yml`. Both modules verified with
+    `node --check`, a full `npm test` run, and 13 new tests
+    (`api/test/metrics.test.js`, `api/test/error-tracking.test.js`) -
+    including that a malformed `SENTRY_DSN` is caught rather than crashing
+    startup, and that `captureError` never throws when tracking is
+    disabled. Suite is now 70 tests across 8 files.

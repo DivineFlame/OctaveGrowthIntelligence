@@ -9,6 +9,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@sentry/node": "^10.0.0",
     "bcryptjs": "^2.4.3",
     "clamscan": "^2.4.0",
     "cors": "^2.8.5",

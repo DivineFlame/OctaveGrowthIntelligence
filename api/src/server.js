@@ -23,6 +23,8 @@ const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
 const { processLeadCsvRecords } = require('./csv-leads');
 const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
+const metrics = require('./metrics');
+const errorTracking = require('./error-tracking');
 require('dotenv').config({ path: '../.env.production' });
 
 // JWT_SECRET and ENCRYPTION_KEY both used to silently fall back to a
@@ -44,6 +46,11 @@ function requireSecretOrExit(envVarName, devDefault) {
 }
 const JWT_SECRET_VALUE = requireSecretOrExit('JWT_SECRET', 'dev-secret-change-me');
 const ENCRYPTION_KEY_VALUE = requireSecretOrExit('ENCRYPTION_KEY', 'dev-encryption-key-change-me');
+
+// Optional error tracking (Sentry) - entirely inert unless SENTRY_DSN is
+// set. See error-tracking.js for why this never fails startup or a
+// request even if misconfigured.
+errorTracking.init();
 
 const app = express();
 // Behind Dokploy's Traefik (one reverse-proxy hop) - without this, every
@@ -303,6 +310,18 @@ app.use(cors({
   }
 }));
 app.use(morgan('combined'));
+// Records every request's route/method/status/duration for GET /metrics.
+// Hooked on 'finish' (not a try/finally around next()) so it still fires
+// for responses Express ends outside the normal middleware chain (e.g.
+// after an error handler, or a response the rate limiter ends directly).
+app.use((req, res, next) => {
+  const startedAt = process.hrtime.bigint();
+  res.on('finish', () => {
+    const durationSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+    metrics.recordRequest(req.method, metrics.normalizeRoute(req), res.statusCode, durationSeconds);
+  });
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -452,6 +471,8 @@ function validate(schema) {
 // useful for local debugging than the disclosure risk.
 function serverError(res, e) {
   console.error(e);
+  metrics.recordError();
+  errorTracking.captureError(e);
   if (process.env.NODE_ENV === 'production') {
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -469,6 +490,15 @@ app.get('/health', async (req, res) => {
   } catch(e){
     res.status(500).json({ status: 'error', error: e.message });
   }
+});
+
+// Prometheus-format metrics. Not exposed publicly - nginx blocks this path
+// on the api.* server block (see nginx/orgcomms-vps.conf); reachable only
+// from inside the Docker network (e.g. a Prometheus container joined to
+// the same compose network, or `docker exec ... curl localhost:3000/metrics`).
+app.get('/metrics', (req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(metrics.renderMetrics());
 });
 
 // Auth - Login (with 2FA check for Super Admin)

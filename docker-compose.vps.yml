@@ -196,6 +196,10 @@ services:
       API_DOMAIN: ${API_DOMAIN}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+      # Optional - Sentry error tracking. Unset (default) means
+      # api/src/error-tracking.js is a complete no-op: no network calls, no
+      # dependency on Sentry being reachable. See .env.vps.example.
+      SENTRY_DSN: ${SENTRY_DSN:-}
     volumes:
       - recordings:/app/recordings
       # Read-only: lets src/migrate.js apply postgres/migrate-*.sql against

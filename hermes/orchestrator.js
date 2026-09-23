@@ -14,18 +14,22 @@ redisClient.connect();
 const HEARTBEAT_FILE = '/tmp/heartbeat';
 function beat() { try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())); } catch (e) {} }
 
-// Two real jobs left here - 'scout', 'transformer' and 'compliance' used to
-// exist as agent types too, but they only ever returned hardcoded canned
-// data ({ brand_kit: { colors: ['#00a884'] }, ... } / { compliant: true })
-// that nothing persisted anywhere, and 'transformer' raced with
-// transformer-worker over the exact same `transformer:queue` Redis list -
-// both containers' BRPOP would compete for the same jobs, so which one
-// actually handled a given upload was non-deterministic. Real per-channel
-// transformation now happens synchronously inside POST
-// /content/:assetId/transform (api/src/server.js calls Paperclip directly
-// and persists the real result) - nothing pushes to `transformer:queue`
-// any more, so there's nothing left here to consume it for. Removed
-// rather than left running idle.
+// One real job left here - 'scout', 'transformer', 'compliance', and
+// 'lead_intake' used to exist too. 'scout'/'transformer'/'compliance' only
+// ever returned hardcoded canned data that nothing persisted anywhere (and
+// 'transformer' raced with transformer-worker over the same
+// `transformer:queue` Redis list - non-deterministic which container
+// handled a given upload); real per-channel transformation now happens
+// synchronously inside POST /content/:assetId/transform (api/src/server.js
+// calls Paperclip directly and persists the real result). 'lead_intake'
+// called an internal auto-run-agent route that no longer exists - the
+// Agents feature (LLM connections, per-product enable/run) is removed
+// from the UI/API for now, deferred to a future version (see README.md
+// "Hardening notes"); nothing pushes to `webhook:incoming` any more either,
+// since real-time lead enrichment (language/GSTIN detection, Sarvam
+// inquiry classification) now happens synchronously inside
+// handleInboundWebhook itself (api/src/server.js), not via this queue.
+// Removed rather than left running idle/unreachable.
 async function runAgent(type, payload) {
   console.log(`[Hermes] ${type} processing payload ${JSON.stringify(payload)}`);
   if (type === 'publisher') {
@@ -48,29 +52,6 @@ async function runAgent(type, payload) {
     } catch(e) {
       console.log(`[Hermes] publisher ${payload.variant_id}: could not reach api (${e.message})`);
       return { published: false, variant_id: payload.variant_id, error: e.message };
-    }
-  }
-  if (type === 'lead_intake') {
-    // The webhook route (api/src/server.js: /webhooks/:webhookSecret/:channel)
-    // already validates the secret, dedupes, and INSERTs the lead synchronously
-    // before this job is even queued — payload here is just { lead_id, channel }.
-    // This calls api's internal auto-run-agent route (server-to-server, shared-secret
-    // auth - see internalMiddleware in api/src/server.js) which actually runs a real
-    // LLM call through a Premium product's agent when exactly one product
-    // unambiguously matches the channel; otherwise it reports back why it didn't.
-    try {
-      const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/leads/${payload.lead_id}/auto-run-agent`, {
-        method: 'POST',
-        headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '', 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) { console.log(`[Hermes] lead_intake ${payload.lead_id}: auto-run-agent HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { enriched: false, lead_id: payload.lead_id }; }
-      console.log(`[Hermes] lead_intake ${payload.lead_id}: ${data.ran ? `agent ran (run ${data.run_id}, status ${data.status})` : `not run - ${data.reason}`}`);
-      return { enriched: !!data.ran, lead_id: payload.lead_id };
-    } catch(e) {
-      console.log(`[Hermes] lead_intake ${payload.lead_id}: could not reach api for auto-run-agent (${e.message})`);
-      return { enriched: false, lead_id: payload.lead_id };
     }
   }
   return {};
@@ -96,14 +77,12 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 async function loop() {
-  console.log('Hermes Agents started - publisher, lead_intake');
+  console.log('Hermes Agents started - publisher');
   beat();
   while (!shuttingDown) {
     try {
       const pub = await redisClient.brPop('publisher:queue', 1);
       if (pub) await runAgent('publisher', JSON.parse(pub.element));
-      const lead = await redisClient.brPop('webhook:incoming', 1);
-      if (lead) await runAgent('lead_intake', JSON.parse(lead.element));
       beat();
     } catch(e){ console.error('Hermes error', e.message); await new Promise(r=>setTimeout(r,1000)); }
   }

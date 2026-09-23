@@ -79,6 +79,10 @@ services:
   # for an on-demand backup, and scripts/restore-vps.sh to restore either
   # kind). 7-day local retention by default; ship pgbackups off-host too if
   # "the VPS itself is lost" needs to be a recoverable scenario.
+  # Also backs up redis (redisdata) and recordings, not just postgres -
+  # see postgres/backup/backup.sh. Kept as one sidecar/one schedule rather
+  # than three, since all three write into the same pgbackups volume and
+  # ship via the same optional RCLONE_REMOTE.
   postgres-backup:
     build:
       context: ./postgres/backup
@@ -88,6 +92,7 @@ services:
     networks: [db]
     depends_on:
       postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -97,6 +102,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-orgcomms}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-orgcomms_prod}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
       # Optional off-host backup shipping via rclone - unset by default (see
       # postgres/backup/backup.sh and README.md "Hardening notes"). Left
@@ -105,11 +112,12 @@ services:
       RCLONE_REMOTE: ${RCLONE_REMOTE:-}
     volumes:
       - pgbackups:/backups
+      - recordings:/recordings:ro
     deploy:
       resources:
         limits:
           cpus: '0.25'
-          memory: 128m
+          memory: 192m
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -184,6 +192,11 @@ services:
       # Server-to-server auth for hermes calling /internal/* routes directly
       # (no user JWT exists in that context) - see internalMiddleware.
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+      # Optional - Sarvam AI message filtering (see .env.vps.example and
+      # README.md "Hardening notes"). Unset is fine: falls back to no
+      # filtering (is_inquiry stays NULL/unclassified).
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b}
       PAPERCLIP_SERVICE: paperclip-transformer:8000
       HERMES_MODE: premium_multiagent
       # Load-bearing, not cosmetic: with APP_DOMAIN unset, CORS_ALLOWED_ORIGINS

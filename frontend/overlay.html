@@ -620,7 +620,7 @@
             steps(4) +
             '<div class="oc-done-icon">&#10003;</div>' +
             '<h2>You\'re all set</h2>' +
-            '<p class="oc-sub">"' + esc(state.productName) + '" is ready. Add more users, configure the rest of its channels, or enable Agents (Premium plans) from the Products panel anytime.</p>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" is ready. Add more users or configure the rest of its channels from the Products panel anytime.</p>' +
             '<div class="oc-row">' +
               '<button class="oc-primary" id="oc-ob-open-products">Open Products</button>' +
             '</div>' +
@@ -711,12 +711,10 @@
             '<button class="oc-tab oc-active" data-tab="members">Members</button>' +
             '<button class="oc-tab" data-tab="channels">Channels</button>' +
             '<button class="oc-tab" data-tab="content">Content</button>' +
-            '<button class="oc-tab" data-tab="agents">Agents</button>' +
           '</div>' +
           '<div id="oc-ptab-members"></div>' +
           '<div id="oc-ptab-channels" style="display:none"></div>' +
-          '<div id="oc-ptab-content" style="display:none"></div>' +
-          '<div id="oc-ptab-agents" style="display:none"></div>';
+          '<div id="oc-ptab-content" style="display:none"></div>';
 
         document.getElementById('oc-back-to-list').addEventListener('click', loadList);
         body.querySelectorAll('.oc-tab').forEach(function(tab){
@@ -726,10 +724,8 @@
             document.getElementById('oc-ptab-members').style.display = tab.dataset.tab === 'members' ? 'block' : 'none';
             document.getElementById('oc-ptab-channels').style.display = tab.dataset.tab === 'channels' ? 'block' : 'none';
             document.getElementById('oc-ptab-content').style.display = tab.dataset.tab === 'content' ? 'block' : 'none';
-            document.getElementById('oc-ptab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
             if (tab.dataset.tab === 'channels') loadChannels();
             if (tab.dataset.tab === 'content') loadContent();
-            if (tab.dataset.tab === 'agents') loadProductAgents();
           });
         });
 
@@ -1029,86 +1025,6 @@
           } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 
-        async function loadProductAgents(){
-          var el = document.getElementById('oc-ptab-agents');
-          el.innerHTML = 'Loading&hellip;';
-          try {
-            var enabled = await api(session, '/products/' + productId + '/agents');
-            var available = await api(session, '/agents');
-            var rows = enabled.map(function(a){
-              return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '&mdash;') + '</td>' +
-                '<td><button class="oc-run-agent" data-id="' + a.id + '" data-name="' + esc(a.name) + '">Run</button></td>' +
-                '<td><button class="oc-view-runs" data-id="' + a.id + '">History</button></td>' +
-                '<td><button class="oc-pbtn" data-id="' + a.id + '">Disable</button></td></tr>';
-            }).join('');
-            el.innerHTML =
-              '<table><tr><th>Agent</th><th>Model</th><th></th><th></th><th></th></tr>' + (rows || '<tr><td colspan="5" style="color:var(--oc-dim-5)">No agents enabled — Premium plan only</td></tr>') + '</table>' +
-              '<div id="oc-agent-runs"></div>' +
-              (available.length ?
-                '<form id="oc-enable-agent">' +
-                  '<label class="oc-full">Enable an Agent</label>' +
-                  '<select name="agent_id" class="oc-full" aria-label="Agent">' + available.map(function(a){ return '<option value="' + a.id + '">' + esc(a.name) + '</option>'; }).join('') + '</select>' +
-                  '<button class="oc-submit" type="submit">Enable</button>' +
-                  '<div class="oc-msg oc-full" aria-live="polite" id="oc-pagent-msg"></div>' +
-                '</form>'
-              : '<div class="oc-msg" aria-live="polite">No agents have been created yet — a Super Admin creates these under Admin &rarr; Agents.</div>');
-
-            var runsBox = document.getElementById('oc-agent-runs');
-            function renderRuns(agentId, runs){
-              runsBox.innerHTML =
-                '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:16px 0 8px">Recent runs</h4>' +
-                (runs.length ? runs.map(function(r){
-                  return '<div style="border:1px solid var(--oc-border-08);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px">' +
-                    '<div style="color:var(--oc-dim-5)">' + new Date(r.created_at).toLocaleString() + ' &middot; ' + esc(r.trigger_type) + ' &middot; <span style="color:' + (r.status==='SUCCESS'?'var(--oc-success)':'var(--oc-danger)') + '">' + esc(r.status) + '</span></div>' +
-                    '<div style="margin-top:6px;white-space:pre-wrap">' + (r.status==='SUCCESS' ? esc(r.output_text||'') : ('Error: ' + esc(r.error||''))) + '</div>' +
-                  '</div>';
-                }).join('') : '<div class="oc-msg" aria-live="polite">No runs yet.</div>');
-            }
-
-            el.querySelectorAll('.oc-view-runs').forEach(function(btn){
-              btn.addEventListener('click', async function(){
-                try { renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs')); }
-                catch(e){ alert(e.message); }
-              });
-            });
-            el.querySelectorAll('.oc-run-agent').forEach(function(btn){
-              btn.addEventListener('click', async function(){
-                var leadId = prompt('Lead ID to run "' + btn.dataset.name + '" on (Cancel or leave blank to type free-form input instead):');
-                var input = null;
-                if (!leadId) {
-                  input = prompt('Input for the agent (e.g. a message to draft a reply to):');
-                  if (!input) return;
-                }
-                var origText = btn.textContent;
-                btn.textContent = 'Running…'; btn.disabled = true;
-                try {
-                  var run = await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/run', { method: 'POST', body: leadId ? { lead_id: leadId } : { input: input } });
-                  renderRuns(btn.dataset.id, await api(session, '/products/' + productId + '/agents/' + btn.dataset.id + '/runs'));
-                  if (run.status !== 'SUCCESS') alert('Agent run failed: ' + run.error);
-                } catch(e){ alert(e.message); }
-                finally { btn.textContent = origText; btn.disabled = false; }
-              });
-            });
-            el.querySelectorAll('.oc-pbtn').forEach(function(btn){
-              btn.addEventListener('click', async function(){
-                try { await api(session, '/products/' + productId + '/agents/' + btn.dataset.id, { method: 'DELETE' }); loadProductAgents(); }
-                catch(e){ alert(e.message); }
-              });
-            });
-            var form = document.getElementById('oc-enable-agent');
-            if (form) form.addEventListener('submit', async function(ev){
-              ev.preventDefault();
-              var msg = document.getElementById('oc-pagent-msg');
-              var fd = new FormData(ev.target);
-              try {
-                await api(session, '/products/' + productId + '/agents', { method: 'POST', body: { agent_id: fd.get('agent_id') } });
-                msg.className = 'oc-msg oc-ok'; msg.textContent = 'Enabled.';
-                loadProductAgents();
-              } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
-            });
-          } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
-        }
-
         loadMembers();
       }
 
@@ -1131,11 +1047,9 @@
           '<div class="oc-tabs">' +
             '<button class="oc-tab oc-active" data-tab="users">Users</button>' +
             (canSeeWebhooks ? '<button class="oc-tab" data-tab="webhooks">Webhooks</button>' : '') +
-            (isSuperAdmin ? '<button class="oc-tab" data-tab="agents">Agents</button>' : '') +
           '</div>' +
           '<div id="oc-tab-users" style="display:block"></div>' +
           '<div id="oc-tab-webhooks" style="display:none"></div>' +
-          '<div id="oc-tab-agents" style="display:none"></div>' +
         '</div>';
       document.body.appendChild(wrap);
       document.getElementById('oc-admin-close').addEventListener('click', function(){ wrap.remove(); });
@@ -1146,8 +1060,6 @@
           tab.classList.add('oc-active');
           document.getElementById('oc-tab-users').style.display = tab.dataset.tab === 'users' ? 'block' : 'none';
           document.getElementById('oc-tab-webhooks').style.display = tab.dataset.tab === 'webhooks' ? 'block' : 'none';
-          document.getElementById('oc-tab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
-          if (tab.dataset.tab === 'agents' && isSuperAdmin) loadAgentsTab();
         });
       });
 
@@ -1253,68 +1165,6 @@
             try { await api(session, '/integrations/webhook-secret/rotate', { method: 'POST' }); loadWebhooks(); } catch(e2){ alert(e2.message); }
           });
         }
-      }
-
-      async function loadAgentsTab(){
-        var el = document.getElementById('oc-tab-agents');
-        el.innerHTML = 'Loading&hellip;';
-        try {
-          var connections = await api(session, '/llm-connections');
-          var agents = await api(session, '/agents');
-          var connOptions = connections.map(function(c){ return '<option value="' + c.id + '">' + esc(c.name) + ' (' + esc(c.provider) + ')</option>'; }).join('');
-          el.innerHTML =
-            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:0 0 8px">LLM Connections</h4>' +
-            '<table><tr><th>Name</th><th>Provider</th></tr>' + connections.map(function(c){ return '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.provider) + '</td></tr>'; }).join('') + '</table>' +
-            '<form id="oc-create-connection">' +
-              '<label class="oc-full">Add LLM Connection</label>' +
-              '<input name="name" placeholder="Connection name" required aria-label="Connection name">' +
-              '<select name="provider" id="oc-conn-provider" aria-label="Provider"><option value="anthropic">Anthropic (Claude)</option><option value="sarvam">Sarvam AI</option><option value="openai_compatible">OpenAI-compatible (Groq, Together, etc.)</option></select>' +
-              '<input name="api_key" type="password" placeholder="API key" required aria-label="API key">' +
-              '<input name="base_url" id="oc-conn-baseurl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" class="oc-full" style="display:none" aria-label="Base URL">' +
-              '<button class="oc-submit" type="submit">Add</button>' +
-              '<div class="oc-msg oc-full" aria-live="polite" id="oc-connection-msg"></div>' +
-            '</form>' +
-            '<h4 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:20px 0 8px">Agents</h4>' +
-            '<table><tr><th>Name</th><th>Model</th><th>Active</th></tr>' + agents.map(function(a){ return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.model || '—') + '</td><td>' + (a.active ? 'Yes' : 'No') + '</td></tr>'; }).join('') + '</table>' +
-            (connections.length ?
-              '<form id="oc-create-agent">' +
-                '<label class="oc-full">Create Agent</label>' +
-                '<input name="name" placeholder="Agent name" required aria-label="Agent name">' +
-                '<select name="llm_connection_id" class="oc-full" aria-label="LLM connection">' + connOptions + '</select>' +
-                '<input name="model" placeholder="Model (e.g. claude-3-5-haiku-20241022, sarvam-105b, gpt-4o-mini) - leave blank for the connection\'s default" class="oc-full" aria-label="Model">' +
-                '<textarea name="system_prompt" placeholder="System prompt" class="oc-full" style="grid-column:span 2;min-height:60px;padding:9px 10px;border-radius:8px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit"></textarea>' +
-                '<button class="oc-submit" type="submit">Create</button>' +
-                '<div class="oc-msg" aria-live="polite" id="oc-agent-msg"></div>' +
-              '</form>'
-            : '<div class="oc-msg" aria-live="polite" style="margin-top:8px">Add an LLM connection first before creating an agent.</div>');
-
-          var connForm = document.getElementById('oc-create-connection');
-          var providerSel = document.getElementById('oc-conn-provider');
-          var baseUrlInput = document.getElementById('oc-conn-baseurl');
-          function syncBaseUrlVisibility(){ baseUrlInput.style.display = providerSel.value === 'openai_compatible' ? '' : 'none'; }
-          if (providerSel) { providerSel.addEventListener('change', syncBaseUrlVisibility); syncBaseUrlVisibility(); }
-          if (connForm) connForm.addEventListener('submit', async function(ev){
-            ev.preventDefault();
-            var msg = document.getElementById('oc-connection-msg');
-            var fd = new FormData(ev.target);
-            try {
-              await api(session, '/llm-connections', { method: 'POST', body: { name: fd.get('name'), provider: fd.get('provider'), api_key: fd.get('api_key'), base_url: fd.get('base_url') } });
-              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Connection added.';
-              loadAgentsTab();
-            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
-          });
-          var agentForm = document.getElementById('oc-create-agent');
-          if (agentForm) agentForm.addEventListener('submit', async function(ev){
-            ev.preventDefault();
-            var msg = document.getElementById('oc-agent-msg');
-            var fd = new FormData(ev.target);
-            try {
-              await api(session, '/agents', { method: 'POST', body: { name: fd.get('name'), llm_connection_id: fd.get('llm_connection_id'), model: fd.get('model'), system_prompt: fd.get('system_prompt') } });
-              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Agent created.';
-              loadAgentsTab();
-            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
-          });
-        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
       loadUsers();

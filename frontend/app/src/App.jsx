@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Header from './components/Header.jsx';
-import StatTiles from './components/StatTiles.jsx';
+import Nav from './components/Nav.jsx';
+import Home from './components/Home.jsx';
+import MessagesPanel from './components/MessagesPanel.jsx';
 import ContentPipeline from './components/ContentPipeline.jsx';
 import IntegrationsPanel from './components/IntegrationsPanel.jsx';
 import { api, currentUser, ApiError } from './lib/api.js';
@@ -8,24 +10,103 @@ import { api, currentUser, ApiError } from './lib/api.js';
 const APPROVER_ROLES = ['SUPER_ADMIN', 'APPROVER', 'DEPT_ADMIN', 'IT_ADMIN'];
 const INTEGRATIONS_ROLES = ['SUPER_ADMIN', 'IT_ADMIN'];
 
-function isToday(iso) {
-  if (!iso) return false;
-  const d = new Date(iso);
-  const now = new Date();
-  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+// Studio: upload + per-channel transform for one product at a time, reusing
+// the existing ContentPipeline component (per the spec: "Studio is for
+// uploading content on the different channel product wise, select channel
+// and upload content"). The product itself is picked from Nav's product
+// selector - this just loads/reloads that one product's assets+channels.
+function Studio({ productId, spec, canApprove, canSeeIntegrations, integrations }) {
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    if (!productId) {
+      setAssets([]);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setErr('');
+    api
+      .productContent(productId)
+      .then((content) => {
+        if (!cancelled) setAssets(content);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof ApiError ? e.message : 'Failed to load content');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [productId]);
+
+  const handleUploaded = (asset) => setAssets((prev) => [{ ...asset, variants: [] }, ...prev]);
+
+  const handleTransform = async (assetId, selectedChannels) => {
+    await api.transformContent(assetId, selectedChannels);
+    const content = await api.productContent(productId);
+    setAssets(content);
+  };
+
+  const handleApprove = async (variantId, action) => {
+    await api.approveVariant(variantId, action);
+    const content = await api.productContent(productId);
+    setAssets(content);
+  };
+
+  if (!productId) {
+    return (
+      <div className="rounded-[12px] border border-black/5 bg-white p-6 text-center text-[13px] text-zinc-500 dark:border-white/[0.08] dark:bg-[#121214] dark:text-white/50">
+        No products yet — create one from Admin &gt; Products to start uploading content.
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="py-10 text-center text-[13px] text-zinc-500 dark:text-white/50">Loading…</div>;
+  }
+
+  if (err) {
+    return (
+      <div className="rounded-[12px] border border-red-500/20 bg-red-500/10 p-4 text-[13px] text-red-600 dark:text-red-400">
+        {err}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-4 md:grid-cols-[1.15fr_0.85fr]">
+      <ContentPipeline
+        productId={productId}
+        assets={assets}
+        spec={spec}
+        canApprove={canApprove}
+        onUploaded={handleUploaded}
+        onTransform={handleTransform}
+        onApprove={handleApprove}
+      />
+      <IntegrationsPanel integrations={integrations} visible={canSeeIntegrations} />
+    </div>
+  );
 }
 
 export default function App() {
   const session = currentUser();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [activeTab, setActiveTab] = useState('home');
+  const [company, setCompany] = useState(null);
   const [products, setProducts] = useState([]);
   const [selectedProductId, setSelectedProductId] = useState(null);
-  const [assets, setAssets] = useState([]);
   const [spec, setSpec] = useState({});
-  const [channels, setChannels] = useState([]);
-  const [leads, setLeads] = useState([]);
+  const [totalLeads, setTotalLeads] = useState(0);
   const [integrations, setIntegrations] = useState([]);
+  const [channelList, setChannelList] = useState([]);
 
   const role = session && session.user ? session.user.role : null;
   const canApprove = role ? APPROVER_ROLES.includes(role) : false;
@@ -42,27 +123,20 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const [productList, channelSpec, leadList] = await Promise.all([
+        const [companyInfo, productList, channelSpec, leadList] = await Promise.all([
+          api.company().catch(() => null),
           api.products(),
           api.channelSpec(),
           api.leads().catch(() => []), // non-fatal - some roles can't see leads either
         ]);
         if (cancelled) return;
+        setCompany(companyInfo);
         setProducts(productList);
         setSpec(channelSpec);
-        setLeads(leadList);
+        setTotalLeads(leadList.length);
 
         const firstProduct = productList[0];
-        if (firstProduct) {
-          setSelectedProductId(firstProduct.id);
-          const [content, prodChannels] = await Promise.all([
-            api.productContent(firstProduct.id),
-            api.productChannels(firstProduct.id).catch(() => []),
-          ]);
-          if (cancelled) return;
-          setAssets(content);
-          setChannels(prodChannels);
-        }
+        if (firstProduct) setSelectedProductId(firstProduct.id);
 
         if (canSeeIntegrations) {
           try {
@@ -85,28 +159,45 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stats = useMemo(() => {
-    const activeChannels = channels.filter((c) => c.status === 'configured').length;
-    const totalChannels = Object.keys(spec).length;
-    const transformedToday = assets.reduce(
-      (sum, a) => sum + (a.variants || []).filter((v) => isToday(v.created_at)).length,
-      0
-    );
-    return { activeChannels, totalChannels, transformedToday, leadsImported: leads.length };
-  }, [channels, spec, assets, leads]);
+  const selectedProduct = useMemo(
+    () => products.find((p) => p.id === selectedProductId) || null,
+    [products, selectedProductId]
+  );
 
-  const handleUploaded = (asset) => setAssets((prev) => [{ ...asset, variants: [] }, ...prev]);
+  // Channel list for Inbox/Leads' left-column filter: spec gives every
+  // known channel's label, productChannels gives this product's per-channel
+  // configured/not_configured status - merge them so the filter always
+  // shows the full channel set (spec) with this product's live status.
+  useEffect(() => {
+    if (!selectedProductId || !Object.keys(spec).length) {
+      setChannelList([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .productChannels(selectedProductId)
+      .then((rows) => {
+        if (cancelled) return;
+        const byKey = Object.fromEntries(rows.map((r) => [r.channel, r]));
+        setChannelList(
+          Object.entries(spec).map(([key, def]) => ({
+            key,
+            label: def.label,
+            status: byKey[key] ? byKey[key].status : 'not_configured',
+          }))
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setChannelList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProductId, spec]);
 
-  const handleTransform = async (assetId, selectedChannels) => {
-    await api.transformContent(assetId, selectedChannels);
-    const content = await api.productContent(selectedProductId);
-    setAssets(content);
-  };
-
-  const handleApprove = async (variantId, action) => {
-    await api.approveVariant(variantId, action);
-    const content = await api.productContent(selectedProductId);
-    setAssets(content);
+  const handleOpenProduct = (productId) => {
+    setSelectedProductId(productId);
+    setActiveTab('inbox');
   };
 
   if (!session || !session.token) {
@@ -131,35 +222,45 @@ export default function App() {
             {loadError}
           </div>
         ) : (
-          <div className="space-y-5">
-            <StatTiles
-              activeChannels={stats.activeChannels}
-              totalChannels={stats.totalChannels}
-              transformedToday={stats.transformedToday}
-              leadsImported={stats.leadsImported}
-              region={import.meta.env.VITE_REGION || 'ap-south-1'}
-              storage="Paperclip media pipeline"
+          <>
+            <Nav
+              active={activeTab}
+              onChange={setActiveTab}
+              products={products}
+              selectedProductId={selectedProductId}
+              onSelectProduct={setSelectedProductId}
             />
 
-            {selectedProductId ? (
-              <div className="grid gap-4 md:grid-cols-[1.15fr_0.85fr]">
-                <ContentPipeline
-                  productId={selectedProductId}
-                  assets={assets}
-                  spec={spec}
-                  canApprove={canApprove}
-                  onUploaded={handleUploaded}
-                  onTransform={handleTransform}
-                  onApprove={handleApprove}
-                />
-                <IntegrationsPanel integrations={integrations} visible={canSeeIntegrations} />
-              </div>
+            {activeTab === 'home' ? (
+              <Home company={company} products={products} totalLeads={totalLeads} onOpenProduct={handleOpenProduct} />
+            ) : activeTab === 'inbox' ? (
+              <MessagesPanel
+                key={`inbox-${selectedProductId || 'none'}`}
+                productId={selectedProductId}
+                channelStatuses={channelList}
+                inquiryOnly={false}
+                title={selectedProduct ? `${selectedProduct.name} · Inbox` : 'Inbox'}
+                subtitle="All messages across every connected channel for this product."
+              />
+            ) : activeTab === 'leads' ? (
+              <MessagesPanel
+                key={`leads-${selectedProductId || 'none'}`}
+                productId={selectedProductId}
+                channelStatuses={channelList}
+                inquiryOnly
+                title={selectedProduct ? `${selectedProduct.name} · Leads` : 'Leads'}
+                subtitle="Messages Sarvam AI classified as genuine product inquiries."
+              />
             ) : (
-              <div className="rounded-[12px] border border-black/5 bg-white p-6 text-center text-[13px] text-zinc-500 dark:border-white/[0.08] dark:bg-[#121214] dark:text-white/50">
-                No products yet — create one from Admin &gt; Products to start uploading content.
-              </div>
+              <Studio
+                productId={selectedProductId}
+                spec={spec}
+                canApprove={canApprove}
+                canSeeIntegrations={canSeeIntegrations}
+                integrations={integrations}
+              />
             )}
-          </div>
+          </>
         )}
       </div>
     </div>

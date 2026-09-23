@@ -25,26 +25,11 @@ const schemas = {
     channel: z.string().trim().min(1).max(30),
     config: z.record(z.any()).optional()
   }),
-  createLlmConnection: z.object({
-    name: z.string().trim().min(1).max(100),
-    provider: z.string().trim().min(1).max(30),
-    api_key: z.string().min(1).max(2000),
-    base_url: z.string().trim().url().max(500).optional()
-  }),
-  createAgent: z.object({
-    name: z.string().trim().min(1).max(100),
-    llm_connection_id: z.string().uuid(),
-    model: z.string().trim().max(100).optional().nullable(),
-    system_prompt: z.string().max(20000).optional().nullable(),
-    config: z.record(z.any()).optional()
-  }),
-  updateAgent: z.object({
-    name: z.string().trim().min(1).max(100).optional(),
-    model: z.string().trim().max(100).optional().nullable(),
-    system_prompt: z.string().max(20000).optional().nullable(),
-    config: z.record(z.any()).optional(),
-    active: z.boolean().optional()
-  }),
+  // createLlmConnection/createAgent/updateAgent removed along with the
+  // Agents feature's routes/UI (see README.md "Hardening notes" - deferred
+  // to a future version; the underlying agents/llm_connections/
+  // product_agents/agent_runs tables are untouched, so re-adding this is a
+  // routes/UI change, not a new migration).
   approveVariant: z.object({
     action: z.enum(['APPROVE', 'REJECT', 'REQUEST_CHANGE']),
     comment: z.string().trim().max(2000).optional()

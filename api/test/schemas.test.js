@@ -68,15 +68,6 @@ test('transformContent channels field is optional (defaults handled by the route
   assert.ok(schemas.transformContent.safeParse({}).success);
 });
 
-test('createLlmConnection requires a non-empty api_key and a valid base_url when given', () => {
-  assert.equal(schemas.createLlmConnection.safeParse({ name: 'x', provider: 'openai', api_key: '' }).success, false);
-  assert.ok(schemas.createLlmConnection.safeParse({ name: 'x', provider: 'openai', api_key: 'sk-abc' }).success);
-  assert.equal(
-    schemas.createLlmConnection.safeParse({ name: 'x', provider: 'openai_compatible', api_key: 'sk-abc', base_url: 'not-a-url' }).success,
-    false
-  );
-});
-
 test('approveVariant restricts action to the three real workflow states', () => {
   for (const action of ['APPROVE', 'REJECT', 'REQUEST_CHANGE']) {
     assert.ok(schemas.approveVariant.safeParse({ action }).success, `${action} should be valid`);

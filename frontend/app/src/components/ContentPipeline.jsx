@@ -162,7 +162,7 @@ function AssetCard({ asset, spec, canApprove, onTransform, onApprove }) {
         disabled={transforming}
         className="mt-3 rounded-full border border-black/10 px-3.5 py-1.5 text-[12px] font-semibold text-brand transition-colors hover:border-brand disabled:opacity-60 dark:border-white/15"
       >
-        {transforming ? 'Transforming with Agent…' : 'Transform'}
+        {transforming ? 'Transforming…' : 'Transform'}
       </button>
 
       {err ? <p className="mt-2 text-[12px] text-red-500">{err}</p> : null}

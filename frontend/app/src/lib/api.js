@@ -100,12 +100,25 @@ export function currentUser() {
 // --- Typed endpoint helpers -------------------------------------------
 
 export const api = {
+  company: () => apiCall('/company'),
   products: () => apiCall('/products'),
   productContent: (productId) => apiCall(`/products/${productId}/content`),
   channelSpec: () => apiCall('/channels/spec'),
   productChannels: (productId) => apiCall(`/products/${productId}/channels`),
 
-  leads: () => apiCall('/leads'),
+  // params: { product_id, channel, inquiry_only } - all optional, dropped
+  // when falsy so a plain api.leads() still hits GET /leads unfiltered.
+  leads: (params = {}) => {
+    const qs = new URLSearchParams();
+    if (params.product_id) qs.set('product_id', params.product_id);
+    if (params.channel) qs.set('channel', params.channel);
+    if (params.inquiry_only) qs.set('inquiry_only', 'true');
+    const q = qs.toString();
+    return apiCall(`/leads${q ? `?${q}` : ''}`);
+  },
+  leadMessages: (leadId) => apiCall(`/leads/${leadId}/messages`),
+  replyToLead: (leadId, body, channel) =>
+    apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: channel ? { body, channel } : { body } }),
 
   uploadContent: (file, { productId, brandKit } = {}) => {
     const form = new FormData();

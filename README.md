@@ -123,14 +123,14 @@ Once signed in, a user with `SUPER_ADMIN`, `IT_ADMIN`, or `DEPT_ADMIN` sees an
   wide (`PRODUCT_ADMIN_ROLES` in the code - renamed from
   `PRODUCT_TENANT_ADMIN_ROLES` when multi-tenancy was removed). A product
   can additionally be assigned to specific non-admin users via
-  `product_members` - see "Products/Services and Agents" below.
+  `product_members` - see "Products/Services" below.
 
 Access tokens expire after 15 minutes; the frontend transparently exchanges
 the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
 stays usable without re-entering a password until the refresh token itself
 expires.
 
-## Products/Services and Agents
+## Products/Services
 
 Run `postgres/migrate-products-agents.sql` once if your database predates
 this (same `docker exec ... psql` pattern as the other migrations).
@@ -140,11 +140,7 @@ Full hierarchy - company-wide (single company, no tenant scoping):
 - **Any Admin role** (`SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN`, collectively
   `PRODUCT_ADMIN_ROLES` in the code) creates **Products/Services**
   (`POST /products`) and assigns any user as that product's Admin
-  (`POST /products/:id/members` with `role: "ADMIN"`). `SUPER_ADMIN` is
-  also the only role that can create **LLM connections**
-  (`POST /llm-connections` - provider + API key, encrypted at rest with
-  `ENCRYPTION_KEY` via `encryptSecret()`/`decryptSecret()`) and **Agents**
-  (`POST /agents` - name, which LLM connection, model, system prompt).
+  (`POST /products/:id/members` with `role: "ADMIN"`).
 - **Product/Service Admin** configures that product's social channels
   (`POST /products/:id/channels` - config storage only right now, see note
   below) and adds `MEMBER` users to run them (`POST /products/:id/members`
@@ -156,86 +152,28 @@ Full hierarchy - company-wide (single company, no tenant scoping):
   independent from every other product's channel rows (`UNIQUE(product_id,
   channel)`), so configuring one product's WhatsApp settings never touches
   another's.
-- **Agents on a product**: `POST /products/:id/agents` enables an
-  already-defined Agent on a product, gated to the company's Premium plan
-  only (checks `company.is_premium`) - a Standard-plan product can only
-  ever be run by human `MEMBER` users, matching what was asked for exactly.
 
-Permission model: every product-scoped write (members/channels/agents)
-accepts either a company-wide Admin role or that specific product's own
-`ADMIN` member (`canAdminProduct()`) - a Product Admin manages their own
-product without needing a company-wide role.
+Permission model: every product-scoped write (members/channels) accepts
+either a company-wide Admin role or that specific product's own `ADMIN`
+member (`canAdminProduct()`) - a Product Admin manages their own product
+without needing a company-wide role.
 
 **What this does NOT do yet, on purpose:**
 - **No real social-media posting.** `product_channels.config` is just
   storage; there's no OAuth flow or platform API integration behind any
-  channel for either Standard (human) or Premium (agent) products. Every
-  channel-posting mention elsewhere in this README/app is aspirational until
-  specific platforms are integrated one at a time (each needs its own app
-  registration/API credentials from you).
-
-### Real agent execution
-
-Creating an Agent used to just store its LLM connection/model/system prompt
-- nothing ever called the LLM. Now it does, for real, through three
-providers (chosen deliberately over "support anything": Anthropic and
-Sarvam each have a fixed, verified endpoint/auth shape hardcoded in
-`callLLM()`; anything else that speaks the OpenAI chat-completions format
-goes through `openai_compatible`, which needs the connection's own
-`base_url`):
-
-- **Anthropic** — `POST https://api.anthropic.com/v1/messages`, `x-api-key`
-  header. Model defaults to `claude-3-5-haiku-20241022` if the agent doesn't
-  specify one.
-- **Sarvam AI** — `POST https://api.sarvam.ai/v1/chat/completions`. Auth is
-  an `api-subscription-key` header, **not** `Authorization: Bearer` - easy
-  to get wrong, verified against Sarvam's own published SDK source rather
-  than guessed. Model defaults to `sarvam-105b`. (The old top-level
-  `SARVAM_API_KEY` env var from earlier versions of this kit is gone - it
-  was never actually wired to anything; add a real Sarvam connection via
-  Admin → Agents → LLM Connections instead.)
-- **OpenAI-compatible** — for Groq, Together, Fireworks, DeepSeek, a
-  self-hosted vLLM, etc. Set the connection's `base_url` to the provider's
-  full `.../v1` base (e.g. `https://api.groq.com/openai/v1`) -
-  `/chat/completions` is appended automatically, `Authorization: Bearer` is
-  used. Model defaults to `gpt-4o-mini` if unset (irrelevant for providers
-  that require their own model name - just set one on the agent).
-
-**Two ways an agent actually runs, both for real:**
-1. **Manual** — open a Premium product's Agents tab, click **Run** on an
-   enabled agent, and either give it a lead ID (pulls that lead's company/
-   contact/phone/email into the prompt) or free-form input. The real
-   response is stored and shown inline, with a **History** button to see
-   past runs (`POST /products/:id/agents/:agentId/run`,
-   `GET /products/:id/agents/:agentId/runs`). Any member of the product can
-   trigger this, not just its Admin - Premium agents are meant to replace a
-   Standard-plan member's manual work, not gate behind an extra admin step.
-2. **Automatic on lead intake** — Hermes calls a new internal-only route
-   (`POST /internal/leads/:leadId/auto-run-agent`, authenticated with a
-   shared `INTERNAL_API_SECRET` rather than a user JWT, since there's no
-   user session in that context) whenever a lead arrives. **Known,
-   documented limitation**: inbound webhooks are channel scoped, not
-   product-scoped (there's one webhook URL per channel company-wide - see
-   Webhooks below), so if more than one Premium product has the same
-   channel configured with an agent enabled, this can't safely guess which
-   one should handle it and reports back why it didn't run (visible in the
-   hermes-orchestrator container logs) rather than picking one arbitrarily.
-   Works unambiguously today for the common case of one product per
-   channel; properly disambiguating multiple would need product-scoped
-   webhook URLs, which is a real but separate change.
-
-Every real run (manual or automatic, success or failure) is recorded in the
-new `agent_runs` table - input sent, output received, or the real error
-message if the provider call failed. Nothing here fabricates a result: if
-the API key is wrong or the provider is down, the run is stored as
-`FAILED` with the provider's actual error message, not silently marked
-successful.
-
-If your database predates this feature, run
-`postgres/migrate-agent-execution.sql` once first, and set a real
-`INTERNAL_API_SECRET` (generate like `JWT_SECRET`/`ENCRYPTION_KEY`, e.g.
-`openssl rand -hex 32`) in both the `api` and `hermes-orchestrator`
-services' environment.
+  channel. Every channel-posting mention elsewhere in this README/app is
+  aspirational until specific platforms are integrated one at a time (each
+  needs its own app registration/API credentials from you).
+- **No Agents feature right now.** LLM-connection-backed Agents (create a
+  connection, create an Agent, enable it on a Premium product, run it
+  manually or automatically on lead intake) existed briefly and were
+  removed from the UI/API for this version - deferred to a future one (see
+  "Hardening notes" below). The `agents`/`llm_connections`/
+  `product_agents`/`agent_runs` tables are untouched in the schema, so
+  bringing this back is a routes/UI change, not a new migration. What
+  Sarvam AI is used for today is smaller and different: classifying
+  inbound lead messages as genuine inquiries (env-var configured, no admin
+  UI) - see "Hardening notes" below and "Webhooks" above.
 
 ### Frontend UI
 
@@ -253,13 +191,8 @@ this whole feature area has more moving parts than a single safe edit.
   gets a dropdown of real company users via `GET /users`; a Product Admin
   without a company-wide role has to type a user's ID directly, since
   `GET /users` is gated to company-wide admin roles and a Product Admin
-  usually isn't one), **Channels** (per-channel status + a config note - no
-  real platform config UI yet, matching the backend), and **Agents** (enable/
-  disable already-created agents - shows "Premium plan only" messaging when
-  none are enabled rather than pretending it works on Standard).
-- **Agents** tab added to the existing Super Admin panel (Admin button):
-  create LLM connections (provider + API key, never redisplayed once saved)
-  and Agents (name, connection, model, system prompt).
+  usually isn't one) and **Channels** (per-channel status + a config note -
+  no real platform config UI yet, matching the backend).
 
 ### Onboarding wizard
 
@@ -273,46 +206,55 @@ skipped or once a product exists, it never appears again (tracked in
 again, which is harmless since it no-ops the moment a product already
 exists).
 
-## Studio, Leads, and Inbox (real data, not the original mockup)
+## Navigation: Home / Inbox / Studio / Leads (real data, not the original mockup)
 
-These three panels were originally a fully client-side simulation — no
-network calls, hardcoded sample leads/messages, a fake progress bar, and a
-fake "Fetch from Team Drive/Slack" button with invented brand-kit data.
-All of that's gone:
+The React app (`frontend/app/src/App.jsx`) is a real top-nav-bar,
+tab-based layout, not the original single-page mockup with one hardcoded
+dashboard:
 
-- **Leads**: uploading a CSV calls `POST /leads/upload-csv` for real; the
-  shown totals (rows/valid/duplicate/invalid) are the actual response, and
-  "Recent Leads" is `GET /leads`. The old fake CSV-to-CRM field-mapping
-  table and language-distribution chart were removed rather than left
-  fake — the real API doesn't return per-field mapping suggestions or a
-  language breakdown, so there was no honest way to populate them.
-- **Inbox**: there's no dedicated messaging/inbox endpoint in this API, so
-  this reuses `GET /leads` (which is what the inbox conceptually
-  represented anyway — leads arriving from every channel + CSV).
-- **Studio**: uploading calls `POST /content/upload`; "Transform with
-  Agent" calls `POST /content/:assetId/transform` with the channels you
-  selected and shows the real variants it created (channel, spec, status)
-  instead of fabricated thumbnails/sizes/durations — Paperclip doesn't
-  generate real preview images accessible to the frontend, so there was no
-  honest way to show those either. Approve/Reject/Request Change call
-  `POST /content/variants/:variantId/approve` for real, looping over every
-  variant from that transform. The "Fetch Client Details" button is
-  disabled and labeled accordingly — there's no Slack/Drive/Notion
-  integration in this codebase to honestly back it. The former tenant
-  switcher (previously "Sharma Industries" / "Gupta Tools") is gone - this
-  app is a single company now (see "Hardening notes" below), so there is
-  nothing to switch between; the header just shows your one company's name.
+- **Home** (`Home.jsx`): the company-wide dashboard — your one company's
+  name/plan badge (see "Hardening notes" below on the single-company
+  model), total product and lead counts, and a card per product. Clicking
+  a product card jumps straight to that product's Inbox.
+- **Inbox** and **Leads** (both `MessagesPanel.jsx`, one component, two
+  props): a three-column view — a left-hand channel filter for the
+  selected product (from `GET /products/:id/channels`, merged with
+  `GET /channels/spec` so every channel shows even if not yet
+  configured), a middle list of leads/messages (`GET /leads`, scoped by
+  `product_id` and optionally `channel`), and a right-hand thread view
+  (`GET /leads/:id/messages`, reply via `POST /leads/:id/reply`). Leads
+  differs from Inbox only by passing `inquiry_only=true`, which the API
+  filters server-side using the Sarvam AI classification described below
+  (`is_inquiry` — see "Hardening notes"); Inbox shows every message
+  regardless of classification, and each lead row shows its
+  Inquiry/Noise/unclassified badge either way.
+- **Studio** (a `Studio` component defined inline in `App.jsx`, wrapping the existing
+  `ContentPipeline` component): uploading calls `POST /content/upload`
+  for the product selected in the nav bar; "Transform" calls
+  `POST /content/:assetId/transform` with the channels you selected and
+  shows the real variants it created (channel, spec, status) instead of
+  fabricated thumbnails/sizes/durations — Paperclip doesn't generate real
+  preview images accessible to the frontend, so there was no honest way
+  to show those either. Approve/Reject/Request Change call
+  `POST /content/variants/:variantId/approve` for real, looping over
+  every variant from that transform.
 
-The Premium "Multiuser → Multiagent" comparison panel is unchanged — it's
-informational/marketing copy describing what the toggle does, not a data
-display, so it was never "fake data" in the same sense as the rest.
+All four tabs share one product selector in the nav bar (Home has none —
+it's company-wide); switching products re-fetches that product's
+channels/content/leads. The former tenant switcher (previously "Sharma
+Industries" / "Gupta Tools") is gone — this app is a single company now,
+so there is nothing to switch between; the header just shows your one
+company's name.
+
+The Premium "Multiuser → Multiagent" comparison panel referenced
+elsewhere in the overlay is unchanged — it's informational/marketing copy
+describing what the toggle does, not a data display.
 
 The bundle's own event handlers reach the real API via
 `window.__ORGCOMMS_API__` (path, opts) — exposed by the login/session
 script for exactly this purpose — and `window.__ORGCOMMS_SESSION__`,
 populated by the same pre-bundle script that seeds the initial company
-state. Neither existed before this pass; the compiled bundle previously
-had zero knowledge of the login gate's session.
+state.
 
 ## Webhooks (company-wide, channel-scoped, so leads actually persist)
 
@@ -344,16 +286,12 @@ A valid request is deduped (by phone/email against existing leads) and
 inserted into `leads` directly — persistence no longer depends on the
 Hermes queue consumer being up. It also runs real lead enrichment
 (`api/src/lead-enrichment.js`) on any inbound message/note/text field -
-script-level language detection and GSTIN extraction/checksum validation -
-and writes an inbound `lead_messages` row, then pushes a
-`{lead_id, channel}` notification onto `webhook:incoming`, which
-`lead_intake` picks up to actually run a Premium product's agent on the
-lead now (see **Real agent execution** above) — when exactly one product
-unambiguously matches.
-
-Because this URL is channel scoped rather than product-scoped, two Premium
-products both configured on the same channel can't be automatically
-disambiguated for you today — see the auto-run limitation noted above.
+script-level language detection and GSTIN extraction/checksum validation,
+plus Sarvam AI inquiry classification if `SARVAM_API_KEY` is set (see
+"Hardening notes" below) - and writes an inbound `lead_messages` row, all
+synchronously in the request itself (nothing is queued to Hermes for this
+any more - see "Hardening notes" on why the old `webhook:incoming`/
+`lead_intake` auto-run-agent path was removed).
 
 ## Virus scanning (ClamAV)
 
@@ -1397,3 +1335,145 @@ code changes were needed.
   gained `detected_language`/`gstin`/`gstin_valid` columns and a new
   `lead_messages` table records the inbound message itself, laying the
   groundwork for the Leads panel's reply-thread UI.
+- **Removed the Agents feature from the UI/API - deferred to a future
+  version - and replaced it with a much smaller, real Sarvam AI
+  integration: server-side inbound-message filtering.** The Agents feature
+  (LLM connections managed in the app, per-product enable/run/history UI,
+  automatic agent runs on lead intake) had only just been built in the
+  previous pass and was removed again just as deliberately: it added a lot
+  of surface (routes, an Admin tab, a per-product tab, a Redis
+  `webhook:incoming` queue and a Hermes consumer for it) for a capability
+  not needed yet.
+  - **What's gone**: `POST`/`GET`/`DELETE /llm-connections`,
+    `POST`/`GET`/`PATCH /agents`, `GET`/`POST`/`DELETE
+    /products/:id/agents(/:agentId)`, `POST
+    /products/:id/agents/:agentId/run`, `GET
+    /products/:id/agents/:agentId/runs`, and `POST
+    /internal/leads/:leadId/auto-run-agent` are all removed from
+    `api/src/server.js`, along with `callLLM()`/`runAgentForProduct()` and
+    the `createLlmConnection`/`createAgent`/`updateAgent` zod schemas. The
+    Admin panel's "Agents" tab (LLM connections + Agents management) and
+    each product's own "Agents" tab (enable/run/history) are both removed
+    from `frontend/overlay.html`. Hermes (`hermes/orchestrator.js`) no
+    longer has a `lead_intake` job type or a second `BRPOP` on
+    `webhook:incoming` - `handleInboundWebhook` in `server.js` no longer
+    pushes anything onto that queue, since nothing consumes it any more.
+  - **What's kept, on purpose**: the `agents`, `llm_connections`,
+    `product_agents`, and `agent_runs` tables are untouched in the schema
+    (no migration dropped them) - re-adding this feature next version is a
+    routes/UI change against an already-correct schema, not a new
+    migration. `GET /me/export` and `GET /leads/:id/export` still safely
+    query `agent_runs` (always empty going forward until the feature
+    returns) for GDPR export completeness.
+  - **What replaced it**: real-time Sarvam AI message filtering, wired
+    directly into `handleInboundWebhook` - classifies an inbound lead
+    message as a genuine product inquiry (`true`), not one (`false`), or
+    leaves it unclassified (`null`) if `SARVAM_API_KEY` isn't set, the
+    message is empty, or the API call fails/returns something
+    unrecognized. Deliberately env-var configured
+    (`SARVAM_API_KEY`/`SARVAM_MODEL`, optional, in `.env.vps.example` and
+    `docker-compose.vps.yml`) - no database row, no admin UI, no "LLM
+    connection" abstraction; this is a single fixed integration, not a
+    general provider system. `leads` gained an `is_inquiry` column
+    (`postgres/migrate-lead-inquiry-filter.sql`) and `GET /leads` gained
+    `?inquiry_only=true`, which hides only rows explicitly classified
+    `false` - an unclassified (`null`) row always stays visible, so a
+    filter that never ran on a given row (no API key set, or a bulk CSV
+    import - see below) never silently hides it. Deliberately **not**
+    run on `POST /leads/upload-csv` - a bulk import can be up to 5000
+    rows, and calling an external API synchronously per row inside that
+    request would be slow and costly; bulk-imported leads get
+    `detected_language`/`gstin` (local, script-level, no external call)
+    but `is_inquiry` stays `NULL`.
+  - **Verified**: unit tests updated (removed the `createLlmConnection`
+    schema test; 81 of 82 pass - the one failure is a pre-existing,
+    unrelated missing `rate-limit-redis` dev dependency on this machine,
+    not something this change touched), `node --check` on every changed
+    file, a clean `npm run build` (confirms the removed Agents markup
+    compiles out of `frontend/index.html` cleanly), and the CSP
+    `sha256-` hash in `nginx/orgcomms-vps.conf` was regenerated for the
+    overlay's inline script.
+
+- **Rebuilt real top-nav navigation: Home / Inbox / Studio / Leads.** The
+  React app was a single always-on dashboard (one product's content
+  pipeline + integrations panel, no way to see another product or a
+  leads-only view without scrolling through everything). Replaced with:
+  - `Nav.jsx` - a top tab bar (Home/Inbox/Studio/Leads) plus, for the
+    three product-scoped tabs, a product `<select>` so switching products
+    re-scopes whichever tab is open.
+  - `Home.jsx` - the company dashboard: company name/plan, total
+    products/leads, and a clickable card per product (jumps straight to
+    that product's Inbox).
+  - `MessagesPanel.jsx` - one component backing both Inbox and Leads
+    (they differ only by an `inquiryOnly` prop and copy): left-hand
+    channel filter, middle lead list, right-hand thread with reply.
+    Leads passes `inquiryOnly` so `GET /leads?inquiry_only=true` hides
+    Sarvam-classified noise (see the Agents/Sarvam entry above);
+    unclassified messages always stay visible either way.
+  - `Studio` - a small component defined inline in `App.jsx` that wraps
+    the existing `ContentPipeline`/`IntegrationsPanel` pair, scoped to
+    whichever product is selected in the nav.
+  - `api.js` gained `company()`, `leads(params)`, `leadMessages(leadId)`,
+    and `replyToLead(leadId, body, channel)` to back all of the above -
+    the leads/messages/reply routes themselves already existed
+    server-side from earlier work; only the frontend didn't use them yet.
+  - Also fixed a stale "Transforming with Agent…" button label in
+    `ContentPipeline.jsx`, left over from before Agents was removed.
+  - **Verified**: `npm run build` succeeds (1569 modules, clean output),
+    the CSP `sha256-` hashes in `nginx/orgcomms-vps.conf` were
+    regenerated and confirmed unchanged (this change is entirely inside
+    the Vite bundle, not the overlay's inline scripts), and the full API
+    test suite still shows 81/82 (same pre-existing, unrelated
+    `rate-limit-redis` failure noted above) since this was a
+    frontend-only change.
+
+- **Disaster-recovery gaps closed: secrets, Redis, recordings, and
+  stuck-queue recovery.** The daily `postgres-backup` sidecar only ever
+  backed up Postgres - the `.env` secrets, the `redisdata` volume, and the
+  `recordings` volume (every uploaded content asset and its transformed
+  per-channel variants) had no backup at all, and a Redis crash/restart
+  mid-job could silently strand an approved piece of content forever.
+  - **Secrets**: `scripts/backup-secrets.sh` (new, manual/on-demand, not
+    automated) GPG-encrypts `.env` before it ever touches disk as a
+    backup file - `GPG_RECIPIENT=you@example.com
+    ./scripts/backup-secrets.sh`, or no recipient set falls back to a
+    passphrase-prompted symmetric encryption. Deliberately kept manual and
+    always-encrypted rather than folded into the daily automated sidecar:
+    writing decrypted secrets into a daily, less-guarded backup volume is
+    its own risk. `ENCRYPTION_KEY` is the one genuinely irreplaceable
+    value in there - lose it with no backup and every already-stored
+    channel credential (WhatsApp/Facebook/Instagram/LinkedIn/YouTube/email
+    tokens) becomes permanently undecryptable, not just hard to recover.
+  - **Redis and recordings**: `postgres/backup/backup.sh` (the same daily
+    sidecar) now also takes a `redis-cli --rdb` snapshot of Redis and tars
+    the `recordings` volume (mounted read-only into the sidecar), gzips
+    both, applies the same `BACKUP_RETENTION_DAYS` retention, and ships
+    both through the same optional `RCLONE_REMOTE` as the Postgres dump -
+    one schedule, one shipping config, three things backed up. Each of the
+    three is independent: a Redis or recordings failure is logged and
+    skipped, never fails or blocks the Postgres backup that already
+    succeeded in the same run.
+  - **Stuck-queue recovery**: `publisher:queue` (Redis, popped via `BRPOP`
+    with no ack) can silently lose an approved `content_variant` forever -
+    Redis restarting before AOF fsyncs the push, `hermes-orchestrator`
+    dying mid-`BRPOP`-to-publish, or the job being pushed while
+    `hermes-orchestrator` wasn't running at all - leaving
+    `content_variants.status` stuck at `'APPROVED'` with nothing left to
+    revisit it. `scripts/recover-stuck-publishes.sh` (new) finds every
+    variant still `'APPROVED'` whose most recent `approvals` row is older
+    than `STALE_MINUTES` (default 10 - long enough that it never re-queues
+    a job that's simply still in flight) and re-pushes it onto
+    `publisher:queue`. Safe to run repeatedly: a variant that published or
+    failed in the meantime is no longer `'APPROVED'`, so it's skipped on
+    the next run. Manual/on-demand, not scheduled - this handles a Redis
+    incident, not routine operation.
+  - **Verified**: `docker-compose.vps.yml` validated as parseable YAML
+    after the `postgres-backup` service changes (added the `recordings`
+    read-only mount and `REDIS_HOST`/`REDIS_PASSWORD` env vars, plus a
+    `redis: { condition: service_healthy }` dependency); all three new/
+    changed shell scripts pass `bash -n`/`sh -n` syntax checks; the SQL in
+    `recover-stuck-publishes.sh` was checked by hand against the exact
+    columns `content_variants`/`approvals` actually have (no `updated_at`
+    on `content_variants` - staleness is measured from `approvals.created_at`
+    instead, which is written in the same request that pushes to
+    `publisher:queue`).

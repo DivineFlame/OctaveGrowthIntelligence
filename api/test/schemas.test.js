@@ -9,22 +9,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const schemas = require('../src/schemas');
 
-test('createTenant accepts a valid payload and normalizes the subdomain', () => {
-  const result = schemas.createTenant.safeParse({ name: 'Acme', subdomain: 'ACME-Corp', plan: 'standard' });
-  assert.ok(result.success);
-  assert.equal(result.data.subdomain, 'acme-corp', 'subdomain should be lowercased');
-});
-
-test('createTenant rejects a subdomain with characters outside [a-z0-9-]', () => {
-  const result = schemas.createTenant.safeParse({ name: 'Acme', subdomain: 'acme corp!', plan: 'standard' });
-  assert.equal(result.success, false);
-});
-
-test('createTenant rejects an unknown plan', () => {
-  const result = schemas.createTenant.safeParse({ name: 'Acme', subdomain: 'acme', plan: 'enterprise' });
-  assert.equal(result.success, false, 'plan must be exactly "standard" or "premium"');
-});
-
 test('createUser enforces the 12-character minimum password length', () => {
   const short = schemas.createUser.safeParse({ email: 'a@b.com', password: 'short1234567', role: 'DEPT_ADMIN' });
   assert.equal(short.success, true, 'sanity check: 12 chars should pass');
@@ -41,12 +25,15 @@ test('createUser normalizes email to lowercase and rejects a malformed one', () 
   assert.equal(bad.success, false);
 });
 
-test('createUser does not require tenant_id, but rejects a non-UUID one', () => {
-  const withoutTenant = schemas.createUser.safeParse({ email: 'a@b.com', password: 'a-long-enough-password', role: 'MEMBER' });
-  assert.ok(withoutTenant.success);
-
-  const badTenant = schemas.createUser.safeParse({ email: 'a@b.com', password: 'a-long-enough-password', role: 'MEMBER', tenant_id: 'not-a-uuid' });
-  assert.equal(badTenant.success, false);
+test('createUser has no tenant_id field at all (multi-tenancy removed) - an extra one is stripped, not rejected', () => {
+  // zod objects strip unrecognized keys by default rather than erroring on
+  // them, which is the right behavior here: a stray tenant_id in an old
+  // client/test payload should be silently ignored, not a validation
+  // failure - the schema itself is simply the proof that server.js can no
+  // longer read tenant_id back off req.body even if a caller sends one.
+  const result = schemas.createUser.safeParse({ email: 'a@b.com', password: 'a-long-enough-password', role: 'MEMBER', tenant_id: 'anything-at-all' });
+  assert.ok(result.success);
+  assert.equal('tenant_id' in result.data, false);
 });
 
 test('addProductMember requires a UUID user_id and restricts role to ADMIN/MEMBER', () => {
@@ -95,4 +82,10 @@ test('approveVariant restricts action to the three real workflow states', () => 
     assert.ok(schemas.approveVariant.safeParse({ action }).success, `${action} should be valid`);
   }
   assert.equal(schemas.approveVariant.safeParse({ action: 'MAYBE' }).success, false);
+});
+
+test('replyToLead requires a non-empty body and caps its length', () => {
+  assert.equal(schemas.replyToLead.safeParse({ body: '' }).success, false);
+  assert.ok(schemas.replyToLead.safeParse({ body: 'Thanks for reaching out, when works for a call?' }).success);
+  assert.equal(schemas.replyToLead.safeParse({ body: 'x'.repeat(5001) }).success, false);
 });

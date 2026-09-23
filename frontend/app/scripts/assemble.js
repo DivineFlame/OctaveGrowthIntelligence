@@ -64,7 +64,7 @@ const HEAD_PRELUDE = `<!DOCTYPE html>
   <title>OctaveGrowthIntelligence</title>
   <link rel="icon" type="image/png" href="/octave-icon.png">`;
 
-// Sets window.__ORGCOMMS_TENANT__/__ORGCOMMS_SESSION__ from localStorage
+// Sets window.__ORGCOMMS_COMPANY__/__ORGCOMMS_SESSION__ from localStorage
 // and applies the saved theme (data-theme attribute) before either app
 // renders, so there's no flash of the wrong theme or a moment where the
 // React app doesn't know who's signed in yet.
@@ -73,7 +73,7 @@ const PREMOUNT_THEME_SCRIPT = `  <script>(function(){
       var raw = localStorage.getItem('orgcomms_session');
       if (raw) {
         var s = JSON.parse(raw);
-        if (s && s.tenant) window.__ORGCOMMS_TENANT__ = s.tenant;
+        if (s && s.company) window.__ORGCOMMS_COMPANY__ = s.company;
         window.__ORGCOMMS_SESSION__ = s;
       }
     } catch (e) {}

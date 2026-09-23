@@ -1,6 +1,6 @@
 // Talks to the real OrgComms API using the same session the overlay app
 // (overlay.html) manages - reads straight from localStorage on every call
-// (not just the one-time window.__ORGCOMMS_TENANT__/__ORGCOMMS_SESSION__
+// (not just the one-time window.__ORGCOMMS_COMPANY__/__ORGCOMMS_SESSION__
 // snapshot the pre-mount script sets) so a token refresh or logout done by
 // the overlay is picked up immediately, mirroring overlay.html's own
 // doFetch()/api() helpers exactly (same 401 -> refresh -> retry -> reload
@@ -87,9 +87,9 @@ export async function apiCall(path, opts = {}) {
   return first.data;
 }
 
-export function currentTenant() {
+export function currentCompany() {
   const session = loadSession();
-  return (session && session.tenant) || null;
+  return (session && session.company) || null;
 }
 
 export function currentUser() {

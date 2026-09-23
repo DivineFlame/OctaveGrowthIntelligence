@@ -27,19 +27,19 @@ function beat() { try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())); } 
 // any more, so there's nothing left here to consume it for. Removed
 // rather than left running idle.
 async function runAgent(type, payload) {
-  console.log(`[Hermes] ${type} processing tenant ${payload.tenant_id}`);
+  console.log(`[Hermes] ${type} processing payload ${JSON.stringify(payload)}`);
   if (type === 'publisher') {
     // Calls api's internal publish route (server-to-server, shared-secret
     // auth - see internalMiddleware in api/src/server.js), which actually
     // posts through the configured channel integration
     // (api/src/channels.js) instead of faking success with a fabricated
-    // YouTube URL. payload is { variant_id, tenant_id } - pushed by
+    // YouTube URL. payload is { variant_id } - pushed by
     // POST /content/variants/:variantId/approve when a variant is approved.
     try {
       const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/content-variants/${payload.variant_id}/publish`, {
         method: 'POST',
         headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenant_id: payload.tenant_id })
+        body: JSON.stringify({})
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { console.log(`[Hermes] publisher ${payload.variant_id}: HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { published: false, variant_id: payload.variant_id, error: data.error }; }
@@ -51,18 +51,18 @@ async function runAgent(type, payload) {
     }
   }
   if (type === 'lead_intake') {
-    // The webhook route (api/src/server.js: /webhooks/:tenantId/:webhookSecret/:channel)
-    // already validates the tenant, dedupes, and INSERTs the lead synchronously
-    // before this job is even queued — payload here is just { lead_id, tenant_id, channel }.
+    // The webhook route (api/src/server.js: /webhooks/:webhookSecret/:channel)
+    // already validates the secret, dedupes, and INSERTs the lead synchronously
+    // before this job is even queued — payload here is just { lead_id, channel }.
     // This calls api's internal auto-run-agent route (server-to-server, shared-secret
     // auth - see internalMiddleware in api/src/server.js) which actually runs a real
-    // LLM call through the tenant's Premium agent when exactly one product
+    // LLM call through a Premium product's agent when exactly one product
     // unambiguously matches the channel; otherwise it reports back why it didn't.
     try {
       const resp = await fetch(`${process.env.API_INTERNAL_URL || 'http://api:3000'}/internal/leads/${payload.lead_id}/auto-run-agent`, {
         method: 'POST',
         headers: { 'x-internal-secret': process.env.INTERNAL_API_SECRET || '', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenant_id: payload.tenant_id })
+        body: JSON.stringify({})
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { console.log(`[Hermes] lead_intake ${payload.lead_id}: auto-run-agent HTTP ${resp.status} - ${data.error || 'unknown error'}`); return { enriched: false, lead_id: payload.lead_id }; }

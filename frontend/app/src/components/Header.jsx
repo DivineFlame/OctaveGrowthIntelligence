@@ -8,7 +8,7 @@ function greeting() {
   return 'Good evening';
 }
 
-export default function Header({ tenantName, userName, premium }) {
+export default function Header({ companyName, userName, premium }) {
   return (
     <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
       <div>
@@ -25,7 +25,7 @@ export default function Header({ tenantName, userName, premium }) {
         <p className="mt-1 text-[20px] font-bold text-zinc-900 dark:text-white">
           {greeting()}, {userName || 'there'}
         </p>
-        <p className="text-[12px] text-zinc-500 dark:text-white/50">Your tenant: {tenantName || '—'}</p>
+        <p className="text-[12px] text-zinc-500 dark:text-white/50">Your company: {companyName || '—'}</p>
       </div>
     </header>
   );

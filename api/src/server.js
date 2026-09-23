@@ -24,6 +24,7 @@ const cryptoSecrets = require('./crypto-secrets');
 const { processLeadCsvRecords } = require('./csv-leads');
 const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
 const { createLimiters } = require('./rate-limiters');
+const { detectLanguage, extractGstin } = require('./lead-enrichment');
 const metrics = require('./metrics');
 const errorTracking = require('./error-tracking');
 require('dotenv').config({ path: '../.env.production' });
@@ -32,7 +33,7 @@ require('dotenv').config({ path: '../.env.production' });
 // hardcoded, publicly-visible-in-source default whenever the env var was
 // unset or empty (e.g. a blank line in .env on the VPS) - not a crash, just
 // a quiet boot into a state where anyone who has read this file can forge
-// valid JWTs for any tenant/role, or decrypt anything encrypted with
+// valid JWTs for any role, or decrypt anything encrypted with
 // ENCRYPTION_KEY_BUF (stored LLM API keys, webhook secrets, etc). Fail fast
 // in production instead of ever booting on the insecure default.
 function requireSecretOrExit(envVarName, devDefault) {
@@ -62,7 +63,7 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 3001;
 
-// DB - Postgres with RLS
+// DB - Postgres.
 //
 // Pool sizing was previously left unset, which silently defaults to
 // node-postgres's built-in max of 10 - fine for one replica at low
@@ -80,29 +81,6 @@ const pool = new Pool({
   idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000,
   connectionTimeoutMillis: Number(process.env.DB_POOL_CONNECTION_TIMEOUT_MS) || 5000
 });
-
-// pool.query() picks an arbitrary connection out of the pool for every call,
-// so a session-scoped `set_config('app.tenant_id', ...)` on one pool.query()
-// and the RLS-protected query it's meant to scope on a *different*
-// pool.query() call can silently land on two different physical
-// connections under concurrent load - the tenant context would then not be
-// set on the connection actually running the query. FORCE ROW LEVEL
-// SECURITY (see postgres/migrate-force-rls.sql) makes that fail closed
-// (0 rows / a spurious error) rather than leak another tenant's data, but
-// it's still a bug. withTenantClient() checks out one dedicated client,
-// sets the tenant context on it, and runs every RLS-scoped query for this
-// operation on that same client, then releases it - use this (not `pool`
-// directly) for any query touching leads / content_assets /
-// content_variants / agent_runs.
-async function withTenantClient(tenantId, fn) {
-  const client = await pool.connect();
-  try {
-    await client.query('SELECT set_config($1,$2,false)', ['app.tenant_id', tenantId]);
-    return await fn(client);
-  } finally {
-    client.release();
-  }
-}
 
 // Redis
 const redisClient = redis.createClient({ url: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD}@redis:6379` });
@@ -252,7 +230,7 @@ async function callLLM({ connection, model, systemPrompt, userMessage }) {
 // Runs one agent for real and records the outcome (success or failure -
 // never silently swallowed) in agent_runs. Shared by the manual "Run Agent"
 // route and the internal auto-run-on-lead-intake route below.
-async function runAgentForProduct({ tenantId, productId, agentId, leadId, triggeredBy, triggerType, inputText }) {
+async function runAgentForProduct({ productId, agentId, leadId, triggeredBy, triggerType, inputText }) {
   const { rows: agentRows } = await pool.query(
     `SELECT a.id, a.model, a.system_prompt, lc.provider, lc.base_url, lc.api_key_encrypted
      FROM agents a JOIN llm_connections lc ON lc.id = a.llm_connection_id
@@ -271,14 +249,11 @@ async function runAgentForProduct({ tenantId, productId, agentId, leadId, trigge
     errorMsg = e.message;
   }
 
-  const rows = await withTenantClient(tenantId, async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO agent_runs (tenant_id, product_id, agent_id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [tenantId, productId, agentId, leadId || null, triggeredBy || null, triggerType, inputText, outputText, status, errorMsg]
-    );
-    return rows;
-  });
+  const { rows } = await pool.query(
+    `INSERT INTO agent_runs (product_id, agent_id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [productId, agentId, leadId || null, triggeredBy || null, triggerType, inputText, outputText, status, errorMsg]
+  );
   return rows[0];
 }
 
@@ -301,7 +276,7 @@ function internalMiddleware(req, res, next) {
   next();
 }
 
-// CORS - locked to this tenant's actual frontend domain(s), not left open to
+// CORS - locked to this app's actual frontend domain(s), not left open to
 // any origin. APP_DOMAIN covers the common case (one frontend); set
 // CORS_ALLOWED_ORIGINS (comma-separated, full origins incl. scheme) for
 // anything extra, e.g. a staging frontend or local dev.
@@ -376,13 +351,29 @@ const upload = multer({
 const csvUpload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
 // Helpers
-async function auditLog(tenant_id, user_id, action, resource_type, resource_id, req, result='SUCCESS', details={}) {
+async function auditLog(user_id, action, resource_type, resource_id, req, result='SUCCESS', details={}) {
   try {
     await pool.query(
-      `INSERT INTO audit_logs (tenant_id, user_id, action, resource_type, resource_id, ip_address, user_agent, result, details) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [tenant_id, user_id, action, resource_type, resource_id, req.ip, req.headers['user-agent'], result, JSON.stringify(details)]
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, ip_address, user_agent, result, details) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [user_id, action, resource_type, resource_id, req.ip, req.headers['user-agent'], result, JSON.stringify(details)]
     );
   } catch(e){ console.error('Audit log failed', e.message); }
+}
+
+// This app runs for exactly one company (see README.md "Hardening notes" -
+// multi-tenancy was removed; `company` is a singleton row created once by
+// POST /auth/signup). Small in-process cache (short TTL) rather than a
+// query on every request that needs is_premium/webhook_secret - it's read
+// far more often than it changes, and a few seconds of staleness on a
+// premium-flag/webhook-secret read is an acceptable trade for not hitting
+// Postgres on every single request that touches either.
+let companyCache = null, companyCacheAt = 0;
+async function getCompany({ fresh = false } = {}) {
+  if (!fresh && companyCache && (Date.now() - companyCacheAt) < 5000) return companyCache;
+  const { rows } = await pool.query('SELECT * FROM company ORDER BY created_at ASC LIMIT 1');
+  companyCache = rows[0] || null;
+  companyCacheAt = Date.now();
+  return companyCache;
 }
 
 // Per-role data-visibility flags (roles.can_view_revenue / max_history_days /
@@ -395,17 +386,17 @@ async function auditLog(tenant_id, user_id, action, resource_type, resource_id, 
 // req.user.can_view_revenue etc. wherever authMiddleware runs.
 // True if the caller's role is in `roles`, OR (when `flag` is given) their
 // per-role flag from the roles table is set - lets a role the hardcoded
-// list doesn't name still qualify if a tenant admin has granted it the
-// flag via PATCH /users/:userId/role, without loosening anyone else.
+// list doesn't name still qualify if an Admin has granted it the flag via
+// PATCH /users/:userId/role, without loosening anyone else.
 function roleOrFlag(roles, flag) {
   return (req, res, next) => {
     if (hasRoleOrFlag(req.user.role, roles, flag && req.user[flag])) return next();
-    auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
+    auditLog(req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
     return res.status(403).json({ error: 'Forbidden - role not allowed' });
   };
 }
 
-// Auth middleware - JWT + tenant + role
+// Auth middleware - JWT + role
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ error: 'No token' });
@@ -422,7 +413,7 @@ function authMiddleware(req, res, next) {
 function rbacMiddleware(allowedRoles) {
   return (req, res, next) => {
     if (!allowedRoles.includes(req.user.role)) {
-      auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
+      auditLog(req.user.id, 'RBAC_BLOCKED', 'api', null, req, 'BLOCKED', { attempted: req.path, role: req.user.role });
       return res.status(403).json({ error: 'Forbidden - role not allowed' });
     }
     next();
@@ -475,7 +466,7 @@ app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     await redisClient.ping();
-    res.json({ status: 'ok', service: 'api', timestamp: new Date().toISOString(), tenant_mode: 'multitenant', version: '4.0.0-secure-vps' });
+    res.json({ status: 'ok', service: 'api', timestamp: new Date().toISOString(), company_mode: 'single-company', version: '5.0.0-single-company' });
   } catch(e){
     res.status(500).json({ status: 'error', error: e.message });
   }
@@ -499,11 +490,11 @@ app.post('/auth/login', authLimiter, async (req, res) => {
     const user = rows[0];
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
-      await auditLog(user.tenant_id, user.id, 'LOGIN_FAILED', 'auth', null, req, 'FAILED');
+      await auditLog(user.id, 'LOGIN_FAILED', 'auth', null, req, 'FAILED');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     if (user.disabled) {
-      await auditLog(user.tenant_id, user.id, 'LOGIN_DISABLED', 'auth', null, req, 'BLOCKED');
+      await auditLog(user.id, 'LOGIN_DISABLED', 'auth', null, req, 'BLOCKED');
       return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
     }
     // Applies to any user with 2FA enabled, not just Super Admin/IT Admin -
@@ -514,14 +505,14 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       if (!totp) return res.status(401).json({ error: '2FA required', need_2fa: true });
       const totpValid = user.two_fa_secret && authenticator.check(String(totp).replace(/\s+/g, ''), user.two_fa_secret);
       if (!totpValid) {
-        await auditLog(user.tenant_id, user.id, 'LOGIN_2FA_FAILED', 'auth', null, req, 'FAILED');
+        await auditLog(user.id, 'LOGIN_2FA_FAILED', 'auth', null, req, 'FAILED');
         return res.status(401).json({ error: 'Invalid 2FA code' });
       }
     }
     const claims = userClaims(user);
     const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
     const refresh = jwt.sign({ id: user.id, type: 'refresh' }, JWT_SECRET_VALUE, { expiresIn: '7d' });
-    await auditLog(user.tenant_id, user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
+    await auditLog(user.id, 'LOGIN_SUCCESS', 'auth', user.id, req, 'SUCCESS');
     res.json({ token, refresh, user: claims });
   } catch(e){ serverError(res, e); }
 });
@@ -535,14 +526,17 @@ app.get('/auth/signup-status', async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
-// Auth - Signup (bootstraps the very first Super Admin + their tenant only)
+// Auth - Signup (bootstraps the very first Super Admin + the one `company`
+// row this whole app runs as - see README.md "Hardening notes" on removing
+// multi-tenancy: this app is single-company now, so this route creates
+// that company exactly once instead of a new tenant per signup).
 // This is NOT general self-service registration - every subsequent user is
-// created by a tenant admin via POST /users. Two independent gates:
+// created by an Admin via POST /users. Two independent gates:
 //   1. SIGNUP_ENABLED=false in the environment disables it outright.
 //   2. Even left enabled, system_flags.signup_used is claimed atomically via
 //      INSERT ... ON CONFLICT DO NOTHING - only the first request to win
-//      that race can ever create an account here, so forgetting to flip
-//      SIGNUP_ENABLED off can't mint a second Super Admin.
+//      that race can ever create an account (and the company row) here, so
+//      forgetting to flip SIGNUP_ENABLED off can't mint a second company.
 app.post('/auth/signup', authLimiter, async (req, res) => {
   if (process.env.SIGNUP_ENABLED === 'false') {
     return res.status(403).json({ error: 'Signup is disabled' });
@@ -560,35 +554,47 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
     );
     if (!claim.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Signup already used — an account already exists. Ask your Super Admin to create yours.' });
+      return res.status(403).json({ error: 'Signup already used — an account already exists. Ask your Admin to create yours.' });
     }
 
-    const tenantName = company_name || 'Default Tenant';
-    const subdomain = tenantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-+|-+$)/g, '').slice(0, 90) || 'default';
+    const companyName = company_name || 'My Company';
     const webhookSecret = crypto.randomBytes(24).toString('hex');
-    const tenantRows = await client.query(
-      `INSERT INTO tenants (name, subdomain, plan, is_premium, webhook_secret) VALUES ($1,$2,'premium',true,$3) RETURNING id`,
-      [tenantName, subdomain, webhookSecret]
-    );
-    const tenantId = tenantRows.rows[0].id;
+    // ON CONFLICT DO NOTHING here is a belt-and-braces guard, not the
+    // actual race protection (system_flags.signup_used above is) - it just
+    // means a `company` row seeded by migrate-remove-multitenancy.sql
+    // (collapsing an existing multi-tenant database) is left alone rather
+    // than duplicated if signup somehow still ran after that.
+    const existingCompany = await client.query('SELECT id FROM company LIMIT 1');
+    let companyId;
+    if (existingCompany.rows.length) {
+      companyId = existingCompany.rows[0].id;
+      await client.query('UPDATE company SET name=$1 WHERE id=$2', [companyName, companyId]);
+    } else {
+      const companyRows = await client.query(
+        `INSERT INTO company (name, is_premium, webhook_secret) VALUES ($1,true,$2) RETURNING id`,
+        [companyName, webhookSecret]
+      );
+      companyId = companyRows.rows[0].id;
+    }
 
     const roleRow = await client.query(`SELECT * FROM roles WHERE name='SUPER_ADMIN'`);
     const r = roleRow.rows[0];
     const password_hash = await bcrypt.hash(password, 12);
     const userRows = await client.query(
-      `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
-       VALUES ($1,$2,$3,'SUPER_ADMIN',$4,$5,$6,$7)
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content`,
-      [tenantId, email, password_hash, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
+      `INSERT INTO users (email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
+       VALUES ($1,$2,'SUPER_ADMIN',$3,$4,$5,$6)
+       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content`,
+      [email, password_hash, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
     );
     const user = userRows.rows[0];
 
     await client.query(
-      `INSERT INTO audit_logs (tenant_id, user_id, action, resource_type, resource_id, ip_address, user_agent, result, details) VALUES ($1,$2,'SIGNUP_FIRST_ADMIN','user',$2,$3,$4,'SUCCESS',$5)`,
-      [tenantId, user.id, req.ip, req.headers['user-agent'], JSON.stringify({ email })]
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, ip_address, user_agent, result, details) VALUES ($1,'SIGNUP_FIRST_ADMIN','user',$1,$2,$3,'SUCCESS',$4)`,
+      [user.id, req.ip, req.headers['user-agent'], JSON.stringify({ email, company_id: companyId })]
     );
 
     await client.query('COMMIT');
+    companyCache = null; // force a fresh read next time getCompany() is called
 
     const claims = userClaims(user);
     const token = jwt.sign(claims, JWT_SECRET_VALUE, { expiresIn: '15m' });
@@ -596,7 +602,7 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
     res.json({ token, refresh, user: claims });
   } catch(e) {
     await client.query('ROLLBACK');
-    if (e.code === '23505') return res.status(409).json({ error: 'That email or company name is already taken' });
+    if (e.code === '23505') return res.status(409).json({ error: 'That email is already taken' });
     serverError(res, e);
   } finally {
     client.release();
@@ -656,7 +662,7 @@ app.post('/auth/2fa/verify', authMiddleware, authLimiter, async (req, res) => {
     const valid = authenticator.check(String(token).replace(/\s+/g, ''), rows[0].two_fa_secret);
     if (!valid) return res.status(401).json({ error: 'Invalid code' });
     await pool.query('UPDATE users SET two_fa_enabled=true WHERE id=$1', [req.user.id]);
-    await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
+    await auditLog(req.user.id, 'ENABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
     res.json({ message: '2FA enabled' });
   } catch(e){ serverError(res, e); }
 });
@@ -673,7 +679,7 @@ app.post('/auth/2fa/disable', authMiddleware, authLimiter, async (req, res) => {
     const ok = await bcrypt.compare(password, rows[0].password_hash);
     if (!ok) return res.status(401).json({ error: 'Incorrect password' });
     await pool.query('UPDATE users SET two_fa_enabled=false, two_fa_secret=NULL WHERE id=$1', [req.user.id]);
-    await auditLog(req.user.tenant_id, req.user.id, 'DISABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
+    await auditLog(req.user.id, 'DISABLE_2FA', 'user', req.user.id, req, 'SUCCESS', {});
     res.json({ message: '2FA disabled' });
   } catch(e){ serverError(res, e); }
 });
@@ -686,41 +692,18 @@ app.get('/auth/2fa/status', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
-// Tenant columns safe to return to any authenticated user. webhook_secret is
-// deliberately excluded here — it's a bearer credential (anyone who has it
-// can post fake leads into this tenant), so it's only ever returned by the
-// dedicated /integrations/webhook-urls route below, gated to roles that can
-// manage integrations.
-const TENANT_PUBLIC_COLUMNS = 'id, name, subdomain, plan, is_premium, created_at';
-
-// Tenants - Create (Super Admin only)
-app.post('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(schemas.createTenant), async (req, res) => {
-  const { name, subdomain, plan } = req.body;
+// Company - the one company this whole app runs as (see README.md
+// "Hardening notes" on removing multi-tenancy). Replaces the old
+// GET /tenants, POST /tenants, GET /tenants/me routes entirely - there is
+// nothing left to create/list/switch between. webhook_secret is
+// deliberately excluded here (it's a bearer credential - anyone who has it
+// can post fake leads), same as before; only GET /integrations/webhook-urls
+// (Admin-only) returns it.
+app.get('/company', authMiddleware, async (req, res) => {
   try {
-    const webhookSecret = crypto.randomBytes(24).toString('hex');
-    const { rows } = await pool.query(
-      `INSERT INTO tenants (name, subdomain, plan, is_premium, webhook_secret) VALUES ($1,$2,$3,$4,$5) RETURNING ${TENANT_PUBLIC_COLUMNS}`,
-      [name, subdomain, plan, plan==='premium', webhookSecret]
-    );
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_TENANT', 'tenant', rows[0].id, req, 'SUCCESS', { subdomain });
-    res.json(rows[0]);
-  } catch(e){ serverError(res, e); }
-});
-
-// Tenants - List all (Super Admin only)
-app.get('/tenants', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), async (req, res) => {
-  try {
-    const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants ORDER BY created_at DESC`);
-    res.json(rows);
-  } catch(e){ serverError(res, e); }
-});
-
-// Tenants - Get own tenant (any authenticated user)
-app.get('/tenants/me', authMiddleware, async (req, res) => {
-  try {
-    const { rows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants WHERE id=$1`, [req.user.tenant_id]);
-    if (!rows.length) return res.status(404).json({ error: 'Tenant not found' });
-    res.json(rows[0]);
+    const company = await getCompany();
+    if (!company) return res.status(404).json({ error: 'Company not set up yet' });
+    res.json({ id: company.id, name: company.name, is_premium: company.is_premium, created_at: company.created_at });
   } catch(e){ serverError(res, e); }
 });
 
@@ -751,12 +734,12 @@ app.get('/tenants/me', authMiddleware, async (req, res) => {
 app.get('/me/export', authMiddleware, async (req, res) => {
   try {
     const { rows: userRows } = await pool.query(
-      'SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE id=$1',
+      'SELECT id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE id=$1',
       [req.user.id]
     );
     if (!userRows.length) return res.status(404).json({ error: 'User not found' });
 
-    const { rows: tenantRows } = await pool.query(`SELECT ${TENANT_PUBLIC_COLUMNS} FROM tenants WHERE id=$1`, [req.user.tenant_id]);
+    const company = await getCompany();
 
     const { rows: memberships } = await pool.query(
       `SELECT pm.product_id, p.name AS product_name, pm.role, pm.created_at
@@ -765,28 +748,19 @@ app.get('/me/export', authMiddleware, async (req, res) => {
       [req.user.id]
     );
 
-    // RLS-protected tables - scoped through withTenantClient like every
-    // other query against them, filtered down to rows this user
-    // specifically authored/actioned rather than the whole tenant's data.
     const [assets, approvedVariants, runs, auditRows] = await Promise.all([
-      withTenantClient(req.user.tenant_id, (client) =>
-        client.query('SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at FROM content_assets WHERE uploaded_by=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.user.id, req.user.tenant_id])
-      ).then(r => r.rows),
-      withTenantClient(req.user.tenant_id, (client) =>
-        client.query('SELECT id, asset_id, channel, title, status, published_url, published_at, created_at FROM content_variants WHERE approved_by=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.user.id, req.user.tenant_id])
-      ).then(r => r.rows),
-      withTenantClient(req.user.tenant_id, (client) =>
-        client.query('SELECT id, product_id, agent_id, lead_id, trigger_type, status, created_at FROM agent_runs WHERE triggered_by=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 500', [req.user.id, req.user.tenant_id])
-      ).then(r => r.rows),
+      pool.query('SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at FROM content_assets WHERE uploaded_by=$1 ORDER BY created_at DESC', [req.user.id]).then(r => r.rows),
+      pool.query('SELECT id, asset_id, channel, title, status, published_url, published_at, created_at FROM content_variants WHERE approved_by=$1 ORDER BY created_at DESC', [req.user.id]).then(r => r.rows),
+      pool.query('SELECT id, product_id, agent_id, lead_id, trigger_type, status, created_at FROM agent_runs WHERE triggered_by=$1 ORDER BY created_at DESC LIMIT 500', [req.user.id]).then(r => r.rows),
       pool.query('SELECT id, action, resource_type, resource_id, result, created_at FROM audit_logs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500', [req.user.id]).then(r => r.rows)
     ]);
 
-    await auditLog(req.user.tenant_id, req.user.id, 'SELF_EXPORT_DATA', 'user', req.user.id, req, 'SUCCESS');
+    await auditLog(req.user.id, 'SELF_EXPORT_DATA', 'user', req.user.id, req, 'SUCCESS');
 
     res.json({
       exported_at: new Date().toISOString(),
       user: userRows[0],
-      tenant: tenantRows[0] || null,
+      company: company ? { name: company.name, is_premium: company.is_premium } : null,
       product_memberships: memberships,
       content_uploaded: assets,
       content_approved: approvedVariants,
@@ -807,32 +781,31 @@ app.post('/me/erase', authMiddleware, authLimiter, async (req, res) => {
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'password is required to confirm account erasure' });
   try {
-    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1 AND tenant_id=$2', [req.user.id, req.user.tenant_id]);
+    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     const ok = await bcrypt.compare(password, rows[0].password_hash);
     if (!ok) return res.status(401).json({ error: 'Incorrect password' });
 
-    // Refuse to erase the tenant's last usable account - not a GDPR
-    // exception, a plain operational one: erasing disables login, and a
-    // tenant with zero enabled accounts has no way back into this app at
-    // all. Same reasoning PATCH /users/:userId/status already applies to
-    // disabling yourself, applied here to this stricter, self-service
-    // action too.
+    // Refuse to erase the company's last usable account - not a GDPR
+    // exception, a plain operational one: erasing disables login, and zero
+    // enabled accounts means no way back into this app at all. Same
+    // reasoning PATCH /users/:userId/status already applies to disabling
+    // yourself, applied here to this stricter, self-service action too.
     const { rows: activeOthers } = await pool.query(
-      'SELECT COUNT(*)::int AS n FROM users WHERE tenant_id=$1 AND disabled=false AND id != $2',
-      [req.user.tenant_id, req.user.id]
+      'SELECT COUNT(*)::int AS n FROM users WHERE disabled=false AND id != $1',
+      [req.user.id]
     );
     if (activeOthers[0].n === 0) {
-      return res.status(400).json({ error: 'You are the only active account left in this tenant - have another admin created (or re-enabled) before erasing your own account.' });
+      return res.status(400).json({ error: 'You are the only active account left - have another admin created (or re-enabled) before erasing your own account.' });
     }
 
     const unusableHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
     const anonymizedEmail = `erased-${req.user.id}@erased.invalid`;
     await pool.query(
-      `UPDATE users SET email=$1, password_hash=$2, two_fa_secret=NULL, two_fa_enabled=false, disabled=true WHERE id=$3 AND tenant_id=$4`,
-      [anonymizedEmail, unusableHash, req.user.id, req.user.tenant_id]
+      `UPDATE users SET email=$1, password_hash=$2, two_fa_secret=NULL, two_fa_enabled=false, disabled=true WHERE id=$3`,
+      [anonymizedEmail, unusableHash, req.user.id]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'SELF_ERASE_ACCOUNT', 'user', req.user.id, req, 'SUCCESS');
+    await auditLog(req.user.id, 'SELF_ERASE_ACCOUNT', 'user', req.user.id, req, 'SUCCESS');
     res.json({ erased: true });
   } catch(e){ serverError(res, e); }
 });
@@ -848,39 +821,35 @@ app.get('/roles', authMiddleware, async (req, res) => {
 // Roles allowed to create/manage users, kept in sync with roles.can_manage_users
 const USER_MANAGER_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
 
-// Users - List within a tenant (own tenant; Super Admin may pass ?tenant_id= to inspect another tenant)
+// Users - List (single company - every user in the system)
 app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   try {
-    const targetTenant = (req.user.role === 'SUPER_ADMIN' && req.query.tenant_id) ? req.query.tenant_id : req.user.tenant_id;
-    const { rows } = await pool.query('SELECT id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users WHERE tenant_id=$1 ORDER BY created_at DESC', [targetTenant]);
+    const { rows } = await pool.query('SELECT id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users ORDER BY created_at DESC');
     res.json(rows);
   } catch(e){ serverError(res, e); }
 });
 
-// Users - Create within a tenant, role drives permissions (single source of truth: roles table)
-// Super Admin may pass tenant_id to seed the first user of a tenant they just created —
-// everyone else is locked to their own tenant regardless of what they send.
+// Users - Create, role drives permissions (single source of truth: roles table)
 app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(schemas.createUser), async (req, res) => {
-  const { email, password, role, tenant_id } = req.body;
+  const { email, password, role } = req.body;
   if (!email || !password || !role) return res.status(400).json({ error: 'email, password and role are required' });
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
   try {
-    const targetTenant = (req.user.role === 'SUPER_ADMIN' && tenant_id) ? tenant_id : req.user.tenant_id;
     const roleRow = await pool.query('SELECT * FROM roles WHERE name=$1', [role]);
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
     if (!canGrantRole(req.user.role, r.name)) {
-      await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', null, req, 'BLOCKED', { attempted: 'create SUPER_ADMIN user', role: req.user.role });
+      await auditLog(req.user.id, 'RBAC_BLOCKED', 'user', null, req, 'BLOCKED', { attempted: 'create SUPER_ADMIN user', role: req.user.role });
       return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
     }
     const password_hash = await bcrypt.hash(password, 12);
     const { rows } = await pool.query(
-      `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
-      [targetTenant, email, password_hash, r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
+      `INSERT INTO users (email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [email, password_hash, r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name, tenant_id: targetTenant });
+    await auditLog(req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name });
     res.json(rows[0]);
   } catch(e){
     if (e.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
@@ -888,7 +857,7 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
   }
 });
 
-// Users - Change an existing user's role (own tenant only, even for Super Admin)
+// Users - Change an existing user's role
 app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { role } = req.body;
@@ -898,25 +867,24 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     if (!roleRow.rows.length) return res.status(400).json({ error: `Unknown role: ${role}` });
     const r = roleRow.rows[0];
     if (!canGrantRole(req.user.role, r.name)) {
-      await auditLog(req.user.tenant_id, req.user.id, 'RBAC_BLOCKED', 'user', userId, req, 'BLOCKED', { attempted: 'promote to SUPER_ADMIN', role: req.user.role });
+      await auditLog(req.user.id, 'RBAC_BLOCKED', 'user', userId, req, 'BLOCKED', { attempted: 'promote to SUPER_ADMIN', role: req.user.role });
       return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
     }
     const { rows } = await pool.query(
       `UPDATE users SET role=$1, max_history_days=$2, can_view_revenue=$3, can_view_integrations=$4, can_approve_content=$5
-       WHERE id=$6 AND tenant_id=$7
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
-      [r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content, userId, req.user.tenant_id]
+       WHERE id=$6
+       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content, userId]
     );
-    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
-    await auditLog(req.user.tenant_id, req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    await auditLog(req.user.id, 'CHANGE_USER_ROLE', 'user', userId, req, 'SUCCESS', { role: r.name });
     res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
 
-// Users - Enable/disable an account (own tenant only). A disabled user is
-// rejected at POST /auth/login regardless of correct credentials/2FA. A
-// manager can't disable their own account (would lock a tenant with a
-// single admin out with no recovery path).
+// Users - Enable/disable an account. A manager can't disable their own
+// account (would lock the company with a single admin out with no
+// recovery path).
 app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { disabled } = req.body;
@@ -924,20 +892,20 @@ app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_MANAGER_R
   if (userId === req.user.id) return res.status(400).json({ error: 'You cannot disable your own account' });
   try {
     const { rows } = await pool.query(
-      `UPDATE users SET disabled=$1 WHERE id=$2 AND tenant_id=$3
-       RETURNING id, tenant_id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
-      [disabled, userId, req.user.tenant_id]
+      `UPDATE users SET disabled=$1 WHERE id=$2
+       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [disabled, userId]
     );
-    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
-    await auditLog(req.user.tenant_id, req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS');
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    await auditLog(req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS');
     res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
 
-// Users - Admin-driven password reset (own tenant only). There is no email
-// infrastructure in this system for a self-service "forgot password" flow,
-// so a tenant admin sets a new password directly on the user's behalf; the
-// user should be told to change it again after logging in.
+// Users - Admin-driven password reset. There is no email infrastructure in
+// this system for a self-service "forgot password" flow, so an Admin sets a
+// new password directly on the user's behalf; the user should be told to
+// change it again after logging in.
 app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { new_password } = req.body;
@@ -945,51 +913,51 @@ app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MA
   try {
     const password_hash = await bcrypt.hash(new_password, 12);
     const { rows } = await pool.query(
-      'UPDATE users SET password_hash=$1 WHERE id=$2 AND tenant_id=$3 RETURNING id, email',
-      [password_hash, userId, req.user.tenant_id]
+      'UPDATE users SET password_hash=$1 WHERE id=$2 RETURNING id, email',
+      [password_hash, userId]
     );
-    if (!rows.length) return res.status(404).json({ error: 'User not found in your tenant' });
-    await auditLog(req.user.tenant_id, req.user.id, 'RESET_USER_PASSWORD', 'user', userId, req, 'SUCCESS');
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    await auditLog(req.user.id, 'RESET_USER_PASSWORD', 'user', userId, req, 'SUCCESS');
     res.json({ success: true, email: rows[0].email });
   } catch(e){ serverError(res, e); }
 });
 
 // ===== Products/Services, per-product membership, channels, and Agents =====
-// Hierarchy: Super Admin creates Tenants (Standard/Premium, already existed
-// via POST /tenants). A Tenant Admin (SUPER_ADMIN/IT_ADMIN/DEPT_ADMIN - the
-// existing tenant-management roles) creates Products/Services and assigns a
-// user as that product's Admin. A Product Admin configures the product's
+// Single company, multi-product, multi-user: an Admin role (SUPER_ADMIN/
+// IT_ADMIN/DEPT_ADMIN) creates Products/Services and assigns a user as that
+// product's Admin - and, being an Admin, can see and manage every product
+// regardless of assignment. A Product Admin configures the product's
 // social channels and adds MEMBER users to run them (Standard plan) or
-// enables Agents (Premium plan only). Agent/LLM-connection definitions
-// themselves are Super-Admin-only, platform-wide, not tenant-scoped.
+// enables Agents (Premium plan only, company.is_premium). Agent/
+// LLM-connection definitions themselves are Super-Admin-only, platform-wide.
 
-const PRODUCT_TENANT_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+const PRODUCT_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
 const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
 
 async function getProductMembership(productId, userId) {
   const { rows } = await pool.query('SELECT role FROM product_members WHERE product_id=$1 AND user_id=$2', [productId, userId]);
   return rows.length ? rows[0].role : null;
 }
-// A tenant-wide admin role can administer any product in their tenant; a
-// product's own ADMIN member can administer just that one product.
+// A company-wide Admin role can administer any product; a product's own
+// ADMIN member can administer just that one product.
 async function canAdminProduct(req, productId) {
-  if (PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role)) return true;
+  if (PRODUCT_ADMIN_ROLES.includes(req.user.role)) return true;
   return (await getProductMembership(productId, req.user.id)) === 'ADMIN';
 }
 
-// Products - Create (Tenant Admin only). Pre-creates all 7 channel rows as
+// Products - Create (Admin only). Pre-creates all 7 channel rows as
 // 'not_configured', in the same transaction, so a product's full channel
 // set exists from the moment it's created rather than materializing rows
 // lazily the first time each one is individually configured.
-app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
+app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      'INSERT INTO products (tenant_id, name, description, created_by) VALUES ($1,$2,$3,$4) RETURNING *',
-      [req.user.tenant_id, name, description || null, req.user.id]
+      'INSERT INTO products (name, description, created_by) VALUES ($1,$2,$3) RETURNING *',
+      [name, description || null, req.user.id]
     );
     const product = rows[0];
     for (const channel of PRODUCT_CHANNELS) {
@@ -999,7 +967,7 @@ app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES)
       );
     }
     await client.query('COMMIT');
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_PRODUCT', 'product', product.id, req, 'SUCCESS', { name });
+    await auditLog(req.user.id, 'CREATE_PRODUCT', 'product', product.id, req, 'SUCCESS', { name });
     res.json(product);
   } catch(e) {
     await client.query('ROLLBACK');
@@ -1009,37 +977,38 @@ app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_TENANT_ADMIN_ROLES)
   }
 });
 
-// Products - List: Tenant Admin roles see every product in the tenant;
-// everyone else sees only products they're a member of.
+// Products - List: Admin roles see every product; everyone else sees only
+// products they're a member of ("Product can be assigned to a user, admin
+// can see all" - see README.md "Hardening notes").
 app.get('/products', authMiddleware, async (req, res) => {
   try {
-    const { rows } = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role)
-      ? await pool.query('SELECT * FROM products WHERE tenant_id=$1 ORDER BY created_at DESC', [req.user.tenant_id])
-      : await pool.query('SELECT p.* FROM products p JOIN product_members pm ON pm.product_id=p.id WHERE p.tenant_id=$1 AND pm.user_id=$2 ORDER BY p.created_at DESC', [req.user.tenant_id, req.user.id]);
+    const { rows } = PRODUCT_ADMIN_ROLES.includes(req.user.role)
+      ? await pool.query('SELECT * FROM products ORDER BY created_at DESC')
+      : await pool.query('SELECT p.* FROM products p JOIN product_members pm ON pm.product_id=p.id WHERE pm.user_id=$1 ORDER BY p.created_at DESC', [req.user.id]);
     res.json(rows);
   } catch(e){ serverError(res, e); }
 });
 
 app.get('/products/:id', authMiddleware, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const { rows } = await pool.query('SELECT * FROM products WHERE id=$1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
     const membershipRole = await getProductMembership(req.params.id, req.user.id);
-    if (!isTenantAdmin && !membershipRole) return res.status(403).json({ error: 'Not a member of this product' });
-    res.json(Object.assign({}, rows[0], { your_role: isTenantAdmin ? 'TENANT_ADMIN' : membershipRole }));
+    if (!isAdmin && !membershipRole) return res.status(403).json({ error: 'Not a member of this product' });
+    res.json(Object.assign({}, rows[0], { your_role: isAdmin ? 'ADMIN' : membershipRole }));
   } catch(e){ serverError(res, e); }
 });
 
-// Product members - list (Tenant Admin or any member of the product)
+// Product members - list (Admin or any member of the product)
 app.get('/products/:id/members', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query(
-      `SELECT pm.id, pm.role, pm.created_at, u.id as user_id, u.email, u.role as tenant_role
+      `SELECT pm.id, pm.role, pm.created_at, u.id as user_id, u.email, u.role as company_role
        FROM product_members pm JOIN users u ON u.id=pm.user_id WHERE pm.product_id=$1 ORDER BY pm.created_at`,
       [req.params.id]
     );
@@ -1048,36 +1017,28 @@ app.get('/products/:id/members', authMiddleware, async (req, res) => {
 });
 
 // Content - list a product's uploaded assets with their generated variants
-// nested underneath, newest first. There was previously no way at all to
-// read back what POST /content/upload and POST /content/:assetId/transform
-// had created (only a GET-less write pipeline) - the frontend's Content tab
-// (see renderProducts -> loadContent in frontend/index.html) is the first
-// consumer of this. Same membership check as GET /members: any member of
-// the product (or a tenant admin) can view; approving/uploading/generating
-// still go through their own, stricter checks on the write routes.
+// nested underneath, newest first. Same membership check as GET /members:
+// any member of the product (or an Admin) can view; approving/uploading/
+// generating still go through their own, stricter checks on the write routes.
 app.get('/products/:id/content', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
 
-    const assets = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query(
-        `SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at
-         FROM content_assets WHERE product_id=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 200`,
-        [req.params.id, req.user.tenant_id]
-      )
+    const assets = await pool.query(
+      `SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at
+       FROM content_assets WHERE product_id=$1 ORDER BY created_at DESC LIMIT 200`,
+      [req.params.id]
     );
     if (!assets.rows.length) return res.json([]);
 
     const assetIds = assets.rows.map(a => a.id);
-    const variants = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query(
-        `SELECT id, asset_id, channel, spec, title, status, published_url, publish_error, created_at
-         FROM content_variants WHERE asset_id = ANY($1::uuid[]) AND tenant_id=$2 ORDER BY created_at`,
-        [assetIds, req.user.tenant_id]
-      )
+    const variants = await pool.query(
+      `SELECT id, asset_id, channel, spec, title, status, published_url, publish_error, created_at
+       FROM content_variants WHERE asset_id = ANY($1::uuid[]) ORDER BY created_at`,
+      [assetIds]
     );
     const byAsset = {};
     for (const v of variants.rows) {
@@ -1087,41 +1048,42 @@ app.get('/products/:id/content', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
-// Product members - add/assign (Tenant Admin, to assign the first Product
-// Admin; or that product's existing Admin, to add MEMBER users)
+// Product members - add/assign (Admin, to assign the first Product Admin;
+// or that product's existing Admin, to add MEMBER users)
 app.post('/products/:id/members', authMiddleware, validate(schemas.addProductMember), async (req, res) => {
   const { user_id, role } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
   const memberRole = role === 'ADMIN' ? 'ADMIN' : 'MEMBER';
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can add members" });
-    const targetUser = await pool.query('SELECT id FROM users WHERE id=$1 AND tenant_id=$2', [user_id, req.user.tenant_id]);
-    if (!targetUser.rows.length) return res.status(400).json({ error: 'User not found in your tenant' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can add members" });
+    const targetUser = await pool.query('SELECT id FROM users WHERE id=$1', [user_id]);
+    if (!targetUser.rows.length) return res.status(400).json({ error: 'User not found' });
     const { rows } = await pool.query(
       `INSERT INTO product_members (product_id, user_id, role) VALUES ($1,$2,$3)
        ON CONFLICT (product_id, user_id) DO UPDATE SET role=EXCLUDED.role RETURNING *`,
       [req.params.id, user_id, memberRole]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'ADD_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id, role: memberRole });
+    await auditLog(req.user.id, 'ADD_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id, role: memberRole });
     res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
 
 app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can remove members" });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can remove members" });
     await pool.query('DELETE FROM product_members WHERE product_id=$1 AND user_id=$2', [req.params.id, req.params.userId]);
-    await auditLog(req.user.tenant_id, req.user.id, 'REMOVE_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id: req.params.userId });
+    await auditLog(req.user.id, 'REMOVE_PRODUCT_MEMBER', 'product', req.params.id, req, 'SUCCESS', { user_id: req.params.userId });
     res.json({ message: 'Removed' });
   } catch(e){ serverError(res, e); }
 });
 
-// Product channels - config storage only (no real per-platform posting yet -
-// see README). Product Admin (or Tenant Admin) manages these.
+// Product channels - config storage only (no real per-platform posting yet
+// except where channels.js actually implements one - see README). Product
+// Admin (or company-wide Admin) manages these.
 // Field definitions (no values) for every channel's config - the frontend
 // uses this to render the right credential form per channel instead of a
 // hardcoded free-text box. See api/src/channels.js for the real
@@ -1136,10 +1098,10 @@ app.get('/channels/spec', authMiddleware, (req, res) => {
 
 app.get('/products/:id/channels', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query('SELECT channel, status, config, updated_at FROM product_channels WHERE product_id=$1', [req.params.id]);
     // Secret fields (access tokens, SMTP passwords, ...) are encrypted at
     // rest but were never masked in the API response before - the frontend
@@ -1154,9 +1116,9 @@ app.post('/products/:id/channels', authMiddleware, validate(schemas.configureCha
   const { channel, config } = req.body;
   if (!PRODUCT_CHANNELS.includes(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can configure channels" });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can configure channels" });
 
     // The frontend leaves a secret field blank to mean "keep the value
     // that's already saved" (it never round-trips the decrypted value, so
@@ -1192,7 +1154,7 @@ app.post('/products/:id/channels', authMiddleware, validate(schemas.configureCha
        ON CONFLICT (product_id, channel) DO UPDATE SET config=EXCLUDED.config, status='configured', updated_at=NOW() RETURNING *`,
       [req.params.id, channel, JSON.stringify(mergedConfig)]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
+    await auditLog(req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
     res.json(Object.assign({}, rows[0], { config: channelsLib.maskChannelSecrets(channel, rows[0].config) }));
   } catch(e){ serverError(res, e); }
 });
@@ -1209,7 +1171,7 @@ app.post('/llm-connections', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), va
       'INSERT INTO llm_connections (name, provider, base_url, api_key_encrypted, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, provider, base_url, created_at',
       [name, provider, provider === 'openai_compatible' ? base_url : null, encryptSecret(api_key), req.user.id]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_LLM_CONNECTION', 'llm_connection', rows[0].id, req, 'SUCCESS', { provider });
+    await auditLog(req.user.id, 'CREATE_LLM_CONNECTION', 'llm_connection', rows[0].id, req, 'SUCCESS', { provider });
     res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
@@ -1242,7 +1204,7 @@ app.post('/agents', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), validate(sc
       'INSERT INTO agents (name, llm_connection_id, model, system_prompt, config, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
       [name, llm_connection_id, model || null, system_prompt || null, JSON.stringify(config || {}), req.user.id]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'CREATE_AGENT', 'agent', rows[0].id, req, 'SUCCESS', { name });
+    await auditLog(req.user.id, 'CREATE_AGENT', 'agent', rows[0].id, req, 'SUCCESS', { name });
     res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
@@ -1267,13 +1229,13 @@ app.patch('/agents/:id', authMiddleware, rbacMiddleware(['SUPER_ADMIN']), valida
 });
 
 // Product agents - which agents a (Premium-only) product has enabled.
-// Managed by that product's Admin or a Tenant Admin, same as channels/members.
+// Managed by that product's Admin or a company-wide Admin, same as channels/members.
 app.get('/products/:id/agents', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query('SELECT a.id, a.name, a.model FROM product_agents pa JOIN agents a ON a.id=pa.agent_id WHERE pa.product_id=$1', [req.params.id]);
     res.json(rows);
   } catch(e){ serverError(res, e); }
@@ -1283,25 +1245,25 @@ app.post('/products/:id/agents', authMiddleware, async (req, res) => {
   const { agent_id } = req.body;
   if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
   try {
-    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [req.user.tenant_id]);
-    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature — Standard-plan products run through human users instead' });
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const company = await getCompany();
+    if (!company || !company.is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature — Standard-plan products run through human users instead' });
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can enable agents" });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can enable agents" });
     const agent = await pool.query('SELECT id FROM agents WHERE id=$1 AND active=true', [agent_id]);
     if (!agent.rows.length) return res.status(400).json({ error: 'Unknown or inactive agent' });
     const { rows } = await pool.query(
       'INSERT INTO product_agents (product_id, agent_id) VALUES ($1,$2) ON CONFLICT (product_id, agent_id) DO NOTHING RETURNING *',
       [req.params.id, agent_id]
     );
-    await auditLog(req.user.tenant_id, req.user.id, 'ENABLE_PRODUCT_AGENT', 'product', req.params.id, req, 'SUCCESS', { agent_id });
+    await auditLog(req.user.id, 'ENABLE_PRODUCT_AGENT', 'product', req.params.id, req, 'SUCCESS', { agent_id });
     res.json(rows[0] || { message: 'Already enabled' });
   } catch(e){ serverError(res, e); }
 });
 
 app.delete('/products/:id/agents/:agentId', authMiddleware, async (req, res) => {
   try {
-    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only a Tenant Admin or this product's Admin can disable agents" });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can disable agents" });
     await pool.query('DELETE FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
     res.json({ message: 'Disabled' });
   } catch(e){ serverError(res, e); }
@@ -1318,22 +1280,20 @@ app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) =
   const { lead_id, input } = req.body;
   if (!lead_id && !input) return res.status(400).json({ error: 'lead_id or input is required' });
   try {
-    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [req.user.tenant_id]);
-    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature' });
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const company = await getCompany();
+    if (!company || !company.is_premium) return res.status(403).json({ error: 'Agents are a Premium-plan feature' });
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const enabled = await pool.query('SELECT id FROM product_agents WHERE product_id=$1 AND agent_id=$2', [req.params.id, req.params.agentId]);
     if (!enabled.rows.length) return res.status(400).json({ error: 'This agent is not enabled on this product' });
 
     let inputText = input || '';
     let leadId = null;
     if (lead_id) {
-      const lead = await withTenantClient(req.user.tenant_id, (client) =>
-        client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [lead_id, req.user.tenant_id])
-      );
-      if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
+      const lead = await pool.query('SELECT * FROM leads WHERE id=$1', [lead_id]);
+      if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
       const l = lead.rows[0];
       leadId = l.id;
       inputText = [
@@ -1347,10 +1307,10 @@ app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) =
     }
 
     const run = await runAgentForProduct({
-      tenantId: req.user.tenant_id, productId: req.params.id, agentId: req.params.agentId,
+      productId: req.params.id, agentId: req.params.agentId,
       leadId, triggeredBy: req.user.id, triggerType: 'manual', inputText
     });
-    await auditLog(req.user.tenant_id, req.user.id, 'RUN_AGENT', 'agent', req.params.agentId, req, run.status, { product_id: req.params.id, lead_id: leadId });
+    await auditLog(req.user.id, 'RUN_AGENT', 'agent', req.params.agentId, req, run.status, { product_id: req.params.id, lead_id: leadId });
     res.json(run);
   } catch(e){ serverError(res, e); }
 });
@@ -1359,15 +1319,13 @@ app.post('/products/:id/agents/:agentId/run', authMiddleware, async (req, res) =
 // what an agent actually said, not just that it was "enabled".
 app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) => {
   try {
-    const prod = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id]);
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isTenantAdmin = PRODUCT_TENANT_ADMIN_ROLES.includes(req.user.role);
-    if (!isTenantAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query(
-        'SELECT id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error, created_at FROM agent_runs WHERE product_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 50',
-        [req.params.id, req.params.agentId]
-      )
+    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const { rows } = await pool.query(
+      'SELECT id, lead_id, triggered_by, trigger_type, input_text, output_text, status, error, created_at FROM agent_runs WHERE product_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 50',
+      [req.params.id, req.params.agentId]
     );
     res.json(rows);
   } catch(e){ serverError(res, e); }
@@ -1376,32 +1334,27 @@ app.get('/products/:id/agents/:agentId/runs', authMiddleware, async (req, res) =
 // Internal, server-to-server only (see internalMiddleware) - Hermes calls
 // this after a lead lands, to actually run a Premium product's agent on it
 // instead of just logging "enrichment not yet implemented". Since inbound
-// webhooks are tenant+channel scoped, not product-scoped (there is no
-// per-product webhook URL - see README), this can only safely auto-route
-// when exactly one of the tenant's Premium products has that channel
-// configured with an enabled agent; anything more ambiguous is reported
-// back honestly instead of guessing.
+// webhooks are channel-scoped, not product-scoped (there is no per-product
+// webhook URL - see README), this can only safely auto-route when exactly
+// one Premium-gated product has that channel configured with an enabled
+// agent; anything more ambiguous is reported back honestly instead of
+// guessing.
 app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (req, res) => {
-  const { tenant_id } = req.body; // Hermes already has this on the queue payload that carried leadId here
-  if (!tenant_id) return res.status(400).json({ error: 'tenant_id is required' });
   try {
-    const { rows: leadRows } = await withTenantClient(tenant_id, (client) =>
-      client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.leadId, tenant_id])
-    );
-    if (!leadRows.length) return res.status(404).json({ error: 'Lead not found for that tenant' });
+    const { rows: leadRows } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.leadId]);
+    if (!leadRows.length) return res.status(404).json({ error: 'Lead not found' });
     const lead = leadRows[0];
 
-    const tenant = await pool.query('SELECT is_premium FROM tenants WHERE id=$1', [lead.tenant_id]);
-    if (!tenant.rows.length || !tenant.rows[0].is_premium) return res.json({ ran: false, reason: 'tenant is not on the Premium plan' });
+    const company = await getCompany();
+    if (!company || !company.is_premium) return res.json({ ran: false, reason: 'company is not on the Premium plan' });
 
     const candidates = await pool.query(
       `SELECT DISTINCT p.id AS product_id, pa.agent_id
        FROM products p
-       JOIN product_channels pc ON pc.product_id = p.id AND pc.channel = $2 AND pc.status = 'configured'
+       JOIN product_channels pc ON pc.product_id = p.id AND pc.channel = $1 AND pc.status = 'configured'
        JOIN product_agents pa ON pa.product_id = p.id
-       JOIN agents a ON a.id = pa.agent_id AND a.active = true
-       WHERE p.tenant_id = $1`,
-      [lead.tenant_id, lead.source_channel]
+       JOIN agents a ON a.id = pa.agent_id AND a.active = true`,
+      [lead.source_channel]
     );
     if (!candidates.rows.length) return res.json({ ran: false, reason: `no Premium product has "${lead.source_channel}" configured with an active agent enabled` });
     if (candidates.rows.length > 1) return res.json({ ran: false, reason: `${candidates.rows.length} products match this channel - auto-routing is ambiguous without per-product webhook URLs, run the agent manually from the product's Agents tab instead` });
@@ -1416,25 +1369,38 @@ app.post('/internal/leads/:leadId/auto-run-agent', internalMiddleware, async (re
     ].filter(Boolean).join('\n');
 
     const run = await runAgentForProduct({
-      tenantId: lead.tenant_id, productId: product_id, agentId: agent_id,
+      productId: product_id, agentId: agent_id,
       leadId: lead.id, triggeredBy: null, triggerType: 'auto_lead_intake', inputText
     });
     res.json({ ran: true, run_id: run.id, status: run.status });
   } catch(e){ serverError(res, e); }
 });
 
-// Leads - List (RLS enforced). Also enforces two per-role limits from the
-// roles table that were previously stored on every user row but never
-// actually read anywhere: max_history_days (how far back this role can see)
-// and can_view_revenue (whether value_inr is included at all).
+// Leads - List. Also enforces two per-role limits from the roles table that
+// were previously stored on every user row but never actually read
+// anywhere: max_history_days (how far back this role can see) and
+// can_view_revenue (whether value_inr is included at all). Optional
+// ?product_id= and ?channel= filters back the Leads screen's product-wise,
+// channel-filtered view (see README "Studio, Inbox, Leads").
 app.get('/leads', authMiddleware, async (req, res) => {
   try {
     const days = req.user.max_history_days;
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      (Number.isFinite(days) && days > 0)
-        ? client.query(`SELECT * FROM leads WHERE tenant_id=$1 AND created_at >= NOW() - ($2 || ' days')::interval ORDER BY created_at DESC LIMIT 100`, [req.user.tenant_id, days])
-        : client.query('SELECT * FROM leads WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100', [req.user.tenant_id])
-    );
+    const conditions = [];
+    const params = [];
+    if (Number.isFinite(days) && days > 0) {
+      params.push(days);
+      conditions.push(`created_at >= NOW() - ($${params.length} || ' days')::interval`);
+    }
+    if (req.query.product_id) {
+      params.push(req.query.product_id);
+      conditions.push(`product_id = $${params.length}`);
+    }
+    if (req.query.channel) {
+      params.push(req.query.channel);
+      conditions.push(`source_channel = $${params.length}`);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await pool.query(`SELECT * FROM leads ${where} ORDER BY created_at DESC LIMIT 200`, params);
     const out = req.user.can_view_revenue ? rows : rows.map(({ value_inr, ...rest }) => rest);
     res.json(out);
   } catch(e){ serverError(res, e); }
@@ -1442,21 +1408,17 @@ app.get('/leads', authMiddleware, async (req, res) => {
 
 // Leads - data subject export/erasure. Leads are external individuals
 // (prospects/contacts) with no login of their own - if one of them emails
-// the tenant asking "what do you have on me" or "delete my data", a
-// tenant manager handles it on their behalf through these two routes
-// rather than the lead being able to self-serve like a `users` row can
-// via GET/POST /me/*.
+// asking "what do you have on me" or "delete my data", a manager handles it
+// on their behalf through these two routes rather than the lead being able
+// to self-serve like a `users` row can via GET/POST /me/*.
 app.get('/leads/:id/export', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   try {
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('SELECT * FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id])
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
-    const { rows: runs } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('SELECT id, agent_id, product_id, trigger_type, status, created_at FROM agent_runs WHERE lead_id=$1 AND tenant_id=$2 ORDER BY created_at DESC', [req.params.id, req.user.tenant_id])
-    );
-    await auditLog(req.user.tenant_id, req.user.id, 'EXPORT_LEAD_DATA', 'lead', req.params.id, req, 'SUCCESS');
-    res.json({ exported_at: new Date().toISOString(), lead: rows[0], agent_runs: runs });
+    const { rows } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Lead not found' });
+    const { rows: runs } = await pool.query('SELECT id, agent_id, product_id, trigger_type, status, created_at FROM agent_runs WHERE lead_id=$1 ORDER BY created_at DESC', [req.params.id]);
+    const { rows: messages } = await pool.query('SELECT id, direction, channel, body, sent_by, created_at FROM lead_messages WHERE lead_id=$1 ORDER BY created_at', [req.params.id]);
+    await auditLog(req.user.id, 'EXPORT_LEAD_DATA', 'lead', req.params.id, req, 'SUCCESS');
+    res.json({ exported_at: new Date().toISOString(), lead: rows[0], agent_runs: runs, messages });
   } catch(e){ serverError(res, e); }
 });
 
@@ -1464,35 +1426,63 @@ app.get('/leads/:id/export', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES),
 // row: agent_runs.lead_id references leads(id) with no ON DELETE clause
 // (default NO ACTION), so a lead with any agent run against it can't be
 // hard-deleted without breaking that foreign key - and even where it
-// could be, deleting the row entirely would also destroy the
-// non-personal aggregate fields (source_channel/status/value_inr) a
-// tenant legitimately keeps for its own reporting once the personal
-// identifiers are gone. pii_erased_at (see postgres/migrate-gdpr-erasure.sql)
-// is the durable record of when this happened, since a NULL column alone
-// doesn't prove erasure was ever actually requested/performed versus the
-// field simply never being filled in.
+// could be, deleting the row entirely would also destroy the non-personal
+// aggregate fields (source_channel/status/value_inr) legitimately kept for
+// reporting once the personal identifiers are gone. pii_erased_at is the
+// durable record of when this happened.
 app.delete('/leads/:id', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
   try {
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query(
-        `UPDATE leads SET contact_name=NULL, phone=NULL, email=NULL, company_name=NULL, pii_erased_at=NOW()
-         WHERE id=$1 AND tenant_id=$2 AND pii_erased_at IS NULL RETURNING id, pii_erased_at`,
-        [req.params.id, req.user.tenant_id]
-      )
+    const { rows } = await pool.query(
+      `UPDATE leads SET contact_name=NULL, phone=NULL, email=NULL, company_name=NULL, pii_erased_at=NOW()
+       WHERE id=$1 AND pii_erased_at IS NULL RETURNING id, pii_erased_at`,
+      [req.params.id]
     );
     if (rows.length) {
-      await auditLog(req.user.tenant_id, req.user.id, 'ERASE_LEAD_PII', 'lead', req.params.id, req, 'SUCCESS');
+      await auditLog(req.user.id, 'ERASE_LEAD_PII', 'lead', req.params.id, req, 'SUCCESS');
       return res.json({ erased: true, already_erased: false, erased_at: rows[0].pii_erased_at });
     }
     // No row updated: either this lead doesn't exist, or it was already
     // erased by an earlier request - distinguish the two so a repeat
     // request (e.g. a retried client) gets an honest "already done"
     // instead of a misleading 404.
-    const { rows: existing } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('SELECT id, pii_erased_at FROM leads WHERE id=$1 AND tenant_id=$2', [req.params.id, req.user.tenant_id])
-    );
-    if (!existing.length) return res.status(404).json({ error: 'Lead not found in your tenant' });
+    const { rows: existing } = await pool.query('SELECT id, pii_erased_at FROM leads WHERE id=$1', [req.params.id]);
+    if (!existing.length) return res.status(404).json({ error: 'Lead not found' });
     res.json({ erased: true, already_erased: true, erased_at: existing[0].pii_erased_at });
+  } catch(e){ serverError(res, e); }
+});
+
+// Leads - Inbox reply thread. GET returns the full message thread for a
+// lead (the Inbox/Leads screens' "provision for reply to lead messages" -
+// see README "Studio, Inbox, Leads"); POST records an outbound reply. This
+// is a real record of what was sent, not an actual send through
+// WhatsApp/email/etc APIs - see channels.js for which channels this app can
+// really publish through; a reply here is the same honest scope as the
+// rest of this app's channel integrations.
+app.get('/leads/:id/messages', authMiddleware, async (req, res) => {
+  try {
+    const lead = await pool.query('SELECT id FROM leads WHERE id=$1', [req.params.id]);
+    if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    const { rows } = await pool.query(
+      `SELECT lm.id, lm.direction, lm.channel, lm.body, lm.sent_by, u.email AS sent_by_email, lm.created_at
+       FROM lead_messages lm LEFT JOIN users u ON u.id = lm.sent_by
+       WHERE lm.lead_id=$1 ORDER BY lm.created_at`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch(e){ serverError(res, e); }
+});
+
+app.post('/leads/:id/reply', authMiddleware, validate(schemas.replyToLead), async (req, res) => {
+  const { body, channel } = req.body;
+  try {
+    const lead = await pool.query('SELECT id, source_channel FROM leads WHERE id=$1', [req.params.id]);
+    if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    const { rows } = await pool.query(
+      `INSERT INTO lead_messages (lead_id, direction, channel, body, sent_by) VALUES ($1,'outbound',$2,$3,$4) RETURNING *`,
+      [req.params.id, channel || lead.rows[0].source_channel, body, req.user.id]
+    );
+    await auditLog(req.user.id, 'REPLY_TO_LEAD', 'lead', req.params.id, req, 'SUCCESS', { channel: rows[0].channel });
+    res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
 
@@ -1509,7 +1499,7 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
     }
     if (scan.isInfected) {
       fs.unlink(req.file.path, () => {});
-      await auditLog(req.user.tenant_id, req.user.id, 'VIRUS_DETECTED', 'csv_upload', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      await auditLog(req.user.id, 'VIRUS_DETECTED', 'csv_upload', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
       return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
     }
 
@@ -1521,22 +1511,38 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
     // csv-leads.js for the actual logic (extracted so it's unit
     // testable independent of this route's DB/file-system work).
     const { toInsert, valid, dup, invalid } = processLeadCsvRecords(records);
+    const productId = req.body.product_id || null;
 
-    // Insert with RLS - csv_uploads isn't RLS-protected but leads is, and
-    // both need to land on the same tenant-scoped connection as each other
-    // for consistency within this one upload.
     const uploadId = uuidv4();
-    await withTenantClient(req.user.tenant_id, async (client) => {
-      await client.query('INSERT INTO csv_uploads (id, tenant_id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [uploadId, req.user.tenant_id, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('INSERT INTO csv_uploads (id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [uploadId, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
       for (const row of toInsert.slice(0, 5000)) {
-        await client.query('INSERT INTO leads (tenant_id, company_name, contact_name, phone, email, source_channel, status, csv_upload_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [req.user.tenant_id, row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'csv_upload', 'NEW', uploadId]);
+        // Real, honest enrichment (see lead-enrichment.js): detects the
+        // inquiry's script/language and extracts+checksum-validates a
+        // GSTIN if one appears in the row's own text fields - not a
+        // government-registry lookup (this app has no paid API access for
+        // that), just structural detection on what was actually submitted.
+        const rawText = [row.company || row.company_name, row.contact_name || row.full_name || row.name, row.note].filter(Boolean).join(' ');
+        const gstinResult = extractGstin(rawText);
+        await client.query(
+          'INSERT INTO leads (company_name, contact_name, phone, email, source_channel, status, csv_upload_id, product_id, detected_language, gstin, gstin_valid) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+          [row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'csv_upload', 'NEW', uploadId, productId, detectLanguage(rawText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null]
+        );
       }
-    });
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
-    await auditLog(req.user.tenant_id, req.user.id, 'IMPORT_CSV', 'csv_upload', uploadId, req, 'SUCCESS', { rows_total: records.length, valid, dup, invalid, file: req.file.originalname });
+    await auditLog(req.user.id, 'IMPORT_CSV', 'csv_upload', uploadId, req, 'SUCCESS', { rows_total: records.length, valid, dup, invalid, file: req.file.originalname });
 
     // Push to Redis for Sarvam queue - language auto
-    await redisClient.lPush(`sarvam:queue:${req.user.tenant_id}`, JSON.stringify({ uploadId, valid, tenant_id: req.user.tenant_id }));
+    await redisClient.lPush('sarvam:queue', JSON.stringify({ uploadId, valid }));
 
     fs.unlink(req.file.path, () => {}); // temp CSV is fully parsed into the DB now, no need to keep it
     res.json({ uploadId, rows_total: records.length, rows_valid: valid, rows_duplicate: dup, rows_invalid: invalid, message: 'CSV imported, pushed to Inbox + Sarvam queue' });
@@ -1554,10 +1560,10 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     // error for an asset that was never associated with one.
     let productId = null;
     if (req.body.product_id) {
-      const prodCheck = await pool.query('SELECT id FROM products WHERE id=$1 AND tenant_id=$2', [req.body.product_id, req.user.tenant_id]);
+      const prodCheck = await pool.query('SELECT id FROM products WHERE id=$1', [req.body.product_id]);
       if (!prodCheck.rows.length) {
         fs.unlink(req.file.path, () => {});
-        return res.status(400).json({ error: 'product_id not found in your tenant' });
+        return res.status(400).json({ error: 'product_id not found' });
       }
       productId = req.body.product_id;
     }
@@ -1570,18 +1576,19 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
     }
     if (scan.isInfected) {
       fs.unlink(req.file.path, () => {});
-      await auditLog(req.user.tenant_id, req.user.id, 'VIRUS_DETECTED', 'content_asset', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      await auditLog(req.user.id, 'VIRUS_DETECTED', 'content_asset', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
       return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
     }
     const virusStatus = 'CLEAN';
 
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('INSERT INTO content_assets (tenant_id, uploaded_by, product_id, file_name, file_size, mime_type, s3_key, virus_scan_status, brand_kit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *', [req.user.tenant_id, req.user.id, productId, req.file.originalname, req.file.size, req.file.mimetype, req.file.path, virusStatus, JSON.stringify(req.body.brand_kit || {})])
+    const { rows } = await pool.query(
+      'INSERT INTO content_assets (uploaded_by, product_id, file_name, file_size, mime_type, s3_key, virus_scan_status, brand_kit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [req.user.id, productId, req.file.originalname, req.file.size, req.file.mimetype, req.file.path, virusStatus, JSON.stringify(req.body.brand_kit || {})]
     );
 
-    await auditLog(req.user.tenant_id, req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
+    await auditLog(req.user.id, 'UPLOAD_CONTENT', 'content_asset', rows[0].id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
 
-    res.json({ asset: rows[0], message: 'Uploaded. Call POST /content/:assetId/transform (or Products > Content > Generate Variants) to create per-channel variants.' });
+    res.json({ asset: rows[0], message: 'Uploaded. Call POST /content/:assetId/transform (or Studio > Generate Variants) to create per-channel variants.' });
   } catch(e){
     // The file already landed on disk (multer wrote it before this handler
     // even ran) - if anything past this point throws before a DB row
@@ -1600,9 +1607,7 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
   const { assetId } = req.params;
   const { channels } = req.body; // ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'] - must match PRODUCT_CHANNELS
   try {
-    const asset = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [assetId, req.user.tenant_id])
-    );
+    const asset = await pool.query('SELECT * FROM content_assets WHERE id=$1', [assetId]);
     if (!asset.rows.length) return res.status(404).json({ error: 'Asset not found' });
     if (!asset.rows[0].product_id) {
       return res.status(400).json({ error: 'This asset is not associated with a Product, so its variants could never be published. Re-upload it via a Product to generate variants.' });
@@ -1621,14 +1626,11 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
       'email': 'responsive HTML, hero 1200x600'
     };
 
-    const variants = await withTenantClient(req.user.tenant_id, async (client) => {
-      const out = [];
-      for (const ch of (channels || ['instagram','facebook'])) {
-        const { rows } = await client.query('INSERT INTO content_variants (asset_id, tenant_id, channel, spec, title, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [assetId, req.user.tenant_id, ch, specs[ch] || 'auto', `${ch} variant for ${asset.rows[0].file_name}`, 'PENDING_APPROVAL']);
-        out.push(rows[0]);
-      }
-      return out;
-    });
+    const variants = [];
+    for (const ch of (channels || ['instagram','facebook'])) {
+      const { rows } = await pool.query('INSERT INTO content_variants (asset_id, channel, spec, title, status) VALUES ($1,$2,$3,$4,$5) RETURNING *', [assetId, ch, specs[ch] || 'auto', `${ch} variant for ${asset.rows[0].file_name}`, 'PENDING_APPROVAL']);
+      variants.push(rows[0]);
+    }
 
     // Real, synchronous, per-channel resize via Paperclip - it has the
     // source file on the same shared `recordings` volume (by s3_key), so
@@ -1647,9 +1649,7 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.ok && data.status === 'transformed' && data.output) {
-          await withTenantClient(req.user.tenant_id, (client) =>
-            client.query('UPDATE content_variants SET s3_key=$1 WHERE id=$2 AND tenant_id=$3', [data.output, v.id, req.user.tenant_id])
-          );
+          await pool.query('UPDATE content_variants SET s3_key=$1 WHERE id=$2', [data.output, v.id]);
           v.s3_key = data.output;
         } else {
           console.log(`[transform] variant ${v.id} (${v.channel}): ${data.status || 'no response'}${data.reason ? ' - ' + data.reason : ''}`);
@@ -1659,7 +1659,7 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
       }
     }
 
-    await auditLog(req.user.tenant_id, req.user.id, 'TRANSFORM_CONTENT', 'content_asset', assetId, req, 'SUCCESS', { channels, variants: variants.length });
+    await auditLog(req.user.id, 'TRANSFORM_CONTENT', 'content_asset', assetId, req, 'SUCCESS', { channels, variants: variants.length });
 
     res.json({ variants, message: 'Transformed per channel spec, pending approval' });
   } catch(e){ serverError(res, e); }
@@ -1670,23 +1670,19 @@ app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SU
   const { variantId } = req.params;
   const { action, comment } = req.body; // APPROVE, REJECT, REQUEST_CHANGE
   try {
-    const { rows } = await withTenantClient(req.user.tenant_id, (client) =>
-      client.query('SELECT * FROM content_variants WHERE id=$1 AND tenant_id=$2', [variantId, req.user.tenant_id])
-    );
+    const { rows } = await pool.query('SELECT * FROM content_variants WHERE id=$1', [variantId]);
     if (!rows.length) return res.status(404).json({ error: 'Variant not found' });
 
     const newStatus = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'DRAFT'; // REQUEST_CHANGE, now zod-enforced above
-    await withTenantClient(req.user.tenant_id, async (client) => {
-      await client.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
-      await client.query('INSERT INTO approvals (tenant_id, variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5,$6)', [req.user.tenant_id, rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
-    });
+    await pool.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
+    await pool.query('INSERT INTO approvals (variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5)', [rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
 
     if (newStatus === 'APPROVED') {
       // Push to publisher queue - Hermes Publisher Agent (shared key, see note above)
-      await redisClient.lPush('publisher:queue', JSON.stringify({ variant_id: variantId, tenant_id: req.user.tenant_id }));
+      await redisClient.lPush('publisher:queue', JSON.stringify({ variant_id: variantId }));
     }
 
-    await auditLog(req.user.tenant_id, req.user.id, `${action}_CONTENT`, 'content_variant', variantId, req, 'SUCCESS', { comment });
+    await auditLog(req.user.id, `${action}_CONTENT`, 'content_variant', variantId, req, 'SUCCESS', { comment });
 
     res.json({ variant_id: variantId, status: newStatus, message: `Content ${newStatus}, ${newStatus==='APPROVED' ? 'queued for publishing to channel' : ''}` });
   } catch(e){ serverError(res, e); }
@@ -1696,30 +1692,21 @@ app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SU
 // this after an approved content_variant lands on the `publisher:queue`
 // Redis list, to actually post it through the real channel integration
 // (api/src/channels.js) instead of just logging a fake "Publishing variant
-// X" and fabricating a YouTube URL. tenant_id comes from the caller, same
-// reasoning as /internal/leads/:leadId/auto-run-agent - content_variants is
-// FORCE ROW LEVEL SECURITY'd, so it can't be looked up by id alone with no
-// tenant context, and Hermes already has tenant_id on the queue payload
-// that carried variantId here.
+// X" and fabricating a URL.
 app.post('/internal/content-variants/:variantId/publish', internalMiddleware, async (req, res) => {
-  const { tenant_id } = req.body;
-  if (!tenant_id) return res.status(400).json({ error: 'tenant_id is required' });
   const { variantId } = req.params;
   try {
-    const { variant, asset } = await withTenantClient(tenant_id, async (client) => {
-      const v = await client.query('SELECT * FROM content_variants WHERE id=$1 AND tenant_id=$2', [variantId, tenant_id]);
-      if (!v.rows.length) return {};
-      const a = await client.query('SELECT * FROM content_assets WHERE id=$1 AND tenant_id=$2', [v.rows[0].asset_id, tenant_id]);
-      return { variant: v.rows[0], asset: a.rows[0] };
-    });
-    if (!variant) return res.status(404).json({ error: 'Variant not found for that tenant' });
+    const v = await pool.query('SELECT * FROM content_variants WHERE id=$1', [variantId]);
+    if (!v.rows.length) return res.status(404).json({ error: 'Variant not found' });
+    const variant = v.rows[0];
+    const a = await pool.query('SELECT * FROM content_assets WHERE id=$1', [variant.asset_id]);
+    const asset = a.rows[0];
+
     if (variant.status !== 'APPROVED') return res.status(400).json({ error: `Variant is ${variant.status}, not APPROVED - nothing to publish` });
 
     async function fail(message) {
-      await withTenantClient(tenant_id, (client) =>
-        client.query(`UPDATE content_variants SET status='PUBLISH_FAILED', publish_error=$1 WHERE id=$2`, [message, variantId])
-      );
-      await auditLog(tenant_id, null, 'PUBLISH_CONTENT_FAILED', 'content_variant', variantId, req, 'FAILED', { channel: variant.channel, error: message });
+      await pool.query(`UPDATE content_variants SET status='PUBLISH_FAILED', publish_error=$1 WHERE id=$2`, [message, variantId]);
+      await auditLog(null, 'PUBLISH_CONTENT_FAILED', 'content_variant', variantId, req, 'FAILED', { channel: variant.channel, error: message });
       return res.status(502).json({ published: false, error: message });
     }
 
@@ -1729,7 +1716,7 @@ app.post('/internal/content-variants/:variantId/publish', internalMiddleware, as
 
     const channelRow = await pool.query('SELECT config, status FROM product_channels WHERE product_id=$1 AND channel=$2', [asset.product_id, variant.channel]);
     if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
-      return await fail(`Channel "${variant.channel}" is not configured on this product yet - configure it under Products > Channels first.`);
+      return await fail(`Channel "${variant.channel}" is not configured on this product yet - configure it under Studio > Channels first.`);
     }
 
     let config;
@@ -1771,34 +1758,32 @@ app.post('/internal/content-variants/:variantId/publish', internalMiddleware, as
       return await fail(e.message);
     }
 
-    await withTenantClient(tenant_id, (client) =>
-      client.query(
-        `UPDATE content_variants SET status='PUBLISHED', published_url=$1, published_at=NOW(), publish_error=NULL WHERE id=$2`,
-        [result.externalUrl || null, variantId]
-      )
+    await pool.query(
+      `UPDATE content_variants SET status='PUBLISHED', published_url=$1, published_at=NOW(), publish_error=NULL WHERE id=$2`,
+      [result.externalUrl || null, variantId]
     );
-    await auditLog(tenant_id, null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
+    await auditLog(null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
 
     res.json({ published: true, channel: variant.channel, external_id: result.externalId, external_url: result.externalUrl });
   } catch(e){ serverError(res, e); }
 });
 
-// Audit log - real rows only, scoped to the caller's own tenant. There was
-// no read route for this at all before (only INSERTs via auditLog()) - the
-// frontend was showing four entirely fabricated log lines instead.
+// Audit log - real rows only, company-wide. There was no read route for
+// this at all before (only INSERTs via auditLog()) - the frontend was
+// showing four entirely fabricated log lines instead.
 app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN', 'IT_ADMIN']), async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const { rows } = await pool.query(
-      'SELECT id, user_id, action, resource_type, resource_id, ip_address, result, details, created_at FROM audit_logs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2',
-      [req.user.tenant_id, limit]
+      'SELECT id, user_id, action, resource_type, resource_id, ip_address, result, details, created_at FROM audit_logs ORDER BY created_at DESC LIMIT $1',
+      [limit]
     );
     res.json(rows);
   } catch(e){ serverError(res, e); }
 });
 
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
-// Status/keys are read from this tenant's actual environment config — nothing here is simulated.
+// Status/keys are read from this app's actual environment config — nothing here is simulated.
 // A channel with no <CHANNEL>_API_KEY env var set is honestly reported as not_configured.
 const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
 
@@ -1825,12 +1810,12 @@ app.post('/integrations/reveal', authMiddleware, authLimiter, roleOrFlag(['SUPER
     if (!totp) return res.status(401).json({ error: '2FA code required', need_2fa: true });
     const valid = authenticator.check(String(totp).replace(/\s+/g, ''), rows[0].two_fa_secret);
     if (!valid) {
-      await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY_2FA_FAILED', 'integration', null, req, 'FAILED', { channel });
+      await auditLog(req.user.id, 'REVEAL_KEY_2FA_FAILED', 'integration', null, req, 'FAILED', { channel });
       return res.status(401).json({ error: 'Invalid 2FA code' });
     }
     const key = process.env[`${(channel || '').toUpperCase()}_API_KEY`];
     if (!key) return res.status(404).json({ error: `No API key configured for channel: ${channel}` });
-    await auditLog(req.user.tenant_id, req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
+    await auditLog(req.user.id, 'REVEAL_KEY', 'integration', null, req, 'SUCCESS', { channel });
     const domain = API_DOMAIN ? `https://${API_DOMAIN}` : '';
     res.json({ channel, api_key: key, webhook_url: `${domain}/webhooks/${channel}`, expires_in: 30 });
   } catch(e){ serverError(res, e); }
@@ -1838,46 +1823,50 @@ app.post('/integrations/reveal', authMiddleware, authLimiter, roleOrFlag(['SUPER
 
 app.post('/integrations/toggle', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   const { channel, enabled } = req.body;
-  await auditLog(req.user.tenant_id, req.user.id, 'TOGGLE_CHANNEL', 'integration', null, req, 'SUCCESS', { channel, enabled });
+  await auditLog(req.user.id, 'TOGGLE_CHANNEL', 'integration', null, req, 'SUCCESS', { channel, enabled });
   res.json({ channel, enabled, message: 'Channel toggled, logged' });
 });
 
-// Integrations - Webhook URLs for the caller's own tenant, one per channel.
-// Copy these into WhatsApp/Facebook/etc.'s webhook config. The secret is
+// Integrations - Webhook URLs, one per channel, for this one company. Copy
+// these into WhatsApp/Facebook/etc.'s webhook config. The secret is
 // embedded in the path (not a header) because most of these platforms only
 // let you configure a callback URL, not custom headers.
 app.get('/integrations/webhook-urls', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT webhook_secret FROM tenants WHERE id=$1', [req.user.tenant_id]);
-    if (!rows.length || !rows[0].webhook_secret) return res.status(404).json({ error: 'No webhook secret provisioned for this tenant yet — rotate one first' });
+    const company = await getCompany();
+    if (!company || !company.webhook_secret) return res.status(404).json({ error: 'No webhook secret provisioned yet — rotate one first' });
     const base = API_DOMAIN ? `https://${API_DOMAIN}` : '';
-    const secret = rows[0].webhook_secret;
-    const urls = INTEGRATION_CHANNELS.map(channel => ({ channel, url: `${base}/webhooks/${req.user.tenant_id}/${secret}/${channel}` }));
+    const urls = INTEGRATION_CHANNELS.map(channel => ({ channel, url: `${base}/webhooks/${company.webhook_secret}/${channel}` }));
     res.json({ urls });
   } catch(e){ serverError(res, e); }
 });
 
-// Integrations - Rotate this tenant's webhook secret (invalidates all previously issued URLs)
+// Integrations - Rotate the company's webhook secret (invalidates all previously issued URLs)
 app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   try {
+    const company = await getCompany();
+    if (!company) return res.status(404).json({ error: 'Company not set up yet' });
     const newSecret = crypto.randomBytes(24).toString('hex');
-    await pool.query('UPDATE tenants SET webhook_secret=$1 WHERE id=$2', [newSecret, req.user.tenant_id]);
-    await auditLog(req.user.tenant_id, req.user.id, 'ROTATE_WEBHOOK_SECRET', 'tenant', req.user.tenant_id, req, 'SUCCESS', {});
+    await pool.query('UPDATE company SET webhook_secret=$1 WHERE id=$2', [newSecret, company.id]);
+    companyCache = null;
+    await auditLog(req.user.id, 'ROTATE_WEBHOOK_SECRET', 'company', company.id, req, 'SUCCESS', {});
     res.json({ message: 'Webhook secret rotated. Update every configured channel URL with the new one.' });
   } catch(e){ serverError(res, e); }
 });
 
-// Webhook handlers - 7 channels, per-tenant + secret so inbound leads can be
-// safely attributed and persisted. Shared by both the main app (below) and
-// the separate webhook server on WEBHOOK_PORT.
+// Webhook handlers - 7 channels, secret-gated so inbound leads can be
+// safely accepted and persisted. Shared by both the main app (below) and
+// the separate webhook server on WEBHOOK_PORT. Runs the same real,
+// no-external-API lead enrichment (lead-enrichment.js) the CSV import path
+// does, on whatever free-text fields the webhook payload carries.
 async function handleInboundWebhook(req, res) {
-  const { tenantId, webhookSecret, channel } = req.params;
+  const { webhookSecret, channel } = req.params;
   if (!INTEGRATION_CHANNELS.includes(channel)) return res.status(404).json({ error: 'Unknown channel' });
   try {
-    const { rows } = await pool.query('SELECT id, webhook_secret FROM tenants WHERE id=$1', [tenantId]);
-    if (!rows.length || !rows[0].webhook_secret) return res.status(404).json({ error: 'Unknown tenant' });
+    const company = await getCompany();
+    if (!company || !company.webhook_secret) return res.status(404).json({ error: 'Webhooks not set up yet' });
     const provided = Buffer.from(webhookSecret || '');
-    const expected = Buffer.from(rows[0].webhook_secret);
+    const expected = Buffer.from(company.webhook_secret);
     if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
       return res.status(401).json({ error: 'Invalid webhook secret' });
     }
@@ -1887,37 +1876,46 @@ async function handleInboundWebhook(req, res) {
     const phone = sanitizeCSVValue(req.body.phone || '');
     const email = sanitizeCSVValue(req.body.email || '');
     const value_inr = Number(req.body.value) || 0;
+    const message = sanitizeCSVValue(req.body.message || req.body.note || req.body.text || '');
+    const productId = req.body.product_id || null;
 
-    const { leadId, isDuplicate } = await withTenantClient(tenantId, async (client) => {
-      const dup = await client.query(
-        `SELECT id FROM leads WHERE tenant_id=$1 AND ((phone<>'' AND phone=$2) OR (email<>'' AND email=$3)) LIMIT 1`,
-        [tenantId, phone, email]
-      );
-      const isDuplicate = dup.rows.length > 0;
-      const { rows } = await client.query(
-        `INSERT INTO leads (tenant_id, source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'NEW',$8) RETURNING id`,
-        [tenantId, channel, company_name, contact_name, phone, email, value_inr, isDuplicate]
-      );
-      return { leadId: rows[0].id, isDuplicate };
-    });
+    const enrichText = [company_name, contact_name, message].filter(Boolean).join(' ');
+    const gstinResult = extractGstin(enrichText);
 
-    await auditLog(tenantId, null, 'WEBHOOK_LEAD_RECEIVED', 'lead', leadId, req, 'SUCCESS', { channel, is_duplicate: isDuplicate });
-    // Notify Hermes for downstream enrichment (GSTIN lookup, language detection, etc.)
-    await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: leadId, tenant_id: tenantId, channel }));
+    const dup = await pool.query(
+      `SELECT id FROM leads WHERE (phone<>'' AND phone=$1) OR (email<>'' AND email=$2) LIMIT 1`,
+      [phone, email]
+    );
+    const isDuplicate = dup.rows.length > 0;
+    const insertResult = await pool.query(
+      `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid)
+       VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11) RETURNING id`,
+      [channel, company_name, contact_name, phone, email, value_inr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null]
+    );
+    const leadId = insertResult.rows[0].id;
+    if (message) {
+      await pool.query(
+        `INSERT INTO lead_messages (lead_id, direction, channel, body) VALUES ($1,'inbound',$2,$3)`,
+        [leadId, channel, message]
+      );
+    }
+
+    await auditLog(null, 'WEBHOOK_LEAD_RECEIVED', 'lead', leadId, req, 'SUCCESS', { channel, is_duplicate: isDuplicate });
+    // Notify Hermes for downstream processing (auto-run-agent, etc.)
+    await redisClient.lPush('webhook:incoming', JSON.stringify({ lead_id: leadId, channel }));
 
     res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate });
   } catch(e){ serverError(res, e); }
 }
 
-app.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
+app.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 
 // Hermes Agents status - Premium multiagent
 // Reports real rows only. An empty list is an honest "no agents registered yet",
 // not backfilled with a fabricated status list.
 app.get('/hermes/agents', authMiddleware, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM hermes_agents WHERE tenant_id=$1', [req.user.tenant_id]);
+    const { rows } = await pool.query('SELECT * FROM hermes_agents');
     res.json({ mode: process.env.HERMES_MODE || 'premium_multiagent', agents: rows });
   } catch(e){ serverError(res, e); }
 });
@@ -1969,13 +1967,13 @@ app.use((err, req, res, next) => {
   res.status(err && err.status ? err.status : 500).json({ error: 'Internal server error' });
 });
 
-const httpServer = app.listen(PORT, () => console.log(`OrgComms API secure v4 VPS running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));
+const httpServer = app.listen(PORT, () => console.log(`OrgComms API v5 (single-company) running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));
 
 // Webhook server separate
 const webhookApp = express();
 webhookApp.set('trust proxy', 1);
 webhookApp.use(express.json());
-webhookApp.post('/webhooks/:tenantId/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
+webhookApp.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 const webhookServer = webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));
 

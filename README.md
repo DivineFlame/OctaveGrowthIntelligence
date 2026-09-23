@@ -73,8 +73,8 @@ Fixed: docker-compose builds from ./api, ./hermes, ./paperclip locally, no exter
 
 ## First login
 
-There's no general signup — every user after the first is created by a
-tenant admin via the Admin panel (see below) — but `POST /auth/signup`
+There's no general signup — every user after the first is created by an
+admin via the Admin panel (see below) — but `POST /auth/signup`
 exists for exactly one purpose: creating the very first Super Admin without
 touching the database by hand.
 
@@ -95,7 +95,7 @@ removes the endpoint from your attack surface entirely, which is worth
 doing.
 
 Prefer not to expose a signup endpoint even briefly? `postgres/bootstrap-admin.sql`
-still exists as a fully offline alternative — create the first tenant + Super
+still exists as a fully offline alternative — create the company + Super
 Admin directly via SQL instead, with `SIGNUP_ENABLED=false` from the start.
 
 The frontend's API base URL is hardcoded in `frontend/index.html` as
@@ -103,20 +103,27 @@ The frontend's API base URL is hardcoded in `frontend/index.html` as
 field. If the API's domain ever changes, update that one constant and
 redeploy the frontend.
 
-## Tenants and users
+## Company and users
+
+This app runs as a single company - multi-product, multi-user (see
+"Hardening notes" below for the change that removed multi-tenancy
+entirely: there is exactly one `company` row, created once by
+`POST /auth/signup`/`bootstrap-admin.sql`, and no `tenant_id` anywhere in
+the schema or API any more).
 
 Once signed in, a user with `SUPER_ADMIN`, `IT_ADMIN`, or `DEPT_ADMIN` sees an
 **Admin** button (top-right):
-- **Super Admin** creates new tenants (name, subdomain, plan) under the
-  Tenants tab, then picks "Manage users" on a tenant to seed its first user
-  (this is the one case a role/tenant admin can create a user outside their
-  own tenant — every other tenant admin is restricted to their own tenant).
-- **IT_ADMIN / DEPT_ADMIN** (and Super Admin, for their own tenant) create
-  users and assign roles under the Users tab. Available roles come from the
+- **SUPER_ADMIN / IT_ADMIN / DEPT_ADMIN** create users and assign roles
+  under the Users tab (`GET`/`POST /users`). Available roles come from the
   `roles` table (`HR_ADMIN`, `SALES_LEAD`, `CONTENT_CREATOR`, `APPROVER`,
   `DEPT_ADMIN`, `IT_ADMIN`, `SUPER_ADMIN`) — a user's permission flags
   (history window, revenue/integrations visibility, approval rights) are
   derived from that role, not set ad hoc per user.
+- Every admin role sees and manages every user and every product company-
+  wide (`PRODUCT_ADMIN_ROLES` in the code - renamed from
+  `PRODUCT_TENANT_ADMIN_ROLES` when multi-tenancy was removed). A product
+  can additionally be assigned to specific non-admin users via
+  `product_members` - see "Products/Services and Agents" below.
 
 Access tokens expire after 15 minutes; the frontend transparently exchanges
 the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
@@ -128,25 +135,21 @@ expires.
 Run `postgres/migrate-products-agents.sql` once if your database predates
 this (same `docker exec ... psql` pattern as the other migrations).
 
-Full hierarchy, matching what was asked for:
+Full hierarchy - company-wide (single company, no tenant scoping):
 
-- **Super Admin** creates Tenants with a Standard or Premium plan (already
-  existed - `POST /tenants`, the `plan`/`is_premium` fields). Also the only
-  role that can create **LLM connections** (`POST /llm-connections` -
-  provider + API key, encrypted at rest with `ENCRYPTION_KEY` via
-  `encryptSecret()`/`decryptSecret()`, which had been provisioned since the
-  very first deploy but never actually used until now) and **Agents**
+- **Any Admin role** (`SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN`, collectively
+  `PRODUCT_ADMIN_ROLES` in the code) creates **Products/Services**
+  (`POST /products`) and assigns any user as that product's Admin
+  (`POST /products/:id/members` with `role: "ADMIN"`). `SUPER_ADMIN` is
+  also the only role that can create **LLM connections**
+  (`POST /llm-connections` - provider + API key, encrypted at rest with
+  `ENCRYPTION_KEY` via `encryptSecret()`/`decryptSecret()`) and **Agents**
   (`POST /agents` - name, which LLM connection, model, system prompt).
-- **Tenant Admin** (`SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN` - the existing
-  tenant-management roles, now also called `PRODUCT_TENANT_ADMIN_ROLES` in
-  the code) creates **Products/Services** under their tenant
-  (`POST /products`) and assigns a tenant user as that product's Admin
-  (`POST /products/:id/members` with `role: "ADMIN"`).
 - **Product/Service Admin** configures that product's social channels
   (`POST /products/:id/channels` - config storage only right now, see note
   below) and adds `MEMBER` users to run them (`POST /products/:id/members`
-  with `role: "MEMBER"`) — a Tenant Admin can do all of this too, for any
-  product in their tenant. Every product gets all 7 channels
+  with `role: "MEMBER"`) — any Admin role can do all of this too, for any
+  product company-wide. Every product gets all 7 channels
   (`whatsapp, facebook, instagram, linkedin, youtube, quora, email`)
   pre-created as `not_configured` the moment it's created (`POST /products`
   does this in the same transaction as the product insert) — they're
@@ -154,14 +157,14 @@ Full hierarchy, matching what was asked for:
   channel)`), so configuring one product's WhatsApp settings never touches
   another's.
 - **Agents on a product**: `POST /products/:id/agents` enables an
-  already-defined Agent on a product, gated to Premium tenants only (checks
-  `tenants.is_premium`) - a Standard-plan product can only ever be run by
-  human `MEMBER` users, matching what was asked for exactly.
+  already-defined Agent on a product, gated to the company's Premium plan
+  only (checks `company.is_premium`) - a Standard-plan product can only
+  ever be run by human `MEMBER` users, matching what was asked for exactly.
 
 Permission model: every product-scoped write (members/channels/agents)
-accepts either a Tenant Admin role or that specific product's own `ADMIN`
-member (`canAdminProduct()`) - a Product Admin manages their own product
-without needing any tenant-wide role.
+accepts either a company-wide Admin role or that specific product's own
+`ADMIN` member (`canAdminProduct()`) - a Product Admin manages their own
+product without needing a company-wide role.
 
 **What this does NOT do yet, on purpose:**
 - **No real social-media posting.** `product_channels.config` is just
@@ -211,15 +214,15 @@ goes through `openai_compatible`, which needs the connection's own
    (`POST /internal/leads/:leadId/auto-run-agent`, authenticated with a
    shared `INTERNAL_API_SECRET` rather than a user JWT, since there's no
    user session in that context) whenever a lead arrives. **Known,
-   documented limitation**: inbound webhooks are tenant+channel scoped, not
-   product-scoped (there's one webhook URL per channel per tenant, not per
-   product - see Webhooks below), so if more than one Premium product in a
-   tenant has the same channel configured with an agent enabled, this can't
-   safely guess which one should handle it and reports back why it didn't
-   run (visible in the hermes-orchestrator container logs) rather than
-   picking one arbitrarily. Works unambiguously today for the common case
-   of one product per channel; properly disambiguating multiple would need
-   product-scoped webhook URLs, which is a real but separate change.
+   documented limitation**: inbound webhooks are channel scoped, not
+   product-scoped (there's one webhook URL per channel company-wide - see
+   Webhooks below), so if more than one Premium product has the same
+   channel configured with an agent enabled, this can't safely guess which
+   one should handle it and reports back why it didn't run (visible in the
+   hermes-orchestrator container logs) rather than picking one arbitrarily.
+   Works unambiguously today for the common case of one product per
+   channel; properly disambiguating multiple would need product-scoped
+   webhook URLs, which is a real but separate change.
 
 Every real run (manual or automatic, success or failure) is recorded in the
 new `agent_runs` table - input sent, output received, or the real error
@@ -244,12 +247,12 @@ this whole feature area has more moving parts than a single safe edit.
 
 - **Products** button (session bar, next to Security - visible to everyone,
   since even a plain Member should see products they belong to) opens a
-  list: Tenant Admins see every product in the tenant and can create new
+  list: any Admin role sees every product company-wide and can create new
   ones; everyone else sees only products they're a member of. Selecting one
-  opens tabs for **Members** (add/remove, with a role picker - Tenant Admins
-  get a dropdown of real tenant users via `GET /users`; a Product Admin
-  without a tenant-wide role has to type a user's ID directly, since
-  `GET /users` is gated to tenant-wide admin roles and a Product Admin
+  opens tabs for **Members** (add/remove, with a role picker - an Admin
+  gets a dropdown of real company users via `GET /users`; a Product Admin
+  without a company-wide role has to type a user's ID directly, since
+  `GET /users` is gated to company-wide admin roles and a Product Admin
   usually isn't one), **Channels** (per-channel status + a config note - no
   real platform config UI yet, matching the backend), and **Agents** (enable/
   disable already-created agents - shows "Premium plan only" messaging when
@@ -258,17 +261,17 @@ this whole feature area has more moving parts than a single safe edit.
   create LLM connections (provider + API key, never redisplayed once saved)
   and Agents (name, connection, model, system prompt).
 
-### New-tenant onboarding wizard
+### Onboarding wizard
 
-Auto-triggers once, right after login, for a Tenant Admin whose tenant has
+Auto-triggers once, right after login, for an admin whose company has
 zero products yet (`GET /products` empty) — a 4-step modal: create the
 first Product/Service &rarr; assign its Product Admin (dropdown of real
-tenant users) &rarr; optionally configure one channel &rarr; done, with a
+company users) &rarr; optionally configure one channel &rarr; done, with a
 button straight into the Products panel. Skippable at every step; once
-skipped or once a product exists, it never appears again for that tenant
-(tracked in `localStorage`, keyed by tenant ID — clearing site data or
-switching browsers will show it again, which is harmless since it no-ops
-the moment a product already exists).
+skipped or once a product exists, it never appears again (tracked in
+`localStorage` — clearing site data or switching browsers will show it
+again, which is harmless since it no-ops the moment a product already
+exists).
 
 ## Studio, Leads, and Inbox (real data, not the original mockup)
 
@@ -295,10 +298,10 @@ All of that's gone:
   `POST /content/variants/:variantId/approve` for real, looping over every
   variant from that transform. The "Fetch Client Details" button is
   disabled and labeled accordingly — there's no Slack/Drive/Notion
-  integration in this codebase to honestly back it. The tenant switcher
-  (previously "Sharma Industries" / "Gupta Tools") now shows your one real
-  tenant, non-interactively — a JWT is scoped to exactly one tenant, so
-  there was never anything to actually switch between.
+  integration in this codebase to honestly back it. The former tenant
+  switcher (previously "Sharma Industries" / "Gupta Tools") is gone - this
+  app is a single company now (see "Hardening notes" below), so there is
+  nothing to switch between; the header just shows your one company's name.
 
 The Premium "Multiuser → Multiagent" comparison panel is unchanged — it's
 informational/marketing copy describing what the toggle does, not a data
@@ -307,28 +310,29 @@ display, so it was never "fake data" in the same sense as the rest.
 The bundle's own event handlers reach the real API via
 `window.__ORGCOMMS_API__` (path, opts) — exposed by the login/session
 script for exactly this purpose — and `window.__ORGCOMMS_SESSION__`,
-populated by the same pre-bundle script that seeds the initial tenant
+populated by the same pre-bundle script that seeds the initial company
 state. Neither existed before this pass; the compiled bundle previously
 had zero knowledge of the login gate's session.
 
-## Webhooks (per-tenant, so leads actually persist)
+## Webhooks (company-wide, channel-scoped, so leads actually persist)
 
 If your database already existed before this feature was added, run
 `postgres/migrate-webhook-secret.sql` once (same `docker exec ... psql`
 pattern as the bootstrap script) — it adds the `webhook_secret` column and
-backfills a real secret for every existing tenant.
+backfills a real secret (now on the singleton `company` row rather than
+per-tenant - see "Hardening notes" below on removing multi-tenancy).
 
 Inbound webhooks are URL-shaped as:
 
 ```
-POST /webhooks/<tenant_id>/<webhook_secret>/<channel>
+POST /webhooks/<webhook_secret>/<channel>
 ```
 
 `<channel>` is one of `whatsapp, facebook, instagram, linkedin, youtube,
 quora, email`. The secret is embedded in the path rather than a header
 because most of these platforms' webhook config UIs only accept a plain
 callback URL. A request with a wrong or missing secret gets `401`; an
-unknown tenant or channel gets `404`.
+unknown channel gets `404`.
 
 A `SUPER_ADMIN` or `IT_ADMIN` gets the exact URLs to paste into each
 channel's dashboard from the Admin panel's **Webhooks** tab (backed by
@@ -336,19 +340,20 @@ channel's dashboard from the Admin panel's **Webhooks** tab (backed by
 at once from the same tab if a URL ever leaks (`POST
 /integrations/webhook-secret/rotate`).
 
-A valid request is deduped (by phone/email against existing leads for that
-tenant) and inserted into `leads` directly — persistence no longer depends
-on the Hermes queue consumer being up. It also pushes a
-`{lead_id, tenant_id, channel}` notification onto `webhook:incoming`, which
+A valid request is deduped (by phone/email against existing leads) and
+inserted into `leads` directly — persistence no longer depends on the
+Hermes queue consumer being up. It also runs real lead enrichment
+(`api/src/lead-enrichment.js`) on any inbound message/note/text field -
+script-level language detection and GSTIN extraction/checksum validation -
+and writes an inbound `lead_messages` row, then pushes a
+`{lead_id, channel}` notification onto `webhook:incoming`, which
 `lead_intake` picks up to actually run a Premium product's agent on the
 lead now (see **Real agent execution** above) — when exactly one product
-unambiguously matches; GSTIN lookup, language detection, and similar
-enrichment beyond that are still not implemented.
+unambiguously matches.
 
-Because this URL is tenant+channel scoped rather than product-scoped, a
-tenant with two Premium products both configured on the same channel can't
-be automatically disambiguated for you today — see the auto-run limitation
-noted above.
+Because this URL is channel scoped rather than product-scoped, two Premium
+products both configured on the same channel can't be automatically
+disambiguated for you today — see the auto-run limitation noted above.
 
 ## Virus scanning (ClamAV)
 
@@ -422,7 +427,7 @@ keyed by client IP):
 | --- | --- |
 | `/auth/login`, `/auth/signup`, `/auth/refresh`, `/auth/2fa/verify`, `/auth/2fa/disable` | 10 / 15 min |
 | `/leads/upload-csv`, `/content/upload` | 10 / min |
-| `/webhooks/:tenantId/:webhookSecret/:channel` (both the main app and the separate webhook server) | 120 / min |
+| `/webhooks/:webhookSecret/:channel` (both the main app and the separate webhook server) | 120 / min |
 | everything else | 300 / min (global baseline) |
 
 This requires `app.set('trust proxy', 1)`, also added — without it, every
@@ -458,14 +463,14 @@ there was no way to lock a departed/compromised user out, and no way to
 recover a forgotten password.
 
 - **Disable/enable**: `PATCH /users/:userId/status { disabled: true|false }`
-  (Tenant Admin roles only, own tenant). A disabled user is rejected at
+  (Admin roles only). A disabled user is rejected at
   `POST /auth/login` with a 403, even with the correct password and 2FA
   code — no partial session is ever issued. A manager can't disable their
-  own account (prevents a single-admin tenant from locking itself out with
-  no recovery path). Wired up in the Admin panel's **Users** tab as a
-  per-row Disable/Enable button with a `disabled` badge next to the email.
+  own account (prevents locking the whole company out with no recovery
+  path). Wired up in the Admin panel's **Users** tab as a per-row
+  Disable/Enable button with a `disabled` badge next to the email.
 - **Password reset**: `POST /users/:userId/reset-password { new_password }`
-  (Tenant Admin roles only, own tenant). There's no email/SMS
+  (Admin roles only). There's no email/SMS
   infrastructure in this system for a self-service "forgot password" link,
   so an admin sets a new password directly; tell the user to change it
   again after they log in. Wired up as a **Reset Password** button per row
@@ -494,8 +499,8 @@ Two tiers, run differently, for a reason:
   `server.js` isn't in this tier.
 - **Integration tests** (`api/test/integration/routes.integration.js`):
   the same app's real routes, but driven against a **real** Postgres and
-  Redis - the things a mock genuinely cannot verify: that FORCE ROW LEVEL
-  SECURITY actually stops a cross-tenant `GET /leads`, that the
+  Redis - the things a mock genuinely cannot verify: that an admin sees
+  every product while an unassigned `MEMBER` sees none, that the
   `audit_logs` `no_update_audit` trigger actually rejects an `UPDATE`,
   that the Redis-backed rate limiter actually blocks a client after 10
   requests (not just that it fails open when Redis is unreachable - the
@@ -1157,7 +1162,7 @@ code changes were needed.
   one:
   - **Staff accounts (`users`).** `GET /me/export` lets any logged-in
     user download everything this app holds tied to their own account -
-    profile, tenant, product memberships, content they've uploaded or
+    profile, company, product memberships, content they've uploaded or
     approved, agent runs they triggered, and their own audit log entries
     - as JSON (Art. 15, right of access). `POST /me/erase` (password-
     confirmed, rate-limited like every other auth-adjacent route) is
@@ -1173,7 +1178,7 @@ code changes were needed.
     isn't the right move either. Erasure scrubs the email to an
     unguessable `erased-<id>@erased.invalid`, replaces the password hash
     with an unusable random one, clears 2FA, and disables login -
-    refused only if the caller is the tenant's last active account
+    refused only if the caller is the company's last active account
     (same reasoning `PATCH /users/:userId/status` already applies to
     disabling yourself, applied here to a stricter, self-service
     action). Both routes shipped with a UI, not just an API: a "My Data"
@@ -1183,7 +1188,7 @@ code changes were needed.
     password to confirm, then signs you out.
   - **Leads.** External individuals (prospects/contacts collected via
     webhook or CSV upload) have no login of their own, so if one emails
-    a tenant asking to see or delete their data, a tenant manager
+    the company asking to see or delete their data, an admin
     (`USER_MANAGER_ROLES`) now has `GET /leads/:id/export` and `DELETE
     /leads/:id` to act on their behalf. Deletion also anonymizes rather
     than removes the row, for the same foreign-key reason
@@ -1199,7 +1204,7 @@ code changes were needed.
     API-only, no new UI: this codebase has no leads *list* screen at
     all yet (leads only ever feed a count into a stat tile - see
     `frontend/app/src/App.jsx`), so building one from scratch was out of
-    scope for this change; a tenant manager runs these via `curl`/
+    scope for this change; an admin runs these via `curl`/
     Postman today, same as this app's other admin-only, UI-less routes.
 
   `server.js` isn't safely unit-testable as a whole (see "Added a real
@@ -1282,3 +1287,113 @@ code changes were needed.
   `node --check` on the extracted inline script, and regenerated the CSP
   sha256 hash in `nginx/orgcomms-vps.conf` (only the overlay's inline
   script hash changed; the app-shell script hashes were unaffected).
+- **Removed multi-tenancy entirely - this app is now a single company,
+  multi-product, multi-user.** The original design isolated many unrelated
+  companies ("tenants") behind Postgres RLS on one shared deployment; that
+  was never how this app is actually run (one deployment, one company), so
+  the whole `tenant_id`/`tenants`/RLS-isolation layer was dead weight and a
+  real attack surface (every `tenant_id`-scoped query, RLS policy, and JWT
+  claim was one more thing that had to be gotten right on every route,
+  every time - see the cross-tenant privilege-escalation entry above for
+  what happens when one of them wasn't).
+  - **Schema**: `tenants` is gone. A new singleton `company` table (exactly
+    one row, guaranteed by the same `system_flags.signup_used` atomic
+    race-gate that already guarded first-signup - see "First login" above)
+    replaces it; every route reads it with `getCompany()` (a 5-second
+    in-process cache) instead of the old `withTenantClient()`/RLS pattern.
+    `tenant_id` is dropped from every table that had it (`users`, `leads`,
+    `content_assets`, `content_variants`, `approvals`, `csv_uploads`,
+    `audit_logs`, `hermes_agents`, `products`, `agent_runs`), along with
+    every `tenant_isolation_*` RLS policy. `postgres/init-secure.sql` is
+    the fresh-install schema going forward;
+    `postgres/migrate-remove-multitenancy.sql` is the one-time upgrade
+    path for an existing multi-tenant database - it creates `company` and
+    seeds it from the existing `tenants` data (the oldest tenant's
+    name/webhook_secret becomes canonical; `is_premium` is `true` if *any*
+    existing tenant was premium, so no capability is silently lost in the
+    merge), drops every `tenant_id` column and RLS policy, and drops
+    `tenants` itself. **This is a one-way, data-merging migration** - if
+    your database currently has more than one tenant, their users/leads/
+    content all end up under one company with no way to split them back
+    apart afterwards. It runs automatically on every `api` container start
+    (last in `api/src/migrate.js`'s `MIGRATIONS_IN_ORDER`, since it depends
+    on every table every earlier migration creates) and is idempotent, but
+    back up your database first if you have real multi-tenant data today.
+    Every legacy migration file that references `tenant_id` (`migrate-
+    products-agents.sql`, `migrate-webhook-secret.sql`, `migrate-agent-
+    execution.sql`, `migrate-force-rls.sql`, `migrate-content-variants-
+    indexes.sql`) was updated to guard that reference behind an
+    `information_schema.columns` existence check, so they're safe no-ops
+    against a fresh single-company database instead of hard-failing with
+    "column tenant_id does not exist".
+  - **"Admin sees all, product can be assigned to a user"**: preserved
+    exactly via the existing `product_members` table (`ADMIN`/`MEMBER`
+    roles) and `PRODUCT_ADMIN_ROLES` (renamed from
+    `PRODUCT_TENANT_ADMIN_ROLES`) - `SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN`
+    see and manage every product company-wide; a plain `MEMBER` only sees
+    products they're explicitly assigned to.
+  - **API**: `POST`/`GET /tenants` and `GET /tenants/me` are gone; a new
+    `GET /company` route returns `{id, name, is_premium, created_at}`
+    (never `webhook_secret`). Webhook URLs dropped their tenant segment:
+    `/webhooks/<tenant_id>/<webhook_secret>/<channel>` became
+    `/webhooks/<webhook_secret>/<channel>` (both the main app and the
+    separate webhook server). `auditLog()` no longer takes a `tenant_id`
+    parameter (~40 call sites updated). `userClaims()` no longer puts
+    `tenant_id` in the JWT.
+  - **Frontend**: the Admin panel's entire "Tenants" tab (tenant list,
+    "Create Tenant" form, tenant picker for the Users tab) is removed -
+    there is nothing left to administer at that level. `session.tenant`
+    became `session.company` throughout `frontend/overlay.html` and the
+    React app (`App.jsx`, `Header.jsx`, `lib/api.js`'s `currentTenant()` ->
+    `currentCompany()`), including the pre-mount script that seeds
+    `window.__ORGCOMMS_TENANT__` -> `window.__ORGCOMMS_COMPANY__` before
+    either app renders (`frontend/app/scripts/assemble.js`). The onboarding-
+    dismissal `localStorage` key dropped its per-tenant-ID suffix (there's
+    only one company, so nothing to key it by). `npm run build` was rerun
+    to regenerate `frontend/index.html` and its hashed asset bundle from
+    the updated source, and the CSP `sha256-` hashes in
+    `nginx/orgcomms-vps.conf` were regenerated with
+    `scripts/gen-csp-hashes.sh` for the two inline `<script>` blocks whose
+    content changed (the pre-mount script and the overlay script).
+  - **Hermes**: `hermes/orchestrator.js` no longer forwards a `tenant_id`
+    it never actually needs - `runAgent()`'s internal API calls to `api`
+    now send an empty body, matching `server.js` no longer pushing
+    `tenant_id` onto either `publisher:queue` or `webhook:incoming`.
+  - **Lead enrichment** (see also the entry below): built as part of this
+    same pass, wired into both `POST /leads/upload-csv` and the inbound
+    webhook handler.
+  - **Quora**: evaluated for real outbound-publishing support (no public
+    API, no MCP server as of this writing) and is a final, permanent
+    decision, not an open gap - `product_channels` still lists it as a
+    configurable channel (for consistency with the other 6, and in case
+    Quora ships a public API later), but `api/src/channels.js` marks it
+    `implemented: false` and it is not expected to ever publish for real
+    without Quora shipping one.
+  - **Verified**: a clean fresh-install migration chain (11/11 files OK
+    against a brand-new database), a simulated upgrade path (seeded an old
+    multi-tenant database with a tenant/user/lead via raw SQL, ran the new
+    migration chain against it, and confirmed by direct query that
+    `company` correctly inherited the tenant's name/premium-flag/webhook-
+    secret, that the user and lead rows survived intact, that `tenants` is
+    fully gone, and that `leads` has the new columns with no `tenant_id`),
+    and the full test suites (unit + `api/test/integration/
+    routes.integration.js` against real Postgres/Redis, including a new
+    products/membership-visibility test proving an Admin sees every
+    product while an unassigned `MEMBER` sees none).
+- **Real lead enrichment: script-level language detection + GSTIN
+  extraction/validation.** New `api/src/lead-enrichment.js`, wired into
+  both `POST /leads/upload-csv` and the inbound webhook handler (any
+  message/note/text field on an inbound lead). `detectLanguage()` is
+  Unicode-range script matching (Devanagari, Bengali, Gurmukhi, Gujarati,
+  Odia, Tamil, Telugu, Kannada, Malayalam, Arabic script, else Latin ->
+  `en`, else `null`) - a real signal, but honestly documented as
+  script-level detection, not true NLP language identification (it can't
+  tell Hindi from Marathi, both Devanagari). `extractGstin()`/
+  `gstinChecksum()` implement the real 15-character GSTIN structural
+  format (2-digit state code + 10-char PAN + entity digit + fixed `Z` +
+  checksum) and its mod-36 checksum algorithm - this validates that a
+  GSTIN is *structurally well-formed*, not that it's actually registered
+  with the government (no paid registry API access available); `leads`
+  gained `detected_language`/`gstin`/`gstin_valid` columns and a new
+  `lead_messages` table records the inbound message itself, laying the
+  groundwork for the Leads panel's reply-thread UI.

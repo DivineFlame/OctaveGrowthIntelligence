@@ -119,9 +119,9 @@ export default function App() {
     <div className="min-h-screen bg-[#fbfaf8] px-4 py-6 dark:bg-[#0a0a0b] md:px-6 md:py-7">
       <div className="mx-auto max-w-[1200px]">
         <Header
-          tenantName={session.tenant ? session.tenant.name : ''}
+          companyName={session.company ? session.company.name : ''}
           userName={session.user ? session.user.email : ''}
-          premium={!!(session.tenant && session.tenant.is_premium)}
+          premium={!!(session.company && session.company.is_premium)}
         />
 
         {loading ? (

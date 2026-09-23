@@ -1,26 +1,28 @@
 'use strict';
 // Real Postgres + Redis integration tests - the class of bug that a unit
-// test mocking pg/redis literally cannot catch: RLS tenant isolation
-// actually blocking a cross-tenant read, a Postgres trigger actually
+// test mocking pg/redis literally cannot catch: a Postgres trigger actually
 // raising on an UPDATE, a Redis-backed rate limiter actually persisting a
-// count across separate HTTP requests, the real migration chain applying
-// cleanly against a real schema. Every other test file in this repo
-// injects a fake pg/redis client (see rate-limiters.test.js's own comment
-// on why - no real Redis/Postgres was available in the environment that
-// wrote them); this file is what closes that gap once real services are.
+// count across separate HTTP requests, the real migration chain (including
+// the multi-tenancy-removal migration) applying cleanly against a real
+// schema, "Admin sees every product / a regular user only their assigned
+// ones" actually holding at the database layer. Every other test file in
+// this repo injects a fake pg/redis client (see rate-limiters.test.js's own
+// comment on why - no real Redis/Postgres was available in the environment
+// that wrote them); this file is what closes that gap once real services
+// are available.
 //
 // NOT run by plain `npm test` - see package.json's separate
-// `test:integration` script and README's "Route/DB integration testing"
-// section for why (most dev machines and this repo's own sandboxed build
-// environment don't have a spare Postgres+Redis sitting around) and for
-// exactly how to run this when you do.
+// `test:integration` script and README's "Testing" section for why (most
+// dev machines and this repo's own sandboxed build environment don't have a
+// spare Postgres+Redis sitting around) and for exactly how to run this when
+// you do.
 //
 // Requires DATABASE_URL and REDIS_URL pointing at real, disposable
 // instances with this repo's schema already applied: postgres/init-secure.sql
 // once, then every postgres/migrate-*.sql in the order api/src/migrate.js
 // applies them (or just run `node src/migrate.js` against an
-// init-secure.sql'd database - that's exactly what this suite's own
-// CI job does, see .github/workflows/test.yml). Never point this at a
+// init-secure.sql'd database - that's exactly what this suite's own CI job
+// does, see .github/workflows/api-tests.yml). Never point this at a
 // database with real data - several of these tests are destructive by
 // design (that's the point: proving erasure/anonymization actually
 // happens, not just that a route returns 200).
@@ -30,7 +32,6 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { Client } = require('pg');
-const bcrypt = require('bcryptjs');
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const REDIS_URL = process.env.REDIS_URL;
@@ -141,8 +142,10 @@ function runSuite() {
     assert.equal(eleventh.status, 429, 'the 11th request in the window must be blocked by the real Redis-backed limiter');
   });
 
-  // ---- Signup: exercises the real atomic system_flags claim, not a mock
-  let tenantAId, userAId, tokenA;
+  // ---- Signup: exercises the real atomic system_flags claim AND the
+  // singleton `company` row this app now runs as (see README.md
+  // "Hardening notes" on removing multi-tenancy) - not a mock.
+  let userAId, tokenA;
   const SUPER_ADMIN_EMAIL = 'admin@integration-test.invalid';
   const SUPER_ADMIN_PASSWORD = 'a-genuinely-long-test-password-1';
 
@@ -152,7 +155,7 @@ function runSuite() {
     assert.equal(data.available, true);
   });
 
-  test('POST /auth/signup: creates the first Super Admin + tenant against a real database', async () => {
+  test('POST /auth/signup: creates the first Super Admin + the one company row against a real database', async () => {
     const { status, data } = await call('/auth/signup', {
       method: 'POST', ipTag: 2,
       body: { email: SUPER_ADMIN_EMAIL, password: SUPER_ADMIN_PASSWORD, company_name: 'Integration Test Co' }
@@ -160,12 +163,15 @@ function runSuite() {
     assert.equal(status, 200, JSON.stringify(data));
     assert.ok(data.token);
     assert.equal(data.user.role, 'SUPER_ADMIN');
+    assert.equal('tenant_id' in data.user, false, 'JWT claims must not carry a tenant_id any more');
     tokenA = data.token;
     userAId = data.user.id;
-    tenantAId = data.user.tenant_id;
 
     const { rows } = await db.query('SELECT role FROM users WHERE id=$1', [userAId]);
     assert.equal(rows[0].role, 'SUPER_ADMIN', 'the row must really exist in Postgres, not just in the JWT response');
+    const companyRows = await db.query('SELECT name FROM company');
+    assert.equal(companyRows.rows.length, 1, 'signup must create exactly one company row');
+    assert.equal(companyRows.rows[0].name, 'Integration Test Co');
   });
 
   test('GET /auth/signup-status: unavailable after the first signup (real DB read)', async () => {
@@ -173,15 +179,15 @@ function runSuite() {
     assert.equal(data.available, false);
   });
 
-  test('POST /auth/signup: the atomic signup_used claim really blocks a second signup, race-condition-free', async () => {
+  test('POST /auth/signup: the atomic signup_used claim really blocks a second signup, race-condition-free, and no second company row is created', async () => {
     const { status, data } = await call('/auth/signup', {
       method: 'POST', ipTag: 3,
       body: { email: 'second-admin@integration-test.invalid', password: 'another-long-test-password-1', company_name: 'Second Co' }
     });
     assert.equal(status, 403);
     assert.match(data.error, /already used/);
-    const { rows } = await db.query(`SELECT COUNT(*)::int AS n FROM tenants`);
-    assert.equal(rows[0].n, 1, 'no second tenant should have been created');
+    const { rows } = await db.query(`SELECT COUNT(*)::int AS n FROM company`);
+    assert.equal(rows[0].n, 1, 'still exactly one company row - this app is single-company by design');
   });
 
   test('POST /auth/login: real bcrypt verification against the real password hash', async () => {
@@ -195,76 +201,86 @@ function runSuite() {
     assert.equal(status, 401);
   });
 
-  // ---- RLS tenant isolation: a second tenant + lead, seeded directly in
-  // Postgres (bypassing the API on purpose - this is arrange, not act),
-  // to prove FORCE ROW LEVEL SECURITY actually stops a cross-tenant read
-  // at the database layer, not just that server.js remembers to filter
-  // by tenant_id in application code.
-  let tenantBId, tokenB;
-  const TENANT_B_EMAIL = 'admin-b@integration-test.invalid';
-  const TENANT_B_PASSWORD = 'yet-another-long-test-password-1';
-
-  test('seed tenant B + a lead per tenant directly in Postgres (arrange, not act - this is setup, not a test of anything)', async () => {
-    const tRows = await db.query(
-      `INSERT INTO tenants (name, subdomain, plan, is_premium, webhook_secret) VALUES ('Tenant B','tenant-b','standard',false,'test-secret') RETURNING id`
-    );
-    tenantBId = tRows.rows[0].id;
-    const hash = await bcrypt.hash(TENANT_B_PASSWORD, 12);
-    await db.query(
-      `INSERT INTO users (tenant_id, email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
-       VALUES ($1,$2,$3,'SUPER_ADMIN',NULL,true,true,true)`,
-      [tenantBId, TENANT_B_EMAIL, hash]
-    );
-
-    // Seed one lead per tenant. leads.pii_erased_at column's very
-    // presence here (added this session by migrate-gdpr-erasure.sql)
-    // already proves that migration applied for real. Each RLS-protected
-    // insert needs app.tenant_id set on this connection first, exactly
-    // like withTenantClient() does in server.js.
-    await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantAId]);
-    await db.query(`INSERT INTO leads (tenant_id, contact_name, email, source_channel) VALUES ($1,'Lead For A','lead-a@example.com','whatsapp')`, [tenantAId]);
-    await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantBId]);
-    await db.query(`INSERT INTO leads (tenant_id, contact_name, email, source_channel) VALUES ($1,'Lead For B','lead-b@example.com','facebook')`, [tenantBId]);
-  });
-
-  test('POST /auth/login as tenant B', async () => {
-    const { status, data } = await call('/auth/login', { method: 'POST', ipTag: 6, body: { email: TENANT_B_EMAIL, password: TENANT_B_PASSWORD } });
+  test('GET /company: any authenticated user can read the one company row, without its webhook_secret', async () => {
+    const { status, data } = await call('/company', { headers: { Authorization: `Bearer ${tokenA}` } });
     assert.equal(status, 200, JSON.stringify(data));
-    tokenB = data.token;
+    assert.equal(data.name, 'Integration Test Co');
+    assert.equal('webhook_secret' in data, false, 'webhook_secret is a bearer credential and must never appear here');
   });
 
-  test('GET /leads: tenant A sees only its own lead, never tenant B\'s - enforced by Postgres RLS, not app code', async () => {
-    const { status, data } = await call('/leads', { headers: { Authorization: `Bearer ${tokenA}` } });
-    assert.equal(status, 200);
-    assert.equal(data.length, 1);
-    assert.equal(data[0].contact_name, 'Lead For A');
+  // ---- Products/members: "Product can be assigned to a user, admin can
+  // see all" (see README.md "Hardening notes") - an Admin role sees every
+  // product; a MEMBER user sees only the ones they're assigned to. Seeded
+  // and verified against a real database, not application-code assertions
+  // alone, since this replaced RLS tenant isolation as this app's actual
+  // access-control boundary.
+  let productId, memberId, tokenMember;
+  const MEMBER_EMAIL = 'member@integration-test.invalid';
+  const MEMBER_PASSWORD = 'a-different-long-test-password-1';
+
+  test('POST /products: Admin creates a product', async () => {
+    const { status, data } = await call('/products', {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { name: 'Integration Test Product' }
+    });
+    assert.equal(status, 200, JSON.stringify(data));
+    productId = data.id;
   });
 
-  test('GET /leads: tenant B sees only its own lead - same query, same route, different tenant', async () => {
-    const { status, data } = await call('/leads', { headers: { Authorization: `Bearer ${tokenB}` } });
-    assert.equal(status, 200);
-    assert.equal(data.length, 1);
-    assert.equal(data[0].contact_name, 'Lead For B');
+  test('POST /users: create a regular (non-admin) user not yet assigned to any product', async () => {
+    const { status, data } = await call('/users', {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { email: MEMBER_EMAIL, password: MEMBER_PASSWORD, role: 'CONTENT_CREATOR' }
+    });
+    assert.equal(status, 200, JSON.stringify(data));
+    memberId = data.id;
+  });
+
+  test('POST /auth/login as the regular member', async () => {
+    const { status, data } = await call('/auth/login', { method: 'POST', ipTag: 11, body: { email: MEMBER_EMAIL, password: MEMBER_PASSWORD } });
+    assert.equal(status, 200, JSON.stringify(data));
+    tokenMember = data.token;
+  });
+
+  test('GET /products: an unassigned member sees no products; the Admin sees every product', async () => {
+    const memberView = await call('/products', { headers: { Authorization: `Bearer ${tokenMember}` } });
+    assert.equal(memberView.status, 200);
+    assert.deepEqual(memberView.data, []);
+
+    const adminView = await call('/products', { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(adminView.status, 200);
+    assert.ok(adminView.data.some(p => p.id === productId), 'Admin must see the product regardless of membership');
+  });
+
+  test('POST /products/:id/members: assigning the member grants them visibility into exactly that product', async () => {
+    const assign = await call(`/products/${productId}/members`, {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { user_id: memberId, role: 'MEMBER' }
+    });
+    assert.equal(assign.status, 200, JSON.stringify(assign.data));
+
+    const memberView = await call('/products', { headers: { Authorization: `Bearer ${tokenMember}` } });
+    assert.equal(memberView.data.length, 1);
+    assert.equal(memberView.data[0].id, productId);
   });
 
   // ---- audit_logs immutability: a real Postgres trigger, not application logic
   test('audit_logs is genuinely append-only: a direct UPDATE is rejected by the no_update_audit trigger', async () => {
     await assert.rejects(
-      () => db.query(`UPDATE audit_logs SET result='TAMPERED' WHERE tenant_id=$1`, [tenantAId]),
+      () => db.query(`UPDATE audit_logs SET result='TAMPERED' WHERE user_id=$1`, [userAId]),
       /Audit logs immutable/,
       'the no_update_audit trigger (postgres/init-secure.sql) must reject this at the database layer, regardless of which role issues the UPDATE'
     );
   });
 
-  // ---- GDPR self-service export/erasure against a real database (see
-  // this session's earlier /me/export and /me/erase work) - proves
+  // ---- GDPR self-service export/erasure against a real database - proves
   // erasure actually anonymizes the row and actually blocks a subsequent
   // login, not just that the route returns { erased: true }.
   let userCId, tokenC;
   const USER_C_EMAIL = 'erase-me@integration-test.invalid';
   const USER_C_PASSWORD = 'password-for-the-user-who-gets-erased-1';
 
-  test('POST /users: create a second tenant-A user to exercise /me/export and /me/erase on (so erasing them never risks tenant A\'s only account)', async () => {
+  test('POST /users: create a second user to exercise /me/export and /me/erase on (so erasing them never risks the only account)', async () => {
     const { status, data } = await call('/users', {
       method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
       body: { email: USER_C_EMAIL, password: USER_C_PASSWORD, role: 'CONTENT_CREATOR' }
@@ -284,7 +300,7 @@ function runSuite() {
     assert.equal(status, 200);
     assert.equal(data.user.email, USER_C_EMAIL);
     assert.equal(data.user.id, userCId);
-    assert.equal(data.tenant.id, tenantAId);
+    assert.equal(data.company.name, 'Integration Test Co');
   });
 
   test('POST /me/erase: wrong password is rejected, account is untouched', async () => {
@@ -311,24 +327,44 @@ function runSuite() {
     assert.equal(status, 401, 'the original email no longer resolves to any account, and the account is disabled either way');
   });
 
-  // ---- Leads erasure (GET /leads/:id/export, DELETE /leads/:id) against real data
+  // ---- Leads: webhook intake (real enrichment, real dedupe), export/
+  // erasure, and the Inbox reply thread - against real data.
   let leadAId;
-  test('GET /leads/:id/export: real lead data, real related agent_runs query', async () => {
-    // The raw `db` client is one long-lived session shared across this
-    // whole file - app.tenant_id was last set to tenant B's id by the
-    // seeding step above and stays set until changed again, so this read
-    // needs its own explicit SET or RLS filters tenant A's own lead out
-    // from under it (this is exactly the kind of connection-affinity bug
-    // withTenantClient() in server.js exists to prevent in the app itself
-    // - see its own comment - and why it's worth getting right in test
-    // setup too, not just application code).
-    await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantAId]);
-    const { rows } = await db.query(`SELECT id FROM leads WHERE tenant_id=$1 AND contact_name='Lead For A'`, [tenantAId]);
-    leadAId = rows[0].id;
+  test('seed a lead directly in Postgres, tied to the product created above (arrange, not act)', async () => {
+    const { rows } = await db.query(
+      `INSERT INTO leads (contact_name, email, source_channel, product_id) VALUES ('Lead For Integration Test','lead-a@example.com','whatsapp',$1) RETURNING id`,
+      [productId]
+    );
+    leadAId = rows.rows ? rows.rows[0].id : rows[0].id;
+  });
+
+  test('GET /leads: filters by ?product_id= for the Leads screen\'s product-wise view', async () => {
+    const { status, data } = await call(`/leads?product_id=${productId}`, { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.ok(data.some(l => l.id === leadAId));
+  });
+
+  test('GET /leads/:id/export: real lead data, real related agent_runs/messages queries', async () => {
     const { status, data } = await call(`/leads/${leadAId}/export`, { headers: { Authorization: `Bearer ${tokenA}` } });
     assert.equal(status, 200, JSON.stringify(data));
-    assert.equal(data.lead.contact_name, 'Lead For A');
+    assert.equal(data.lead.contact_name, 'Lead For Integration Test');
     assert.deepEqual(data.agent_runs, []);
+    assert.deepEqual(data.messages, []);
+  });
+
+  test('POST /leads/:id/reply then GET /leads/:id/messages: a real reply is recorded and read back', async () => {
+    const reply = await call(`/leads/${leadAId}/reply`, {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { body: 'Thanks for reaching out — when works for a quick call?' }
+    });
+    assert.equal(reply.status, 200, JSON.stringify(reply.data));
+    assert.equal(reply.data.direction, 'outbound');
+
+    const { status, data } = await call(`/leads/${leadAId}/messages`, { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(status, 200);
+    assert.equal(data.length, 1);
+    assert.equal(data[0].body, 'Thanks for reaching out — when works for a quick call?');
+    assert.equal(data[0].sent_by_email, SUPER_ADMIN_EMAIL);
   });
 
   test('DELETE /leads/:id: scrubs PII in place, sets pii_erased_at, keeps the row and non-PII fields', async () => {
@@ -348,5 +384,32 @@ function runSuite() {
     const { status, data } = await call(`/leads/${leadAId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` } });
     assert.equal(status, 200);
     assert.equal(data.already_erased, true);
+  });
+
+  // ---- Inbound webhook: real secret check, real enrichment, real dedupe -
+  // against the real /company row and real Postgres, not a mock.
+  test('POST /webhooks/:secret/:channel: rejects an unknown/wrong secret', async () => {
+    const { status } = await call('/webhooks/not-the-real-secret/whatsapp', { method: 'POST', ipTag: 12, body: { name: 'X' } });
+    assert.equal(status, 401);
+  });
+
+  test('POST /webhooks/:secret/:channel: a valid request creates a real lead with real enrichment applied', async () => {
+    const secretRows = await db.query('SELECT webhook_secret FROM company');
+    const secret = secretRows.rows[0].webhook_secret;
+    const { status, data } = await call(`/webhooks/${secret}/whatsapp`, {
+      method: 'POST', ipTag: 13,
+      body: { name: 'Priya Sharma', phone: '+91-98765-43210', message: 'Interested in your product, GSTIN is 27AAPFU0939F1Z9' }
+    });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.equal(data.received, true);
+
+    const { rows } = await db.query('SELECT contact_name, detected_language, gstin FROM leads WHERE id=$1', [data.lead_id]);
+    assert.equal(rows[0].contact_name, 'Priya Sharma');
+    assert.equal(rows[0].detected_language, 'en');
+    assert.equal(rows[0].gstin, '27AAPFU0939F1Z9');
+
+    const { rows: messages } = await db.query(`SELECT direction, body FROM lead_messages WHERE lead_id=$1`, [data.lead_id]);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].direction, 'inbound');
   });
 }

@@ -189,7 +189,7 @@
     // HTML-escapes a value before it's spliced into an innerHTML template
     // string. Most of the strings rendered this way are attacker-reachable
     // stored data (a product name, an uploaded file's original filename, a
-    // tenant/company name from signup, a member's email) - none of that was
+    // company name from signup, a member's email) - none of that was
     // being escaped anywhere in this file, so a product named
     // `<img src=x onerror=alert(document.cookie)>` would execute for every
     // admin who opened Products. Used everywhere a stored/user-supplied
@@ -267,7 +267,7 @@
           '<div class="oc-card">' +
             '<img src="/octave-logo.png" alt="Octave Growth Intelligence" class="oc-logo">' +
             '<h1>' + (isSignup ? 'Create Super Admin Account' : 'Sign In') + '</h1>' +
-            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your tenant' : 'Sign in to your tenant') + '</p>' +
+            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your company' : 'Sign in to your company') + '</p>' +
             '<form id="oc-auth-form">' +
               (isSignup ? '<label for="oc-company">Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
               '<label for="oc-email">Email</label>' +
@@ -322,9 +322,9 @@
               }
               throw new Error((authData && authData.error) || (isSignup ? 'Signup failed' : 'Login failed'));
             }
-            var session = { apiBase: apiBase, token: authData.token, refresh: authData.refresh, user: authData.user, tenant: null };
-            var tenantRes = await fetch(apiBase.replace(/\/$/,'') + '/tenants/me', { headers: { Authorization: 'Bearer ' + authData.token } });
-            if (tenantRes.ok) session.tenant = await tenantRes.json();
+            var session = { apiBase: apiBase, token: authData.token, refresh: authData.refresh, user: authData.user, company: null };
+            var companyRes = await fetch(apiBase.replace(/\/$/,'') + '/company', { headers: { Authorization: 'Bearer ' + authData.token } });
+            if (companyRes.ok) session.company = await companyRes.json();
             saveSession(session);
             location.reload();
           } catch(e){
@@ -353,7 +353,7 @@
       var canManageUsers = MANAGER_ROLES.indexOf(session.user.role) !== -1;
       bar.innerHTML =
         '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
-        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(session.user.role) + (session.tenant ? ' &middot; ' + esc(session.tenant.name) : '') + '</span>' +
+        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(session.user.role) + (session.company ? ' &middot; ' + esc(session.company.name) : '') + '</span>' +
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
@@ -488,7 +488,7 @@
     }
 
     function dismissOnboarding(session){
-      try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+      try { localStorage.setItem('orgcomms_onboarding_dismissed', '1'); } catch(e){}
       var el = document.getElementById('oc-onboarding');
       if (el) el.remove();
     }
@@ -546,7 +546,7 @@
           '<div class="oc-panel">' +
             steps(1) +
             '<h2>Assign a Product Admin</h2>' +
-            '<p class="oc-sub">"' + esc(state.productName) + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your tenant.</p>' +
+            '<p class="oc-sub">"' + esc(state.productName) + '" needs someone to run it — they\'ll configure its channels and add team members. This can be you, or anyone else in your company.</p>' +
             '<div id="oc-ob-step2-body">Loading&hellip;</div>' +
           '</div>';
 
@@ -625,7 +625,7 @@
               '<button class="oc-primary" id="oc-ob-open-products">Open Products</button>' +
             '</div>' +
           '</div>';
-        try { localStorage.setItem('orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x'), '1'); } catch(e){}
+        try { localStorage.setItem('orgcomms_onboarding_dismissed', '1'); } catch(e){}
         document.getElementById('oc-ob-open-products').addEventListener('click', function(){
           wrap.remove();
           renderProducts(session);
@@ -635,12 +635,12 @@
       renderStep1();
     }
 
-    // Auto-triggers once for a Tenant Admin whose tenant has no products yet.
-    // Dismissible at any step; never nags again for that tenant once
-    // dismissed or once a product exists.
+    // Auto-triggers once for an admin whose company has no products yet.
+    // Dismissible at any step; never nags again once dismissed or once a
+    // product exists.
     async function maybeShowOnboarding(session){
       if (MANAGER_ROLES.indexOf(session.user.role) === -1) return;
-      var dismissKey = 'orgcomms_onboarding_dismissed_' + (session.tenant ? session.tenant.id : 'x');
+      var dismissKey = 'orgcomms_onboarding_dismissed';
       try { if (localStorage.getItem(dismissKey)) return; } catch(e){}
       try {
         var products = await api(session, '/products');
@@ -651,7 +651,7 @@
     function renderProducts(session){
       var existing = document.getElementById('oc-products');
       if (existing) existing.remove();
-      var isTenantAdmin = MANAGER_ROLES.indexOf(session.user.role) !== -1;
+      var isOrgAdmin = MANAGER_ROLES.indexOf(session.user.role) !== -1;
       var wrap = document.createElement('div');
       wrap.id = 'oc-products';
       wrap.setAttribute('role', 'dialog');
@@ -676,7 +676,7 @@
           body.innerHTML =
             '<h2>Products &amp; Services</h2>' +
             '<table><tr><th>Name</th><th>Description</th><th></th></tr>' + (rows || '<tr><td colspan="3" style="color:var(--oc-dim-5)">No products yet</td></tr>') + '</table>' +
-            (isTenantAdmin ?
+            (isOrgAdmin ?
               '<form id="oc-create-product">' +
                 '<label class="oc-full">Create Product/Service</label>' +
                 '<input name="name" placeholder="Name" required class="oc-full" aria-label="Product/service name">' +
@@ -738,18 +738,18 @@
           el.innerHTML = 'Loading&hellip;';
           try {
             var members = await api(session, '/products/' + productId + '/members');
-            var canAdmin = isTenantAdmin || members.some(function(m){ return m.user_id === session.user.id && m.role === 'ADMIN'; });
+            var canAdmin = isOrgAdmin || members.some(function(m){ return m.user_id === session.user.id && m.role === 'ADMIN'; });
             var rows = members.map(function(m){
               return '<tr><td>' + esc(m.email) + '</td><td>' + esc(m.role) + '</td><td>' + (canAdmin ? '<button class="oc-pbtn" data-uid="' + m.user_id + '">Remove</button>' : '') + '</td></tr>';
             }).join('');
 
             var pickerHtml = '<input name="user_id" placeholder="User ID" class="oc-full" required aria-label="User ID">';
-            var tenantUsers = null;
-            if (canAdmin && isTenantAdmin) {
-              try { tenantUsers = await api(session, '/users'); } catch(e) { tenantUsers = null; }
+            var companyUsers = null;
+            if (canAdmin && isOrgAdmin) {
+              try { companyUsers = await api(session, '/users'); } catch(e) { companyUsers = null; }
             }
-            if (tenantUsers) {
-              pickerHtml = '<select name="user_id" class="oc-full" aria-label="User">' + tenantUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
+            if (companyUsers) {
+              pickerHtml = '<select name="user_id" class="oc-full" aria-label="User">' + companyUsers.map(function(u){ return '<option value="' + u.id + '">' + esc(u.email) + ' (' + esc(u.role) + ')</option>'; }).join('') + '</select>';
             }
 
             el.innerHTML =
@@ -1127,15 +1127,13 @@
       wrap.innerHTML =
         '<div class="oc-panel">' +
           '<button class="oc-close" id="oc-admin-close" aria-label="Close">&times;</button>' +
-          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><img src="/octave-icon.png" alt="Octave" style="width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px"><h2 style="margin:0">Tenant &amp; User Administration</h2></div>' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><img src="/octave-icon.png" alt="Octave" style="width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px"><h2 style="margin:0">Company &amp; User Administration</h2></div>' +
           '<div class="oc-tabs">' +
-            (isSuperAdmin ? '<button class="oc-tab oc-active" data-tab="tenants">Tenants</button>' : '') +
-            '<button class="oc-tab' + (isSuperAdmin ? '' : ' oc-active') + '" data-tab="users">Users</button>' +
+            '<button class="oc-tab oc-active" data-tab="users">Users</button>' +
             (canSeeWebhooks ? '<button class="oc-tab" data-tab="webhooks">Webhooks</button>' : '') +
             (isSuperAdmin ? '<button class="oc-tab" data-tab="agents">Agents</button>' : '') +
           '</div>' +
-          '<div id="oc-tab-tenants" style="display:' + (isSuperAdmin ? 'block' : 'none') + '"></div>' +
-          '<div id="oc-tab-users" style="display:' + (isSuperAdmin ? 'none' : 'block') + '"></div>' +
+          '<div id="oc-tab-users" style="display:block"></div>' +
           '<div id="oc-tab-webhooks" style="display:none"></div>' +
           '<div id="oc-tab-agents" style="display:none"></div>' +
         '</div>';
@@ -1146,7 +1144,6 @@
         tab.addEventListener('click', function(){
           wrap.querySelectorAll('.oc-tab').forEach(function(t){ t.classList.remove('oc-active'); });
           tab.classList.add('oc-active');
-          document.getElementById('oc-tab-tenants').style.display = tab.dataset.tab === 'tenants' ? 'block' : 'none';
           document.getElementById('oc-tab-users').style.display = tab.dataset.tab === 'users' ? 'block' : 'none';
           document.getElementById('oc-tab-webhooks').style.display = tab.dataset.tab === 'webhooks' ? 'block' : 'none';
           document.getElementById('oc-tab-agents').style.display = tab.dataset.tab === 'agents' ? 'block' : 'none';
@@ -1154,54 +1151,12 @@
         });
       });
 
-      var selectedTenantId = session.user.tenant_id;
-
-      async function loadTenants(){
-        var el = document.getElementById('oc-tab-tenants');
-        el.innerHTML = 'Loading&hellip;';
-        try {
-          var tenants = await api(session, '/tenants');
-          var rows = tenants.map(function(t){
-            return '<tr><td>' + esc(t.name) + '</td><td>' + esc(t.subdomain) + '</td><td>' + esc(t.plan) + '</td>' +
-              '<td><button class="oc-pick-tenant" data-id="' + t.id + '" data-name="' + esc(t.name) + '">Manage users</button></td></tr>';
-          }).join('');
-          el.innerHTML =
-            '<table><tr><th>Name</th><th>Subdomain</th><th>Plan</th><th></th></tr>' + rows + '</table>' +
-            '<form id="oc-create-tenant">' +
-              '<label class="oc-full">Create Tenant</label>' +
-              '<input name="name" placeholder="Tenant name" required aria-label="Tenant name">' +
-              '<input name="subdomain" placeholder="subdomain" required aria-label="Subdomain">' +
-              '<select name="plan" aria-label="Plan"><option value="starter">Starter</option><option value="premium">Premium</option></select>' +
-              '<button class="oc-submit" type="submit">Create</button>' +
-              '<div class="oc-msg oc-full" aria-live="polite" id="oc-tenant-msg"></div>' +
-            '</form>';
-          el.querySelectorAll('.oc-pick-tenant').forEach(function(btn){
-            btn.addEventListener('click', function(){
-              selectedTenantId = btn.dataset.id;
-              wrap.querySelector('[data-tab="users"]').click();
-              loadUsers();
-            });
-          });
-          el.querySelector('#oc-create-tenant').addEventListener('submit', async function(ev){
-            ev.preventDefault();
-            var msg = document.getElementById('oc-tenant-msg');
-            var fd = new FormData(ev.target);
-            try {
-              await api(session, '/tenants', { method: 'POST', body: { name: fd.get('name'), subdomain: fd.get('subdomain'), plan: fd.get('plan') } });
-              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Tenant created.';
-              loadTenants();
-            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
-          });
-        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
-      }
-
       async function loadUsers(){
         var el = document.getElementById('oc-tab-users');
         el.innerHTML = 'Loading&hellip;';
         try {
           var roles = await api(session, '/roles');
-          var qs = (isSuperAdmin && selectedTenantId) ? ('?tenant_id=' + encodeURIComponent(selectedTenantId)) : '';
-          var users = await api(session, '/users' + qs);
+          var users = await api(session, '/users');
           var roleOptions = roles.map(function(r){ return '<option value="' + esc(r.name) + '">' + esc(r.name) + '</option>'; }).join('');
           var rows = users.map(function(u){
             var isSelf = u.id === session.user.id;
@@ -1213,7 +1168,6 @@
               '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button></td></tr>';
           }).join('');
           el.innerHTML =
-            (isSuperAdmin ? '<div class="oc-msg" aria-live="polite" style="margin-bottom:8px">Managing tenant: ' + (selectedTenantId || session.user.tenant_id) + '</div>' : '') +
             '<table><tr><th>Email</th><th>Role</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
             '<form id="oc-create-user">' +
               '<label class="oc-full">Create User</label>' +
@@ -1259,7 +1213,6 @@
             var msg = document.getElementById('oc-user-msg');
             var fd = new FormData(ev.target);
             var payload = { email: fd.get('email'), password: fd.get('password'), role: fd.get('role') };
-            if (isSuperAdmin && selectedTenantId) payload.tenant_id = selectedTenantId;
             try {
               await api(session, '/users', { method: 'POST', body: payload });
               msg.className = 'oc-msg oc-ok'; msg.textContent = 'User created.';
@@ -1364,7 +1317,6 @@
         } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
       }
 
-      if (isSuperAdmin) loadTenants();
       loadUsers();
       if (canSeeWebhooks) loadWebhooks();
     }

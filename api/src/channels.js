@@ -146,7 +146,7 @@ function decryptChannelSecrets(channel, config, decryptSecret) {
 }
 
 async function publishEmail({ config, title, text, filePath, fileName, mimeType, to }) {
-  // Lazily required so the dependency is only ever loaded by a tenant that
+  // Lazily required so the dependency is only ever loaded by a product that
   // actually configures an email channel.
   const nodemailer = require('nodemailer');
   const recipient = to || config.to_default;

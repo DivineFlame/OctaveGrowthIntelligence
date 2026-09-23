@@ -16,7 +16,9 @@ const { Client } = require('pg');
 // Order matters: later files reference tables/columns created earlier
 // (agent-execution's agent_runs references products/agents from
 // products-agents; force-rls's FORCE ROW LEVEL SECURITY on agent_runs
-// requires agent-execution to have created it first).
+// requires agent-execution to have created it first; remove-multitenancy
+// drops tenant_id/RLS/the tenants table entirely, so it has to run after
+// every migration that still assumes multi-tenancy exists).
 const MIGRATIONS_IN_ORDER = [
   'migrate-signup-flag.sql',
   'migrate-webhook-secret.sql',
@@ -27,7 +29,12 @@ const MIGRATIONS_IN_ORDER = [
   'migrate-channel-publish.sql',
   'migrate-force-rls.sql',
   'migrate-content-variants-indexes.sql',
-  'migrate-gdpr-erasure.sql'
+  'migrate-gdpr-erasure.sql',
+  // Collapses multi-tenancy down to a single company (see README.md
+  // "Hardening notes" and this file's own header comment) - runs last
+  // since it depends on every table/column every earlier migration
+  // created, and is itself idempotent (safe to run again on every boot).
+  'migrate-remove-multitenancy.sql'
 ];
 
 async function main() {

@@ -31,10 +31,11 @@ ALTER TABLE content_variants ADD COLUMN IF NOT EXISTS publish_error TEXT;
 -- be fetched at a public URL for a few minutes, for the one real use case
 -- that needs it (Instagram's Graph API requires a publicly-reachable
 -- image_url - it has no direct-upload option, unlike Facebook). Not the
--- content_assets table itself (which is FORCE ROW LEVEL SECURITY'd and
--- tenant-scoped) - a deliberately narrow, ungrantable-by-default token
--- containing only what a public GET needs to serve one file: no tenant
--- data, no RLS bypass required. Created by POST
+-- content_assets table itself (which was FORCE ROW LEVEL SECURITY'd and
+-- tenant-scoped in the old multi-tenant schema; see README.md "Hardening
+-- notes" on removing multi-tenancy) - a deliberately narrow,
+-- ungrantable-by-default token containing only what a public GET needs to
+-- serve one file: no company data, no RLS bypass required. Created by POST
 -- /internal/content-variants/:variantId/publish right before it needs one,
 -- expires quickly, and is deleted after being served once.
 CREATE TABLE IF NOT EXISTS public_file_tokens (token UUID PRIMARY KEY DEFAULT uuid_generate_v4(), file_path TEXT NOT NULL, mime_type TEXT, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW());

@@ -1,15 +1,26 @@
 -- One-time migration for an already-running database: adds the
--- Products/Services + Agents/LLM-connections tables for the multi-tenant,
--- multi-product, multi-user/agent architecture.
+-- Products/Services + Agents/LLM-connections tables for the multi-product,
+-- multi-user/agent architecture.
 --
 -- Run it once against the running postgres container, e.g.:
 --   docker exec -i <postgres-container-name> \
 --     psql -U <POSTGRES_USER> -d <POSTGRES_DB> < postgres/migrate-products-agents.sql
 --
--- Safe to run more than once: every statement is IF NOT EXISTS.
+-- Safe to run more than once: every statement is IF NOT EXISTS. The
+-- products.tenant_id index below only applies to a database that still has
+-- that column (a pre-existing multi-tenant database not yet migrated) - a
+-- fresh single-company install has no tenant_id column on products at all
+-- (see README.md "Hardening notes" on removing multi-tenancy), and
+-- migrate-remove-multitenancy.sql drops both the column and this index
+-- together when it upgrades an existing database.
 
-CREATE TABLE IF NOT EXISTS products (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, name VARCHAR(200) NOT NULL, description TEXT, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
-CREATE INDEX IF NOT EXISTS idx_products_tenant ON products(tenant_id);
+CREATE TABLE IF NOT EXISTS products (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), name VARCHAR(200) NOT NULL, description TEXT, created_by UUID REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW());
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='products' AND column_name='tenant_id') THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_products_tenant ON products(tenant_id)';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS product_members (id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), product_id UUID REFERENCES products(id) ON DELETE CASCADE, user_id UUID REFERENCES users(id) ON DELETE CASCADE, role VARCHAR(20) NOT NULL DEFAULT 'MEMBER', created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(product_id, user_id));
 CREATE INDEX IF NOT EXISTS idx_product_members_product ON product_members(product_id);

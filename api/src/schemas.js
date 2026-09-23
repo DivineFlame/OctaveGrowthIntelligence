@@ -8,16 +8,10 @@
 const { z } = require('zod');
 
 const schemas = {
-  createTenant: z.object({
-    name: z.string().trim().min(1).max(200),
-    subdomain: z.string().trim().toLowerCase().min(1).max(63).regex(/^[a-z0-9-]+$/, 'subdomain may only contain lowercase letters, digits and hyphens'),
-    plan: z.enum(['standard', 'premium'])
-  }),
   createUser: z.object({
     email: z.string().trim().toLowerCase().email().max(255),
     password: z.string().min(12).max(200),
-    role: z.string().trim().min(1).max(50),
-    tenant_id: z.string().uuid().optional()
+    role: z.string().trim().min(1).max(50)
   }),
   createProduct: z.object({
     name: z.string().trim().min(1).max(200),
@@ -61,6 +55,10 @@ const schemas = {
   // find the matching product_channels row for it.
   transformContent: z.object({
     channels: z.array(z.enum(['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'])).min(1).max(7).optional()
+  }),
+  replyToLead: z.object({
+    body: z.string().trim().min(1).max(5000),
+    channel: z.string().trim().max(20).optional()
   })
 };
 

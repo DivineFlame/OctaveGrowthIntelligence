@@ -5,6 +5,7 @@ import Home from './components/Home.jsx';
 import MessagesPanel from './components/MessagesPanel.jsx';
 import ContentPipeline from './components/ContentPipeline.jsx';
 import IntegrationsPanel from './components/IntegrationsPanel.jsx';
+import { Package } from 'lucide-react';
 import { api, currentUser, ApiError } from './lib/api.js';
 
 const APPROVER_ROLES = ['SUPER_ADMIN', 'APPROVER', 'DEPT_ADMIN', 'IT_ADMIN'];
@@ -15,7 +16,7 @@ const INTEGRATIONS_ROLES = ['SUPER_ADMIN', 'IT_ADMIN'];
 // uploading content on the different channel product wise, select channel
 // and upload content"). The product itself is picked from Nav's product
 // selector - this just loads/reloads that one product's assets+channels.
-function Studio({ productId, spec, canApprove, canSeeIntegrations, integrations }) {
+function Studio({ productId, productName, spec, canApprove, canSeeIntegrations, integrations }) {
   const [assets, setAssets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
@@ -80,17 +81,23 @@ function Studio({ productId, spec, canApprove, canSeeIntegrations, integrations 
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-[1.15fr_0.85fr]">
-      <ContentPipeline
-        productId={productId}
-        assets={assets}
-        spec={spec}
-        canApprove={canApprove}
-        onUploaded={handleUploaded}
-        onTransform={handleTransform}
-        onApprove={handleApprove}
-      />
-      <IntegrationsPanel integrations={integrations} visible={canSeeIntegrations} />
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 rounded-[12px] border border-brand/20 bg-brand/5 px-4 py-2.5 text-[13px] text-zinc-700 dark:border-brand/30 dark:bg-brand/10 dark:text-white/80">
+        <Package className="h-4 w-4 shrink-0 text-brand" />
+        Uploading to <span className="font-semibold text-zinc-900 dark:text-white">{productName || 'this product'}</span> — switch products using the picker in the nav bar above.
+      </div>
+      <div className="grid gap-4 md:grid-cols-[1.15fr_0.85fr]">
+        <ContentPipeline
+          productId={productId}
+          assets={assets}
+          spec={spec}
+          canApprove={canApprove}
+          onUploaded={handleUploaded}
+          onTransform={handleTransform}
+          onApprove={handleApprove}
+        />
+        <IntegrationsPanel integrations={integrations} visible={canSeeIntegrations} />
+      </div>
     </div>
   );
 }
@@ -212,7 +219,6 @@ export default function App() {
         <Header
           companyName={session.company ? session.company.name : ''}
           userName={session.user ? session.user.email : ''}
-          premium={!!(session.company && session.company.is_premium)}
         />
 
         {loading ? (
@@ -254,6 +260,7 @@ export default function App() {
             ) : (
               <Studio
                 productId={selectedProductId}
+                productName={selectedProduct ? selectedProduct.name : ''}
                 spec={spec}
                 canApprove={canApprove}
                 canSeeIntegrations={canSeeIntegrations}

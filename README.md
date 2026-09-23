@@ -1477,3 +1477,23 @@ code changes were needed.
     on `content_variants` - staleness is measured from `approvals.created_at`
     instead, which is written in the same request that pushes to
     `publisher:queue`).
+
+- **Removed the Premium/Standard plan distinction.** `company.is_premium`
+  drove a "Premium" badge in the header and on Home, and used to gate
+  Agents (already removed - see the Agents/Sarvam entry above). With
+  Agents gone, `is_premium` had nothing left to actually gate - it was
+  purely cosmetic, showing a "V4 Premium" or "Standard plan" badge that no
+  longer corresponded to a real feature difference. Removed from every
+  user-facing surface: the Header and Home badges are gone, `GET /company`
+  and `GET /me/export` no longer return `is_premium`, and
+  `postgres/bootstrap-admin.sql` / the signup route no longer set it.
+  `company.is_premium` itself is left in the schema, defaulting `false`
+  and unused - same "keep the column, remove the feature" treatment as
+  `agents`/`llm_connections`/`product_agents`/`agent_runs`, in case a real
+  plan tier comes back in a future version.
+- **Studio now says which product an upload lands in.** Uploading was
+  scoped by whichever product was selected in the nav bar's picker, but
+  nothing on the Studio screen itself named that product - easy to lose
+  track of after switching tabs or scrolling. Added a banner above the
+  upload area ("Uploading to **\<Product Name\>**") so it's unambiguous
+  without having to look back up at the nav bar.

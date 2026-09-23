@@ -314,10 +314,10 @@ async function auditLog(user_id, action, resource_type, resource_id, req, result
 // This app runs for exactly one company (see README.md "Hardening notes" -
 // multi-tenancy was removed; `company` is a singleton row created once by
 // POST /auth/signup). Small in-process cache (short TTL) rather than a
-// query on every request that needs is_premium/webhook_secret - it's read
-// far more often than it changes, and a few seconds of staleness on a
-// premium-flag/webhook-secret read is an acceptable trade for not hitting
-// Postgres on every single request that touches either.
+// query on every request that needs the company row (name/webhook_secret)
+// - it's read far more often than it changes, and a few seconds of
+// staleness is an acceptable trade for not hitting Postgres on every
+// single request that touches either.
 let companyCache = null, companyCacheAt = 0;
 async function getCompany({ fresh = false } = {}) {
   if (!fresh && companyCache && (Date.now() - companyCacheAt) < 5000) return companyCache;
@@ -522,7 +522,7 @@ app.post('/auth/signup', authLimiter, async (req, res) => {
       await client.query('UPDATE company SET name=$1 WHERE id=$2', [companyName, companyId]);
     } else {
       const companyRows = await client.query(
-        `INSERT INTO company (name, is_premium, webhook_secret) VALUES ($1,true,$2) RETURNING id`,
+        `INSERT INTO company (name, webhook_secret) VALUES ($1,$2) RETURNING id`,
         [companyName, webhookSecret]
       );
       companyId = companyRows.rows[0].id;
@@ -654,7 +654,7 @@ app.get('/company', authMiddleware, async (req, res) => {
   try {
     const company = await getCompany();
     if (!company) return res.status(404).json({ error: 'Company not set up yet' });
-    res.json({ id: company.id, name: company.name, is_premium: company.is_premium, created_at: company.created_at });
+    res.json({ id: company.id, name: company.name, created_at: company.created_at });
   } catch(e){ serverError(res, e); }
 });
 
@@ -711,7 +711,7 @@ app.get('/me/export', authMiddleware, async (req, res) => {
     res.json({
       exported_at: new Date().toISOString(),
       user: userRows[0],
-      company: company ? { name: company.name, is_premium: company.is_premium } : null,
+      company: company ? { name: company.name } : null,
       product_memberships: memberships,
       content_uploaded: assets,
       content_approved: approvedVariants,
@@ -878,9 +878,10 @@ app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MA
 // IT_ADMIN/DEPT_ADMIN) creates Products/Services and assigns a user as that
 // product's Admin - and, being an Admin, can see and manage every product
 // regardless of assignment. A Product Admin configures the product's
-// social channels and adds MEMBER users to run them (Standard plan) or
-// enables Agents (Premium plan only, company.is_premium). Agent/
-// LLM-connection definitions themselves are Super-Admin-only, platform-wide.
+// social channels and adds MEMBER users to run them. Agents/LLM-connection
+// definitions and the premium/standard plan distinction both used to gate
+// a "Premium" tier here - removed for now (see README.md "Hardening
+// notes"); every company runs the same feature set today.
 
 const PRODUCT_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
 const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];

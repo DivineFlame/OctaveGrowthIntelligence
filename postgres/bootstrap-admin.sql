@@ -16,8 +16,8 @@
 --    refuses to create a second Super Admin/company later even if
 --    SIGNUP_ENABLED is left on by mistake.
 
-INSERT INTO company (name, is_premium)
-SELECT 'Default Company', true
+INSERT INTO company (name)
+SELECT 'Default Company'
 WHERE NOT EXISTS (SELECT 1 FROM company);
 
 INSERT INTO users (

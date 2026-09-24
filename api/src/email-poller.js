@@ -80,13 +80,18 @@ async function reconcileDeletedLeads(pool, product, client) {
 // (logged and skipped, loop continues) - only a connection-level failure
 // (bad host/credentials, network down) propagates, so the caller can log
 // it against that one product without losing the others.
-async function pollProductMailbox(pool, product, config, ingestInboundLead) {
+// `deps.createClient` is an injection seam for tests only (defaults to
+// the real ImapFlow constructor) - lets a test exercise this function's
+// actual search/fetch/dedup/mark-seen logic end to end against a fake
+// mailbox, without a real IMAP server. Production code never passes it.
+async function pollProductMailbox(pool, product, config, ingestInboundLead, deps = {}) {
   const host = (config.imap_host || '').trim();
   const user = (config.imap_user || '').trim();
   const pass = config.imap_pass || '';
   if (!host || !user || !pass) return { skipped: true, processed: 0, failed: 0, deleted: 0 };
 
-  const client = new ImapFlow({
+  const createClient = deps.createClient || ((opts) => new ImapFlow(opts));
+  const client = createClient({
     host,
     port: Number(config.imap_port) || 993,
     secure: String(config.imap_secure || 'true') !== 'false',
@@ -101,35 +106,62 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead) {
     console.warn(`[email-poller] product ${product.id}: IMAP connection error: ${err.message}`);
   });
 
-  let processed = 0, failed = 0, deletedCount = 0;
+  let processed = 0, failed = 0, skippedAlready = 0, deletedCount = 0;
   await client.connect();
   try {
     const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
     const lock = await client.getMailboxLock(mailbox);
     try {
-      for await (const msg of client.fetch({ seen: false }, { uid: true, envelope: true, source: true })) {
-        try {
-          const parsed = await simpleParser(msg.source);
-          const from = (parsed.from && parsed.from.value && parsed.from.value[0]) || {};
-          const body = cleanEmailText(parsed.text || parsed.subject || '').slice(0, 5000);
-          await ingestInboundLead(
-            {
-              channel: 'email',
-              companyName: '',
-              contactName: from.name || from.address || 'Email lead',
-              phone: '',
-              email: (from.address || '').toLowerCase(),
-              message: body,
-              productId: product.id,
-              sourceUid: msg.uid
-            },
-            { ip: 'internal-imap-poll', headers: {} }
-          );
-          await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
-          processed++;
-        } catch (e) {
-          failed++;
-          console.warn(`[email-poller] product ${product.id}: failed to ingest message uid=${msg.uid}: ${e.message}`);
+      // search() first, then fetch() the specific UIDs it returns -
+      // passing a search-criteria object straight to fetch()'s range
+      // argument is what caused the real bug this fixes (the same
+      // message coming back as a fresh lead on every poll, seen or not):
+      // fetch()'s range must be an explicit UID/sequence range or array,
+      // not a query object, so it was not actually limiting to unseen
+      // messages the way it looked like it should.
+      const uids = await client.search({ seen: false }, { uid: true });
+      if (uids && uids.length) {
+        for await (const msg of client.fetch(uids, { uid: true, envelope: true, source: true }, { uid: true })) {
+          try {
+            // Belt-and-suspenders against the same failure mode from the
+            // other direction: if this exact message was already turned
+            // into a lead on an earlier poll (its \Seen flag didn't
+            // stick for whatever reason - some IMAP servers/proxies are
+            // unreliable about persisting it), don't create a second
+            // lead for it. Just re-mark it seen and move on, so it stops
+            // showing up as "new" on every future poll too.
+            const already = await pool.query(
+              `SELECT id FROM leads WHERE product_id=$1 AND source_channel='email' AND source_uid=$2 LIMIT 1`,
+              [product.id, msg.uid]
+            );
+            if (already.rows.length) {
+              await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true }).catch(() => {});
+              skippedAlready++;
+              continue;
+            }
+
+            const parsed = await simpleParser(msg.source);
+            const from = (parsed.from && parsed.from.value && parsed.from.value[0]) || {};
+            const body = cleanEmailText(parsed.text || parsed.subject || '').slice(0, 5000);
+            await ingestInboundLead(
+              {
+                channel: 'email',
+                companyName: '',
+                contactName: from.name || from.address || 'Email lead',
+                phone: '',
+                email: (from.address || '').toLowerCase(),
+                message: body,
+                productId: product.id,
+                sourceUid: msg.uid
+              },
+              { ip: 'internal-imap-poll', headers: {} }
+            );
+            await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
+            processed++;
+          } catch (e) {
+            failed++;
+            console.warn(`[email-poller] product ${product.id}: failed to ingest message uid=${msg.uid}: ${e.message}`);
+          }
         }
       }
 
@@ -145,7 +177,7 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead) {
   } finally {
     await client.logout().catch(() => {});
   }
-  return { skipped: false, processed, failed, deleted: deletedCount };
+  return { skipped: false, processed, failed, skippedAlready, deleted: deletedCount };
 }
 
 // Polls every product's Email channel that has IMAP fields configured.
@@ -159,7 +191,7 @@ async function pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, ch
      JOIN products p ON p.id = pc.product_id
      WHERE pc.channel='email' AND pc.status='configured'`
   );
-  let mailboxesPolled = 0, totalProcessed = 0, totalFailed = 0, totalDeleted = 0;
+  let mailboxesPolled = 0, totalProcessed = 0, totalFailed = 0, totalSkippedAlready = 0, totalDeleted = 0;
   for (const row of rows) {
     let config;
     try {
@@ -175,13 +207,14 @@ async function pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, ch
         mailboxesPolled++;
         totalProcessed += result.processed;
         totalFailed += result.failed;
+        totalSkippedAlready += result.skippedAlready || 0;
         totalDeleted += result.deleted;
       }
     } catch (e) {
       console.warn(`[email-poller] product ${row.product_id} (${row.name}): IMAP poll failed: ${e.message}`);
     }
   }
-  return { mailboxesPolled, totalProcessed, totalFailed, totalDeleted };
+  return { mailboxesPolled, totalProcessed, totalFailed, totalSkippedAlready, totalDeleted };
 }
 
 module.exports = { pollAllEmailChannels, pollProductMailbox, cleanEmailText, reconcileDeletedLeads };

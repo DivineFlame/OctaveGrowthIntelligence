@@ -1765,7 +1765,7 @@ async function runEmailPoll() {
   try {
     const result = await emailPoller.pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, channelsLib });
     if (result.mailboxesPolled > 0) {
-      console.log(`[email-poller] polled ${result.mailboxesPolled} mailbox(es): ${result.totalProcessed} new lead(s), ${result.totalFailed} failure(s), ${result.totalDeleted} lead(s) removed (source email deleted from mailbox)`);
+      console.log(`[email-poller] polled ${result.mailboxesPolled} mailbox(es): ${result.totalProcessed} new lead(s), ${result.totalSkippedAlready} already-ingested message(s) re-marked seen (not duplicated), ${result.totalFailed} failure(s), ${result.totalDeleted} lead(s) removed (source email deleted from mailbox)`);
     }
   } catch (e) {
     console.error('[email-poller] poll run failed:', e.message);

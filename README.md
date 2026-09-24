@@ -1574,3 +1574,33 @@ code changes were needed.
     encrypt/decrypt - no real mailbox needed), full suite passes clean
     (94/94 non-skipped), `node --check` on every changed file, clean
     `npm run build` with CSP hashes confirmed unchanged.
+
+- **Fixed the real cause of repeating email leads: `fetch()` doesn't take
+  a search-criteria object as its range.** Live testing (again) surfaced
+  the same message coming back as a brand-new lead on every single poll -
+  visible in production as one Hostinger welcome email showing up 6+
+  times, spaced almost exactly one poll interval apart. The bug: `client
+  .fetch({ seen: false }, ...)` was called with a search-criteria object
+  as the *range* argument - `fetch()`'s range has to be an explicit UID/
+  sequence range or array, not a query object, so it was never actually
+  limiting to unseen messages the way it looked like it should. Fixed to
+  the correct two-step pattern: `search({ seen: false })` for matching
+  UIDs, then `fetch(uids, ...)` on that array.
+  - Added a second, independent layer of protection on top of the real
+    fix: before ingesting a fetched message, check whether a lead already
+    exists for that `(product_id, source_uid)` pair; if so, skip creating
+    a duplicate and just re-attempt marking it `\Seen`. This means even
+    an IMAP server that doesn't reliably persist the `\Seen` flag can
+    never again surface as a duplicate lead in this app, regardless of
+    the root cause.
+  - `postgres/cleanup-duplicate-email-leads.sql` (new, one-off, not part
+    of the automatic migration chain) removes the duplicate rows the bug
+    already created in a live deployment before this fix - keeps the
+    earliest lead per `(product_id, source_uid)`, deletes the rest.
+  - **Verified**: two new regression tests exercise
+    `pollProductMailbox()`'s actual search/fetch/dedup/mark-seen logic
+    end-to-end against a fake ImapFlow-shaped client (real `mailparser`
+    still runs against a real raw-email string) - one proves the exact
+    bug scenario (same UID reported unseen across two polls → exactly one
+    lead, not two), the other proves a genuinely new message still gets
+    ingested normally. Full suite passes clean (96/96 non-skipped).

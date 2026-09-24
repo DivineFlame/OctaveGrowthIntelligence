@@ -167,6 +167,17 @@ function Thread({ lead, onClose }) {
                 {m.direction === 'outbound' ? `You${m.sent_by_email ? ` (${m.sent_by_email})` : ''}` : 'Them'} ·{' '}
                 {new Date(m.created_at).toLocaleString()}
               </p>
+              {/* Outbound rows without a real send (channel not configured,
+                  lead missing an email/phone, or the send itself failed)
+                  used to render identically to a delivered reply - this
+                  makes the difference visible instead of a silent failure.
+                  Rows from before this was tracked have no send_status at
+                  all, so only warn when we actually know it wasn't sent. */}
+              {m.direction === 'outbound' && m.send_status && m.send_status !== 'sent' ? (
+                <p className="mt-1 text-[10px] text-amber-500" title={m.send_error || ''}>
+                  Not delivered{m.send_error ? `: ${m.send_error}` : ''}
+                </p>
+              ) : null}
             </div>
           ))
         ) : (

@@ -1770,3 +1770,25 @@ code changes were needed.
     future debugging; caps a genuinely untimed external call) with no
     real downside for this use case.
   - Full suite passes clean (99/99 non-skipped, one new test added).
+
+- **IMAP poller: fixed audit log write failing on every ingested lead (2026-09-24)** -
+  Confirmed working after the previous fix (a full poll completed in
+  under 6s: 3 new leads, 1 already-known message re-marked seen, 0
+  failures), but its own logs showed a new, previously-invisible issue:
+  `Audit log failed invalid input syntax for type inet:
+  "internal-imap-poll"`, once per ingested lead. The poller's synthetic
+  `req` object for `ingestInboundLead()` passed `ip: 'internal-imap-poll'`
+  as a marker string, but `audit_logs.ip_address` is a Postgres `INET`
+  column - it rejects anything that isn't a real IP (or NULL). The write
+  failure is caught and logged (non-fatal - leads still get created
+  fine), but it meant every IMAP-sourced lead was silently missing its
+  audit trail entry.
+  - Fixed by passing `ip: null` (a valid `INET` value - the column has no
+    NOT NULL constraint) and moving the `internal-imap-poll` marker into
+    `headers['user-agent']` instead, a plain `TEXT` column that accepts
+    any string - the audit entry still identifies the source, just via
+    the right field.
+  - Full suite passes clean (99/99 non-skipped) - no dedicated test
+    added (this is a one-line data-shape fix in the poller's synthetic
+    request object, not new logic; the existing fake-store tests already
+    exercise `ingestInboundLead()`'s call shape).

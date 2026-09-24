@@ -256,7 +256,14 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
                 productId: product.id,
                 sourceUid: msg.uid
               },
-              { ip: 'internal-imap-poll', headers: {} }
+              // ip_address is a Postgres INET column - a marker string like
+              // 'internal-imap-poll' there fails with "invalid input
+              // syntax for type inet" (audit log write is caught/logged
+              // and non-fatal, but it silently drops the audit trail
+              // entry for every IMAP-sourced lead). null is a valid
+              // INET value; the marker goes in user-agent (plain TEXT)
+              // instead, where it still identifies the source.
+              { ip: null, headers: { 'user-agent': 'internal-imap-poll' } }
             );
             stage(`uid-${msg.uid}-after-ingest`);
             await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });

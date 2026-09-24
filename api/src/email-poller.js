@@ -144,7 +144,22 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
     // of stalling near the full cycle, and the timeout error below is
     // what actually distinguishes "unreachable" from "slow" in the logs.
     socketTimeout: 20000,
-    greetingTimeout: 20000
+    greetingTimeout: 20000,
+    // Live debugging traced a repeatable ~20s hang (ending exactly at
+    // socketTimeout, on a connection that otherwise looked idle, while
+    // the rest of the api process kept handling requests normally - see
+    // README "Hardening notes") to right after a STORE command, with
+    // manual reproduction of the identical command succeeding in under
+    // 1ms every time. The one structural difference between this
+    // long-lived connection and an isolated one-off script: COMPRESS
+    // DEFLATE gets negotiated (the server always offers it, ImapFlow
+    // takes it by default), and its decompression runs on Node's libuv
+    // threadpool (default size 4) - which the real api process also uses
+    // for other concurrent work (crypto for decrypting channel secrets,
+    // bcrypt, etc.) that a standalone script never competes with.
+    // Disabling it removes that one variable; the small bandwidth cost
+    // is irrelevant for polling a handful of messages every few minutes.
+    disableCompression: true
   };
 
   let processed = 0, failed = 0, skippedAlready = 0, deletedCount = 0;

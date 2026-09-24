@@ -1692,3 +1692,47 @@ code changes were needed.
     further via manual reproduction that keeps succeeding.
   - Full suite still passes clean (98/98 non-skipped) - purely additive
     logging, no behavior change.
+
+- **IMAP poller: found and fixed the real hang - COMPRESS DEFLATE + threadpool contention, plus a Sarvam AI timeout hardening (2026-09-24)** -
+  Per-message stage logging (previous entry) pinned the ~20s hang to
+  right after issuing the `\Seen` STORE command for an already-known
+  duplicate message: `uid-N-before-skip-flag` to `uid-N-after-skip-flag`
+  took exactly 20005ms - essentially identical to the client's own
+  `socketTimeout: 20000`. Manually reproducing the identical
+  `messageFlagsAdd` call, standalone, succeeded in under 1ms every time.
+  A health-check request was logged in the middle of that same 20s
+  window, ruling out the whole process being frozen - something was
+  stalling only that one IMAP connection's incoming data while
+  everything else in the process kept working normally.
+  - The one structural difference between this long-lived connection and
+    every successful standalone reproduction: `COMPRESS DEFLATE` gets
+    negotiated (the server always offers it, ImapFlow takes it by
+    default), and its decompression runs on Node's libuv threadpool
+    (default size 4) - shared with other concurrent threadpool work in
+    the real api process (crypto for decrypting channel secrets, bcrypt,
+    etc.) that an isolated one-off script never competes with. Set
+    `disableCompression: true` on the poller's ImapFlow client to remove
+    that variable entirely - the bandwidth cost is irrelevant for polling
+    a handful of messages every few minutes.
+  - Independently, `classifyInquiryWithSarvam()` in `server.js` (the
+    Sarvam AI inquiry-filter call every inbound lead goes through,
+    including ones from this poller) had no timeout on its `fetch()` at
+    all - a slow/stalled Sarvam response could hang indefinitely. Not the
+    cause of the specific hang traced above (this particular message
+    never reached that code path, since it was a known-duplicate that
+    took the skip-and-flag branch), but a real latent risk to any
+    caller - a webhook request or, worse, a mid-poll IMAP connection
+    sitting idle while it hangs - so it now aborts after 15s via
+    `AbortController` and returns `null` (unclassified) rather than
+    hanging, same as its existing "couldn't classify" behavior on any
+    other failure.
+  - The temporary stage-by-stage timing logs from the previous two
+    entries are intentionally left in for now - they're what actually
+    found this, and they're cheap (a handful of `console.log` calls per
+    poll cycle, only when a mailbox is actually configured) - can be
+    trimmed later once this fix is confirmed stable in production.
+  - Full suite passes clean (98/98 non-skipped) - `classifyInquiryWithSarvam`
+    has no existing dedicated tests (server.js isn't set up as a testable
+    module - no other function in it has unit tests either), so this was
+    verified by full syntax/build validation plus the unaffected suite,
+    consistent with the rest of that file's coverage.

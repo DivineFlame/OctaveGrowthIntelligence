@@ -184,6 +184,20 @@ const SARVAM_MODEL = process.env.SARVAM_MODEL || 'sarvam-105b';
 // being silently hidden by a filter that couldn't run.
 async function classifyInquiryWithSarvam(text) {
   if (!SARVAM_API_KEY || !text || !text.trim()) return null;
+  // No timeout on this call previously - fetch() has no default deadline
+  // in Node, so a slow/stalled Sarvam response could hang here
+  // indefinitely. Harmless-looking for a webhook request (the caller's
+  // own HTTP client eventually gives up), but it took down the IMAP
+  // poller's mailbox connection: ingestInboundLead() calls this while an
+  // ImapFlow client sits idle mid-poll, and that client's own
+  // socketTimeout (20s, see email-poller.js) fires and kills the
+  // connection out from under it while this fetch is still pending -
+  // surfacing as a misleading "Socket timeout" on the IMAP side with no
+  // indication the real hang was over here. 15s keeps this comfortably
+  // under that 20s so a genuinely slow Sarvam response no longer takes
+  // the whole poll (or the whole webhook request) down with it.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const resp = await fetch('https://api.sarvam.ai/v1/chat/completions', {
       method: 'POST',
@@ -194,7 +208,8 @@ async function classifyInquiryWithSarvam(text) {
           { role: 'system', content: 'Reply with exactly one word: INQUIRY if this message is a genuine product/service inquiry from a prospective customer, or NOISE if it is not (spam, a bare greeting, an unrelated message, etc). No other text.' },
           { role: 'user', content: text.slice(0, 2000) }
         ]
-      })
+      }),
+      signal: controller.signal
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) { console.warn(`[sarvam-filter] HTTP ${resp.status}: ${data.error?.message || 'unknown error'}`); return null; }
@@ -204,8 +219,11 @@ async function classifyInquiryWithSarvam(text) {
     console.warn(`[sarvam-filter] unrecognized reply, leaving unclassified: ${reply.slice(0, 50)}`);
     return null;
   } catch (e) {
-    console.warn(`[sarvam-filter] request failed, leaving unclassified: ${e.message}`);
+    const reason = e.name === 'AbortError' ? 'request timed out after 15s' : e.message;
+    console.warn(`[sarvam-filter] request failed, leaving unclassified: ${reason}`);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

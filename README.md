@@ -1497,3 +1497,45 @@ code changes were needed.
   track of after switching tabs or scrolling. Added a banner above the
   upload area ("Uploading to **\<Product Name\>**") so it's unambiguous
   without having to look back up at the nav bar.
+
+- **Real inbound email: IMAP polling, not just outbound SMTP.** Configuring
+  the Email channel previously only set up SMTP fields (for sending) -
+  there was no code anywhere that turned a reply into a lead, so
+  "configure email, then see inbound messages" silently did nothing. Added
+  six optional fields to the Email channel spec (`imap_host`, `imap_port`,
+  `imap_secure`, `imap_user`, `imap_pass`, `imap_mailbox` - see
+  `api/src/channels.js`; the channel-config UI is fully spec-driven, so
+  these show up in Studio's existing "Configure a Channel" wizard with no
+  frontend changes needed) and a real poller
+  (`api/src/email-poller.js`, using `imapflow`/`mailparser`) that the API
+  process runs on an interval (`EMAIL_POLL_INTERVAL_MINUTES`, default 5,
+  `0` to disable - see `.env.vps.example`).
+  - Extracted the lead-creation logic that used to live entirely inside
+    `handleInboundWebhook` into a shared `ingestInboundLead()` - same
+    dedup, GSTIN/language detection, Sarvam inquiry classification, and
+    audit log for every inbound source, so an emailed lead behaves
+    identically to a WhatsApp/Facebook one rather than a second-class
+    path built separately.
+  - A message is only marked `\Seen` *after* it's successfully turned
+    into a lead - a transient failure (a DB blip, say) leaves it unread
+    so the next poll retries it rather than silently dropping it. A
+    connection failure for one product's mailbox (bad credentials, host
+    unreachable) is logged and skipped, never allowed to block polling
+    every other product's mailbox.
+  - Real limitation worth knowing, documented in the channel's own help
+    text: IMAP's "unread" flag is shared mailbox state, not something
+    this app owns - if a person reads a message in their own mail client
+    before the next poll runs, it becomes invisible to the poller from
+    then on. Use a dedicated mailbox for lead intake if you can, not a
+    personal inbox someone else also reads.
+  - **Verified**: `node --check` on every changed/new file,
+    `require('./email-poller.js')` resolves both new dependencies
+    (`imapflow`, `mailparser`) cleanly, `docker-compose.vps.yml`
+    validated as parseable YAML, and the full unit test suite passes
+    clean (85/85 non-skipped - the pre-existing missing-`rate-limit-redis`
+    gap noted earlier turned out to be fixed by this session's
+    `npm install` too, not something this change did on purpose but a
+    welcome side effect) including two new tests pinning the Email
+    channel's required-vs-optional field split and that `imap_pass`
+    round-trips through encrypt/mask/decrypt exactly like every other
+    secret field.

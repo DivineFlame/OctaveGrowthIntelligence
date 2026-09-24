@@ -41,9 +41,21 @@ const CHANNEL_SPECS = {
       { key: 'smtp_user', label: 'SMTP username', required: true },
       { key: 'smtp_pass', label: 'SMTP password', required: true, secret: true },
       { key: 'from_email', label: 'From address', required: true },
-      { key: 'to_default', label: 'Default recipient (optional, or pass one per-publish)', required: false }
+      { key: 'to_default', label: 'Default recipient (optional, or pass one per-publish)', required: false },
+      // Inbound - optional. Leaving these blank keeps the channel
+      // send-only (SMTP above); setting imap_host/imap_user/imap_pass
+      // turns on real IMAP polling (see email-poller.js) that turns new
+      // messages in this mailbox into leads, same as any other channel's
+      // webhook. Deliberately not required, since plenty of setups only
+      // ever need to send.
+      { key: 'imap_host', label: 'IMAP host (leave blank to skip inbound fetching)', required: false },
+      { key: 'imap_port', label: 'IMAP port', required: false, default: '993' },
+      { key: 'imap_secure', label: 'Use TLS (true/false)', required: false, default: 'true' },
+      { key: 'imap_user', label: 'IMAP username (often the same as SMTP username)', required: false },
+      { key: 'imap_pass', label: 'IMAP password (often the same as SMTP password, or an app password)', required: false, secret: true },
+      { key: 'imap_mailbox', label: 'Mailbox to poll (default INBOX)', required: false, default: 'INBOX' }
     ],
-    help: 'Any SMTP-speaking provider works (SendGrid, SES, Mailgun, Postmark, Gmail with an app password, your own mail server) - this uses plain SMTP, not a vendor-specific REST API, so switching providers is just changing these fields.'
+    help: 'Any SMTP-speaking provider works for sending (SendGrid, SES, Mailgun, Postmark, Gmail with an app password, your own mail server) - this uses plain SMTP, not a vendor-specific REST API. To also turn replies into leads, fill in the IMAP fields too - use a dedicated mailbox for this if you can, since IMAP\'s "unread" flag is shared with whatever else reads that inbox (your own mail client marking a message read makes it invisible to the poller).'
   },
   whatsapp: {
     label: 'WhatsApp Business',

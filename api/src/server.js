@@ -18,6 +18,7 @@ const { rateLimit } = require('express-rate-limit');
 const { authenticator } = require('otplib');
 const QRCode = require('qrcode');
 const channelsLib = require('./channels');
+const emailPoller = require('./email-poller');
 const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
@@ -1616,6 +1617,46 @@ app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware([
 // the separate webhook server on WEBHOOK_PORT. Runs the same real,
 // no-external-API lead enrichment (lead-enrichment.js) the CSV import path
 // does, on whatever free-text fields the webhook payload carries.
+// Shared by every inbound lead source - the public webhook route below,
+// and the IMAP poller (see email-poller.js) for the Email channel's
+// inbound side. Same dedup, GSTIN/language detection, Sarvam
+// classification, and audit log regardless of which channel/source the
+// message came from, so an emailed lead behaves identically to a
+// WhatsApp/Facebook one rather than being a second-class path. `req` only
+// needs `.ip`/`.headers['user-agent']` for the audit log - the IMAP poller
+// passes a synthetic one since there's no real HTTP request behind it.
+async function ingestInboundLead({ channel, companyName, contactName, phone, email, message, productId, valueInr = 0 }, req) {
+  const enrichText = [companyName, contactName, message].filter(Boolean).join(' ');
+  const gstinResult = extractGstin(enrichText);
+  // Sarvam classifies the message itself (not the company/contact name
+  // noise) as a genuine inquiry or not - null (unclassified) when
+  // SARVAM_API_KEY isn't set or the message is empty; see
+  // classifyInquiryWithSarvam() above.
+  const isInquiry = await classifyInquiryWithSarvam(message);
+
+  const dup = await pool.query(
+    `SELECT id FROM leads WHERE (phone<>'' AND phone=$1) OR (email<>'' AND email=$2) LIMIT 1`,
+    [phone, email]
+  );
+  const isDuplicate = dup.rows.length > 0;
+  const insertResult = await pool.query(
+    `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry)
+     VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12) RETURNING id`,
+    [channel, companyName, contactName, phone, email, valueInr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry]
+  );
+  const leadId = insertResult.rows[0].id;
+  if (message) {
+    await pool.query(
+      `INSERT INTO lead_messages (lead_id, direction, channel, body) VALUES ($1,'inbound',$2,$3)`,
+      [leadId, channel, message]
+    );
+  }
+
+  await auditLog(null, 'WEBHOOK_LEAD_RECEIVED', 'lead', leadId, req, 'SUCCESS', { channel, is_duplicate: isDuplicate, is_inquiry: isInquiry });
+
+  return { leadId, isDuplicate, isInquiry };
+}
+
 async function handleInboundWebhook(req, res) {
   const { webhookSecret, channel } = req.params;
   if (!INTEGRATION_CHANNELS.includes(channel)) return res.status(404).json({ error: 'Unknown channel' });
@@ -1636,33 +1677,10 @@ async function handleInboundWebhook(req, res) {
     const message = sanitizeCSVValue(req.body.message || req.body.note || req.body.text || '');
     const productId = req.body.product_id || null;
 
-    const enrichText = [company_name, contact_name, message].filter(Boolean).join(' ');
-    const gstinResult = extractGstin(enrichText);
-    // Sarvam classifies the message itself (not the company/contact name
-    // noise) as a genuine inquiry or not - null (unclassified) when
-    // SARVAM_API_KEY isn't set or the message is empty; see
-    // classifyInquiryWithSarvam() above.
-    const isInquiry = await classifyInquiryWithSarvam(message);
-
-    const dup = await pool.query(
-      `SELECT id FROM leads WHERE (phone<>'' AND phone=$1) OR (email<>'' AND email=$2) LIMIT 1`,
-      [phone, email]
+    const { leadId, isDuplicate, isInquiry } = await ingestInboundLead(
+      { channel, companyName: company_name, contactName: contact_name, phone, email, message, productId, valueInr: value_inr },
+      req
     );
-    const isDuplicate = dup.rows.length > 0;
-    const insertResult = await pool.query(
-      `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry)
-       VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12) RETURNING id`,
-      [channel, company_name, contact_name, phone, email, value_inr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry]
-    );
-    const leadId = insertResult.rows[0].id;
-    if (message) {
-      await pool.query(
-        `INSERT INTO lead_messages (lead_id, direction, channel, body) VALUES ($1,'inbound',$2,$3)`,
-        [leadId, channel, message]
-      );
-    }
-
-    await auditLog(null, 'WEBHOOK_LEAD_RECEIVED', 'lead', leadId, req, 'SUCCESS', { channel, is_duplicate: isDuplicate, is_inquiry: isInquiry });
 
     res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate, is_inquiry: isInquiry });
   } catch(e){ serverError(res, e); }
@@ -1729,6 +1747,35 @@ app.use((err, req, res, next) => {
 
 const httpServer = app.listen(PORT, () => console.log(`OrgComms API v5 (single-company) running on ${PORT}, webhooks on ${WEBHOOK_PORT}`));
 
+// Inbound email polling (see email-poller.js) - every product's Email
+// channel that has imap_host/imap_user/imap_pass set gets checked for new
+// mail on this interval; a channel left SMTP-only (send-only) is skipped,
+// not a misconfiguration. Set EMAIL_POLL_INTERVAL_MINUTES=0 to disable
+// entirely (e.g. a deployment with no email channels configured at all,
+// to skip even the cheap no-op query every interval).
+const EMAIL_POLL_INTERVAL_MINUTES = Number(process.env.EMAIL_POLL_INTERVAL_MINUTES) || 5;
+let emailPollInFlight = false;
+async function runEmailPoll() {
+  if (emailPollInFlight) return; // previous run still going (slow/large mailbox) - skip this tick rather than overlap
+  emailPollInFlight = true;
+  try {
+    const result = await emailPoller.pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, channelsLib });
+    if (result.mailboxesPolled > 0) {
+      console.log(`[email-poller] polled ${result.mailboxesPolled} mailbox(es): ${result.totalProcessed} new lead(s), ${result.totalFailed} failure(s)`);
+    }
+  } catch (e) {
+    console.error('[email-poller] poll run failed:', e.message);
+  } finally {
+    emailPollInFlight = false;
+  }
+}
+let emailPollTimer = null;
+if (EMAIL_POLL_INTERVAL_MINUTES > 0) {
+  emailPollTimer = setInterval(runEmailPoll, EMAIL_POLL_INTERVAL_MINUTES * 60 * 1000);
+  emailPollTimer.unref(); // httpServer/webhookServer already keep the process alive - this shouldn't on its own
+  runEmailPoll().catch(() => {}); // also run once at startup rather than waiting a full interval after every deploy
+}
+
 // Webhook server separate
 const webhookApp = express();
 webhookApp.set('trust proxy', 1);
@@ -1754,6 +1801,7 @@ function gracefulShutdown(signal) {
     process.exit(1);
   }, 9000);
   forceExit.unref();
+  if (emailPollTimer) clearInterval(emailPollTimer);
   let pending = 2;
   const done = () => { if (--pending === 0) finish(); };
   httpServer.close(done);

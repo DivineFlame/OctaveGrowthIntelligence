@@ -97,6 +97,37 @@ test('maskChannelSecrets leaves an empty secret field empty rather than masking 
   assert.equal(masked.access_token, '', 'an unset secret should stay unset, not show a fake mask');
 });
 
+test('validateChannelConfig(email): SMTP fields are required, IMAP fields are not - a send-only config is valid', () => {
+  // The email channel's inbound IMAP fields (imap_host/imap_user/imap_pass
+  // etc - see email-poller.js) are deliberately optional: plenty of setups
+  // only ever want to send, not poll a mailbox for replies. Only the SMTP
+  // fields should ever appear in a "missing required field(s)" error.
+  assert.throws(
+    () => validateChannelConfig('email', {}),
+    /missing required field\(s\): smtp_host, smtp_port, smtp_user, smtp_pass, from_email/
+  );
+  assert.doesNotThrow(() =>
+    validateChannelConfig('email', {
+      smtp_host: 'smtp.example.com', smtp_port: '587', smtp_user: 'u', smtp_pass: 'p', from_email: 'a@example.com'
+    })
+  );
+});
+
+test('email channel: imap_pass round-trips as a secret field, alongside smtp_pass', () => {
+  const raw = { smtp_host: 'smtp.example.com', smtp_pass: 'smtp-secret', imap_host: 'imap.example.com', imap_pass: 'imap-secret' };
+  const encrypted = encryptChannelSecrets('email', raw, fakeEncrypt);
+  assert.equal(encrypted.smtp_host, 'smtp.example.com');
+  assert.equal(encrypted.imap_host, 'imap.example.com');
+  assert.equal(encrypted.smtp_pass, 'ENC(smtp-secret)');
+  assert.equal(encrypted.imap_pass, 'ENC(imap-secret)');
+
+  const masked = maskChannelSecrets('email', encrypted);
+  assert.equal(masked.imap_pass, '••••••••');
+
+  const decrypted = decryptChannelSecrets('email', encrypted, fakeDecrypt);
+  assert.deepEqual(decrypted, raw);
+});
+
 test('publishToChannel refuses an unimplemented channel with a clear error, never a silent fake success', () => {
   // This is the exact bug class this codebase's README documents fixing
   // elsewhere (Paperclip's old /transform endpoint used to fabricate a

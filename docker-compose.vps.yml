@@ -197,6 +197,12 @@ services:
       # filtering (is_inquiry stays NULL/unclassified).
       SARVAM_API_KEY: ${SARVAM_API_KEY:-}
       SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b}
+      # Optional - how often (minutes) to poll every product's Email
+      # channel for new mail via IMAP, for any that have imap_host/
+      # imap_user/imap_pass set (see email-poller.js and README.md
+      # "Hardening notes"). Defaults to 5; set to 0 to disable polling
+      # entirely.
+      EMAIL_POLL_INTERVAL_MINUTES: ${EMAIL_POLL_INTERVAL_MINUTES:-5}
       PAPERCLIP_SERVICE: paperclip-transformer:8000
       HERMES_MODE: premium_multiagent
       # Load-bearing, not cosmetic: with APP_DOMAIN unset, CORS_ALLOWED_ORIGINS

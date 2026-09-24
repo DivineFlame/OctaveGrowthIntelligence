@@ -90,24 +90,43 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
   const pass = config.imap_pass || '';
   if (!host || !user || !pass) return { skipped: true, processed: 0, failed: 0, deleted: 0 };
 
+  const port = Number(config.imap_port) || 993;
+  const target = `${host}:${port}`;
   const createClient = deps.createClient || ((opts) => new ImapFlow(opts));
   const client = createClient({
     host,
-    port: Number(config.imap_port) || 993,
+    port,
     secure: String(config.imap_secure || 'true') !== 'false',
     auth: { user, pass },
-    logger: false
+    logger: false,
+    // ImapFlow's own default (5 minutes) is generous enough for a slow
+    // server, but leaves a poll silently hanging for most of its own
+    // interval when the mailbox is actually unreachable (wrong host,
+    // network/firewall blocking the port, provider-side throttling).
+    // Failing faster means one bad mailbox loses ~20s per poll instead
+    // of stalling near the full cycle, and the timeout error below is
+    // what actually distinguishes "unreachable" from "slow" in the logs.
+    socketTimeout: 20000,
+    greetingTimeout: 20000
   });
   // ImapFlow emits an 'error' event on things like an unexpected
   // disconnect mid-poll - without a listener, that's an unhandled event
   // that can crash the whole api process, not just this one poll. A
   // single misconfigured/unreachable mailbox must never take api down.
+  // Includes host:port because the outer catch in pollAllEmailChannels
+  // only has the product name to go on - without this, a bad host,
+  // wrong port, and a provider-side block are indistinguishable in the
+  // logs.
   client.on('error', (err) => {
-    console.warn(`[email-poller] product ${product.id}: IMAP connection error: ${err.message}`);
+    console.warn(`[email-poller] product ${product.id}: IMAP connection error (${target}): ${err.message}`);
   });
 
   let processed = 0, failed = 0, skippedAlready = 0, deletedCount = 0;
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (e) {
+    throw new Error(`connect to ${target} failed: ${e.message}`);
+  }
   try {
     const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
     const lock = await client.getMailboxLock(mailbox);

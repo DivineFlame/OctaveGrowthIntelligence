@@ -1604,3 +1604,29 @@ code changes were needed.
     bug scenario (same UID reported unseen across two polls → exactly one
     lead, not two), the other proves a genuinely new message still gets
     ingested normally. Full suite passes clean (96/96 non-skipped).
+
+- **IMAP poller: connection timeout + failure diagnostics (2026-09-24)** -
+  After the repeating-messages fix deployed, live polling against a
+  Hostinger mailbox started failing every cycle with a bare "Socket
+  timeout" / "Connection not available", with no host/port in the log to
+  say what was actually being attempted.
+  - `pollProductMailbox()` now sets explicit `socketTimeout` /
+    `greetingTimeout` (20s) on the ImapFlow client instead of relying on
+    its 5-minute default - an unreachable mailbox now fails fast instead
+    of silently eating most of the poll interval before erroring.
+  - Both the connection-level `error` event and a failed `connect()` now
+    log/throw with the mailbox's `host:port`, so a bad host, wrong port,
+    and a provider-side block are distinguishable in the logs instead of
+    all looking like the same generic message.
+  - This is a diagnostics/robustness change, not a fix for the
+    "Socket timeout" itself - that points at the connection from the VPS
+    to the mail server, not at this app's code. Next deploy's logs will
+    say which host:port is timing out; from there it's worth checking
+    from the VPS directly (e.g. `openssl s_client -connect
+    imap.hostinger.com:993 -crlf` or `nc -zv <host> 993`) and checking
+    whether Hostinger's mailbox security page shows anything about
+    blocked/flagged sign-in attempts, since a burst of rapid repeated
+    logins from the pre-fix bug can trip that on some providers.
+  - Full suite still passes clean (96/96 non-skipped) - this touches only
+    connection setup/error paths, not the search/fetch/ingest logic the
+    existing regression tests already exercise.

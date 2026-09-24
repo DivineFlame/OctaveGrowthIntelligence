@@ -144,20 +144,25 @@ function Thread({ lead, onClose }) {
         </button>
       </div>
 
-      <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+      <div className="flex-1 min-w-0 space-y-2 overflow-x-hidden overflow-y-auto px-4 py-3">
         {loading ? (
           <p className="text-[12px] text-zinc-500 dark:text-white/50">Loading…</p>
         ) : messages.length ? (
           messages.map((m) => (
             <div
               key={m.id}
-              className={`max-w-[85%] rounded-[10px] px-3 py-2 text-[12px] ${
+              className={`max-w-[85%] min-w-0 overflow-hidden rounded-[10px] px-3 py-2 text-[12px] ${
                 m.direction === 'outbound'
                   ? 'ml-auto bg-brand/10 text-zinc-900 dark:text-white'
                   : 'bg-zinc-50 text-zinc-900 dark:bg-white/[0.04] dark:text-white'
               }`}
             >
-              <p className="whitespace-pre-wrap">{m.body}</p>
+              {/* break-words (overflow-wrap: break-word) matters here specifically -
+                  an email-sourced message can contain a long unbroken run of
+                  characters (a tracking URL, an un-spaced run left over from a
+                  template) that whitespace-pre-wrap alone won't wrap, and would
+                  otherwise push past this bubble's max-width. */}
+              <p className="whitespace-pre-wrap break-words">{m.body}</p>
               <p className="mt-1 text-[10px] text-zinc-400 dark:text-white/30">
                 {m.direction === 'outbound' ? `You${m.sent_by_email ? ` (${m.sent_by_email})` : ''}` : 'Them'} ·{' '}
                 {new Date(m.created_at).toLocaleString()}

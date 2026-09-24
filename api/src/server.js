@@ -1625,7 +1625,7 @@ app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware([
 // WhatsApp/Facebook one rather than being a second-class path. `req` only
 // needs `.ip`/`.headers['user-agent']` for the audit log - the IMAP poller
 // passes a synthetic one since there's no real HTTP request behind it.
-async function ingestInboundLead({ channel, companyName, contactName, phone, email, message, productId, valueInr = 0 }, req) {
+async function ingestInboundLead({ channel, companyName, contactName, phone, email, message, productId, valueInr = 0, sourceUid = null }, req) {
   const enrichText = [companyName, contactName, message].filter(Boolean).join(' ');
   const gstinResult = extractGstin(enrichText);
   // Sarvam classifies the message itself (not the company/contact name
@@ -1639,10 +1639,14 @@ async function ingestInboundLead({ channel, companyName, contactName, phone, ema
     [phone, email]
   );
   const isDuplicate = dup.rows.length > 0;
+  // sourceUid is only ever set for an IMAP-sourced lead (see
+  // email-poller.js) - it's how a later poll can tell the source email
+  // was deleted from the mailbox and remove this lead too. NULL for
+  // every other channel/source.
   const insertResult = await pool.query(
-    `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry)
-     VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12) RETURNING id`,
-    [channel, companyName, contactName, phone, email, valueInr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry]
+    `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry, source_uid)
+     VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+    [channel, companyName, contactName, phone, email, valueInr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry, sourceUid]
   );
   const leadId = insertResult.rows[0].id;
   if (message) {
@@ -1761,7 +1765,7 @@ async function runEmailPoll() {
   try {
     const result = await emailPoller.pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, channelsLib });
     if (result.mailboxesPolled > 0) {
-      console.log(`[email-poller] polled ${result.mailboxesPolled} mailbox(es): ${result.totalProcessed} new lead(s), ${result.totalFailed} failure(s)`);
+      console.log(`[email-poller] polled ${result.mailboxesPolled} mailbox(es): ${result.totalProcessed} new lead(s), ${result.totalFailed} failure(s), ${result.totalDeleted} lead(s) removed (source email deleted from mailbox)`);
     }
   } catch (e) {
     console.error('[email-poller] poll run failed:', e.message);

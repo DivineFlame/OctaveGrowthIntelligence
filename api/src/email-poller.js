@@ -21,18 +21,70 @@
 // it's invisible to this poller from then on. Use a dedicated mailbox for
 // lead intake if you can (documented in the channel's help text and
 // README.md), not a personal inbox someone else also reads.
+//
+// Every ingested lead records the IMAP UID it came from (leads.source_uid
+// - see migrate-email-source-uid.sql) - each poll also reconciles that
+// against what's still actually in the mailbox, and deletes a lead whose
+// source email was deleted (in the person's own mail client, not through
+// this app) rather than leaving it around forever pointing at a message
+// that no longer exists.
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
+
+// Strips the invisible-character padding some marketing/transactional
+// email templates use to control their inbox preview snippet (a real one
+// - Hostinger's "Welcome to Hostinger Email" - is what surfaced this:
+// repeated zero-width space + combining-mark sequences that render as
+// nothing in an email client but come through as visible junk once
+// pulled out as plain text). Applied regardless of source (parsed.text,
+// or mailparser's own html-to-text fallback when there's no text/plain
+// part), then whitespace left behind by stripping them is collapsed.
+function cleanEmailText(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/[​-‍﻿­]/g, '') // zero-width space/joiner/non-breaking space, soft hyphen
+    .replace(/[̀-ͯ]/g, '') // combining marks left with no visible base char after the strip above
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Deletes any lead this poller previously created from `product`'s
+// mailbox whose source message no longer exists in it. UID SEARCH ALL
+// returns just the UID numbers (not full messages), so this stays cheap
+// even against a mailbox with thousands of messages. Must run against the
+// same mailbox that was actually polled - the caller holds that lock open
+// across both this and the ingest loop below.
+async function reconcileDeletedLeads(pool, product, client) {
+  const { rows: known } = await pool.query(
+    `SELECT id, source_uid FROM leads WHERE product_id=$1 AND source_channel='email' AND source_uid IS NOT NULL`,
+    [product.id]
+  );
+  if (!known.length) return { deleted: 0 };
+
+  const existingUids = new Set((await client.search({ all: true }, { uid: true })) || []);
+  let deleted = 0;
+  for (const row of known) {
+    if (existingUids.has(Number(row.source_uid))) continue;
+    // ON DELETE CASCADE on lead_messages.lead_id removes its messages too
+    // (see postgres/init-secure.sql). audit_logs.resource_id has no FK to
+    // leads, so the fact this lead once existed stays in the audit trail
+    // even after the row itself is gone.
+    await pool.query('DELETE FROM leads WHERE id=$1', [row.id]);
+    deleted++;
+  }
+  return { deleted };
+}
 
 // Polls one product's mailbox. Never throws for a single bad message
 // (logged and skipped, loop continues) - only a connection-level failure
 // (bad host/credentials, network down) propagates, so the caller can log
 // it against that one product without losing the others.
-async function pollProductMailbox(product, config, ingestInboundLead) {
+async function pollProductMailbox(pool, product, config, ingestInboundLead) {
   const host = (config.imap_host || '').trim();
   const user = (config.imap_user || '').trim();
   const pass = config.imap_pass || '';
-  if (!host || !user || !pass) return { skipped: true, processed: 0, failed: 0 };
+  if (!host || !user || !pass) return { skipped: true, processed: 0, failed: 0, deleted: 0 };
 
   const client = new ImapFlow({
     host,
@@ -49,7 +101,7 @@ async function pollProductMailbox(product, config, ingestInboundLead) {
     console.warn(`[email-poller] product ${product.id}: IMAP connection error: ${err.message}`);
   });
 
-  let processed = 0, failed = 0;
+  let processed = 0, failed = 0, deletedCount = 0;
   await client.connect();
   try {
     const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
@@ -59,7 +111,7 @@ async function pollProductMailbox(product, config, ingestInboundLead) {
         try {
           const parsed = await simpleParser(msg.source);
           const from = (parsed.from && parsed.from.value && parsed.from.value[0]) || {};
-          const body = String(parsed.text || parsed.subject || '').slice(0, 5000);
+          const body = cleanEmailText(parsed.text || parsed.subject || '').slice(0, 5000);
           await ingestInboundLead(
             {
               channel: 'email',
@@ -68,7 +120,8 @@ async function pollProductMailbox(product, config, ingestInboundLead) {
               phone: '',
               email: (from.address || '').toLowerCase(),
               message: body,
-              productId: product.id
+              productId: product.id,
+              sourceUid: msg.uid
             },
             { ip: 'internal-imap-poll', headers: {} }
           );
@@ -79,13 +132,20 @@ async function pollProductMailbox(product, config, ingestInboundLead) {
           console.warn(`[email-poller] product ${product.id}: failed to ingest message uid=${msg.uid}: ${e.message}`);
         }
       }
+
+      try {
+        const result = await reconcileDeletedLeads(pool, product, client);
+        deletedCount = result.deleted;
+      } catch (e) {
+        console.warn(`[email-poller] product ${product.id}: reconcile-deleted pass failed: ${e.message}`);
+      }
     } finally {
       lock.release();
     }
   } finally {
     await client.logout().catch(() => {});
   }
-  return { skipped: false, processed, failed };
+  return { skipped: false, processed, failed, deleted: deletedCount };
 }
 
 // Polls every product's Email channel that has IMAP fields configured.
@@ -99,7 +159,7 @@ async function pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, ch
      JOIN products p ON p.id = pc.product_id
      WHERE pc.channel='email' AND pc.status='configured'`
   );
-  let mailboxesPolled = 0, totalProcessed = 0, totalFailed = 0;
+  let mailboxesPolled = 0, totalProcessed = 0, totalFailed = 0, totalDeleted = 0;
   for (const row of rows) {
     let config;
     try {
@@ -110,17 +170,18 @@ async function pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, ch
     }
     if (!config.imap_host) continue; // send-only email channel - nothing to poll, not a misconfiguration
     try {
-      const result = await pollProductMailbox({ id: row.product_id, name: row.name }, config, ingestInboundLead);
+      const result = await pollProductMailbox(pool, { id: row.product_id, name: row.name }, config, ingestInboundLead);
       if (!result.skipped) {
         mailboxesPolled++;
         totalProcessed += result.processed;
         totalFailed += result.failed;
+        totalDeleted += result.deleted;
       }
     } catch (e) {
       console.warn(`[email-poller] product ${row.product_id} (${row.name}): IMAP poll failed: ${e.message}`);
     }
   }
-  return { mailboxesPolled, totalProcessed, totalFailed };
+  return { mailboxesPolled, totalProcessed, totalFailed, totalDeleted };
 }
 
-module.exports = { pollAllEmailChannels, pollProductMailbox };
+module.exports = { pollAllEmailChannels, pollProductMailbox, cleanEmailText, reconcileDeletedLeads };

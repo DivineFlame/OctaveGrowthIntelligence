@@ -31,6 +31,7 @@ const MIGRATIONS_IN_ORDER = [
   'migrate-content-variants-indexes.sql',
   'migrate-gdpr-erasure.sql',
   'migrate-lead-inquiry-filter.sql',
+  'migrate-email-source-uid.sql',
   // Collapses multi-tenancy down to a single company (see README.md
   // "Hardening notes" and this file's own header comment) - runs last
   // since it depends on every table/column every earlier migration

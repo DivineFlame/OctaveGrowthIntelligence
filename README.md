@@ -1539,3 +1539,38 @@ code changes were needed.
     channel's required-vs-optional field split and that `imap_pass`
     round-trips through encrypt/mask/decrypt exactly like every other
     secret field.
+
+- **Three real bugs fixed in the IMAP poller after live testing against a
+  real mailbox.**
+  - **Garbled message content.** A real welcome email (Hostinger's) showed
+    the lead message full of visible junk characters - the template pads
+    its inbox preview snippet with runs of invisible zero-width
+    space/combining-mark characters, and mailparser's plain-text
+    extraction faithfully includes them since they're real text content,
+    just visually hidden via the email itself, not something a text
+    parser can know to skip. Added `cleanEmailText()` (strips
+    `​-‍`, `﻿`, `­`, and `̀-ͯ`, then
+    collapses the whitespace left behind) applied to every message body
+    before it's stored.
+  - **A deleted email stayed a lead forever.** Nothing reconciled a lead
+    against its source message still existing - delete the email in your
+    own mail client and the lead just sat there. `leads` gained a
+    `source_uid` column (`migrate-email-source-uid.sql`) recording the
+    IMAP UID a lead came from; every poll now also runs
+    `reconcileDeletedLeads()` (`IMAP UID SEARCH ALL`, cheap even against a
+    large mailbox - just the UID numbers, not full messages) and deletes
+    any lead whose source UID is no longer present. `lead_messages`
+    cascades on delete; `audit_logs` keeps the historical record
+    regardless (no FK to `leads`).
+  - **Long email content overflowed its message bubble.** The Inbox/Leads
+    thread view had `whitespace-pre-wrap` but no `overflow-wrap`, so an
+    unbroken run of characters (a tracking URL, template artifacts) could
+    push past the bubble's `max-width` instead of wrapping. Added
+    `break-words` to the message text and `overflow-hidden`/`min-w-0` to
+    the bubble and its scroll container as a second line of defense.
+  - **Verified**: 7 new unit tests for `cleanEmailText()` and
+    `reconcileDeletedLeads()` (the latter via an injected fake
+    pool/IMAP-client, same pattern `channels.test.js` uses for
+    encrypt/decrypt - no real mailbox needed), full suite passes clean
+    (94/94 non-skipped), `node --check` on every changed file, clean
+    `npm run build` with CSP hashes confirmed unchanged.

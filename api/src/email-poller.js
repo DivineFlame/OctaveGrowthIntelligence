@@ -190,19 +190,26 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
             // unreliable about persisting it), don't create a second
             // lead for it. Just re-mark it seen and move on, so it stops
             // showing up as "new" on every future poll too.
+            stage(`uid-${msg.uid}-before-dedup-query`);
             const already = await pool.query(
               `SELECT id FROM leads WHERE product_id=$1 AND source_channel='email' AND source_uid=$2 LIMIT 1`,
               [product.id, msg.uid]
             );
+            stage(`uid-${msg.uid}-after-dedup-query`);
             if (already.rows.length) {
+              stage(`uid-${msg.uid}-before-skip-flag`);
               await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true }).catch(() => {});
+              stage(`uid-${msg.uid}-after-skip-flag`);
               skippedAlready++;
               continue;
             }
 
+            stage(`uid-${msg.uid}-before-parse`);
             const parsed = await simpleParser(msg.source);
+            stage(`uid-${msg.uid}-after-parse`);
             const from = (parsed.from && parsed.from.value && parsed.from.value[0]) || {};
             const body = cleanEmailText(parsed.text || parsed.subject || '').slice(0, 5000);
+            stage(`uid-${msg.uid}-before-ingest`);
             await ingestInboundLead(
               {
                 channel: 'email',
@@ -216,7 +223,9 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
               },
               { ip: 'internal-imap-poll', headers: {} }
             );
+            stage(`uid-${msg.uid}-after-ingest`);
             await client.messageFlagsAdd(msg.uid, ['\\Seen'], { uid: true });
+            stage(`uid-${msg.uid}-after-flag-seen`);
             processed++;
           } catch (e) {
             failed++;

@@ -1736,3 +1736,37 @@ code changes were needed.
     module - no other function in it has unit tests either), so this was
     verified by full syntax/build validation plus the unaffected suite,
     consistent with the rest of that file's coverage.
+
+- **IMAP poller: the actual fix - a STORE issued mid-fetch-stream deadlocks ImapFlow (2026-09-24)** -
+  Disabling compression (previous entry) did not fix it - the exact same
+  ~20005ms hang recurred at the exact same point
+  (`uid-N-before-skip-flag` to `uid-N-after-skip-flag`), ruling that
+  theory out cleanly. The real cause: `pollProductMailbox()` called
+  `messageFlagsAdd()` (a `STORE` command) from *inside* the `for await`
+  loop that was still iterating `fetch()`'s result stream. IMAP does not
+  allow overlapping commands, and ImapFlow's own documentation explicitly
+  warns that issuing another command while still iterating a
+  `fetch()`/`search()` result is a deadlock, not an error - it just never
+  resolves, silently, until something else forces the connection closed
+  (here, the client's own `socketTimeout`, 20s later, every single time).
+  Every manual reproduction during debugging tested `fetch()` and
+  `messageFlagsAdd()` as separate, sequential calls and never hit this -
+  which is exactly why the bug was unreproducible outside the real poll
+  loop despite every individual IMAP operation checking out fine in
+  isolation.
+  - Fixed by fully draining `fetch()`'s stream into an array first, then
+    processing each message (dedup check, `\Seen` flag, parse, ingest)
+    with plain sequential `await` calls afterward, outside the streaming
+    context - the pattern ImapFlow's own docs call out as correct.
+  - Added a regression test (`pollProductMailbox fully drains fetch()
+    before issuing any messageFlagsAdd/STORE call`) that asserts call
+    order directly: every fetch-yielded message must be collected before
+    any STORE call happens, for all messages, not just the first. A fake
+    client can't reproduce an actual protocol-level deadlock, but this
+    guards against the ordering regressing back to the buggy pattern.
+  - The `disableCompression: true` and Sarvam AI fetch timeout from the
+    previous two entries are left in place - neither was the root cause,
+    but both are still reasonable hardening (removes one variable from
+    future debugging; caps a genuinely untimed external call) with no
+    real downside for this use case.
+  - Full suite passes clean (99/99 non-skipped, one new test added).

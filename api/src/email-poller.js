@@ -194,9 +194,29 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
       const uids = await client.search({ seen: false }, { uid: true });
       stage('after-search');
       if (uids && uids.length) {
+        // Fully drain fetch()'s stream into an array BEFORE issuing any
+        // other command (messageFlagsAdd/STORE below). This was the real
+        // bug behind the ~20s hangs the stage timing above was added to
+        // chase down: IMAP does not allow overlapping commands, and
+        // ImapFlow explicitly documents that running another command
+        // while still iterating a fetch()/search() result is a deadlock,
+        // not an error - it just silently never resolves until something
+        // else (the client's own socketTimeout) forces the connection
+        // closed. Every manual reproduction during debugging called
+        // fetch() and messageFlagsAdd() as separate, sequential steps and
+        // never hit this, which is exactly why it never reproduced
+        // outside the real poll loop. Collecting every message first,
+        // then processing each one with plain sequential awaits after
+        // the fetch() generator is fully consumed, is the pattern
+        // ImapFlow's own docs call out as the correct one.
         stage('before-fetch-loop');
+        const fetched = [];
         for await (const msg of client.fetch(uids, { uid: true, envelope: true, source: true }, { uid: true })) {
           stage(`fetch-yielded-uid-${msg.uid}`);
+          fetched.push(msg);
+        }
+        stage('after-fetch-loop');
+        for (const msg of fetched) {
           try {
             // Belt-and-suspenders against the same failure mode from the
             // other direction: if this exact message was already turned

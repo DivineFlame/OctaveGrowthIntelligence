@@ -267,3 +267,52 @@ test('pollProductMailbox gives up and throws after exhausting all connect attemp
     /connect to imap\.hostinger\.com:993 failed after 3 attempts/
   );
 });
+
+// Regression test for the real root cause of the "poller hangs for ~20s
+// on every real deploy, never reproduces in a one-off manual script"
+// bug: pollProductMailbox() used to call messageFlagsAdd() (a STORE
+// command) from inside the for-await loop still iterating fetch()'s
+// result stream. ImapFlow's own docs call this out as a deadlock, not
+// an error - IMAP does not allow overlapping commands - which is why it
+// never surfaced as a thrown error, just silence until the client's own
+// socketTimeout eventually killed the connection. The fix drains
+// fetch() into an array first, then processes each message with plain
+// sequential commands afterward. This fake client can't reproduce an
+// actual protocol deadlock (it's not a real IMAP server), but it can
+// prove the *call order* the fix depends on: every fetch-yielded
+// message is fully collected before any messageFlagsAdd/STORE call is
+// made, for every message, not just the first.
+test('pollProductMailbox fully drains fetch() before issuing any messageFlagsAdd/STORE call', async () => {
+  const { pool, ingestInboundLead, leads } = makeFakeStore();
+  const product = { id: 'product-1', name: 'RamRaj Design House' };
+  const config = { imap_host: 'imap.hostinger.com', imap_user: 'u', imap_pass: 'p' };
+
+  const callOrder = [];
+  const fakeClient = {
+    on: () => {},
+    connect: async () => {},
+    getMailboxLock: async () => ({ release: () => {} }),
+    search: async () => [1, 2, 3],
+    fetch: async function* (uids) {
+      for (const uid of uids) {
+        callOrder.push(`yielded-${uid}`);
+        yield { uid, source: Buffer.from(RAW_EMAIL) };
+      }
+    },
+    messageFlagsAdd: async (uid) => {
+      callOrder.push(`store-${uid}`);
+    },
+    logout: async () => {}
+  };
+
+  const result = await pollProductMailbox(pool, product, config, ingestInboundLead, { createClient: () => fakeClient });
+
+  assert.equal(result.processed, 3);
+  assert.equal(leads.length, 3);
+  const lastYieldIndex = callOrder.lastIndexOf('yielded-3');
+  const firstStoreIndex = callOrder.findIndex((entry) => entry.startsWith('store-'));
+  assert.ok(
+    firstStoreIndex > lastYieldIndex,
+    `every fetch yield must happen before any STORE call - got order: ${callOrder.join(', ')}`
+  );
+});

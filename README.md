@@ -1630,3 +1630,41 @@ code changes were needed.
   - Full suite still passes clean (96/96 non-skipped) - this touches only
     connection setup/error paths, not the search/fetch/ingest logic the
     existing regression tests already exercise.
+
+- **IMAP poller: retry on connect failure - Cloudflare-fronted edge issue (2026-09-24)** -
+  Live debugging traced the "Socket timeout" from the previous entry
+  further: from the VPS host directly, `openssl s_client -connect
+  imap.hostinger.com:993` succeeded instantly. From inside the running
+  `api` container, a raw TCP connect and a full TLS handshake to the same
+  host:port both succeeded instantly too. A one-off script using the
+  actual `imapflow` library with the exact same credentials also
+  succeeded immediately - full LOGIN, `=== LOGIN SUCCEEDED ===`, clean
+  logout - with verbose logging showing the successful connection landed
+  on `172.65.188.64`, a Cloudflare address. So `imap.hostinger.com` is
+  served through Cloudflare rather than a plain direct IP, and every
+  layer (network, TLS, credentials, IMAP auth) checked out fine in
+  isolation - yet the scheduled poller kept failing on every single
+  cycle. The working theory: an individual Cloudflare edge node
+  intermittently stalling new connections while other edges are healthy
+  - a fresh DNS lookup/connection (a one-off script, or the next poll a
+  few minutes later) can easily land on a different, working edge.
+  - Added `connectWithRetry()` in `email-poller.js`: up to 3 connection
+    attempts with a short backoff (2s, then 4s) before giving up on a
+    mailbox for that poll cycle, each attempt using a fresh ImapFlow
+    client (a client whose `connect()` failed is not reused - its own
+    internal timers/state for that attempt are already torn down, and
+    `client.close()` is called on it as a local cleanup before retrying).
+  - This is a resilience fix for a transient/edge-node-class failure, not
+    a guarantee against every possible cause of a stuck connection - if
+    all 3 attempts land on bad edges (or the mailbox is genuinely
+    unreachable/misconfigured) it still fails and logs, same as before,
+    just after 3 tries instead of 1.
+  - Two new regression tests exercise the retry path via
+    `pollProductMailbox()`'s existing `deps.createClient` injection seam
+    (plus new `deps.retryDelayMs`/`deps.connectAttempts` test-only seams
+    to skip the real backoff wait) - one proves a connect failure on the
+    first attempt is retried and a later successful attempt still
+    ingests the message normally, the other proves exhausting every
+    attempt surfaces a clear "failed after N attempts" error rather than
+    hanging or failing silently. Full suite passes clean (98/98
+    non-skipped).

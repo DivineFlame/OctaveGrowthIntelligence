@@ -76,6 +76,43 @@ async function reconcileDeletedLeads(pool, product, client) {
   return { deleted };
 }
 
+// A single failed connect() to a Cloudflare-fronted mail host (Hostinger's
+// imap.hostinger.com resolves behind Cloudflare, confirmed via a manual
+// connection landing on a 172.65.x.x address) can be a bad edge node on
+// that one attempt rather than the mailbox actually being unreachable -
+// a fresh DNS lookup + connection on the next try often lands on a
+// healthy edge. Retries up to 3 times total with a short backoff before
+// giving up and letting the caller log/skip this product for this poll
+// cycle. Each attempt gets its own fresh client (a client whose connect()
+// failed is not reused - ImapFlow's own internal timers/state for that
+// attempt are already torn down) and its own 'error' listener, so an
+// unhandled event from an earlier failed attempt can never crash the
+// process once a later attempt succeeds.
+async function connectWithRetry(createClient, clientOpts, target, product, attempts = 3, retryDelayMs = 2000) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const client = createClient(clientOpts);
+    client.on('error', (err) => {
+      console.warn(`[email-poller] product ${product.id}: IMAP connection error (${target}), attempt ${attempt}/${attempts}: ${err.message}`);
+    });
+    try {
+      await client.connect();
+      return client;
+    } catch (e) {
+      lastErr = e;
+      try { client.close(); } catch (_) { /* best effort */ }
+      if (attempt < attempts) {
+        console.warn(`[email-poller] product ${product.id}: connect attempt ${attempt}/${attempts} to ${target} failed (${e.message}), retrying...`);
+        // retryDelayMs is a test-only seam (deps.retryDelayMs below) so
+        // regression tests can exercise multi-attempt retry/give-up
+        // behavior without actually waiting through the real backoff.
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+      }
+    }
+  }
+  throw new Error(`connect to ${target} failed after ${attempts} attempts: ${lastErr.message}`);
+}
+
 // Polls one product's mailbox. Never throws for a single bad message
 // (logged and skipped, loop continues) - only a connection-level failure
 // (bad host/credentials, network down) propagates, so the caller can log
@@ -93,7 +130,7 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
   const port = Number(config.imap_port) || 993;
   const target = `${host}:${port}`;
   const createClient = deps.createClient || ((opts) => new ImapFlow(opts));
-  const client = createClient({
+  const clientOpts = {
     host,
     port,
     secure: String(config.imap_secure || 'true') !== 'false',
@@ -108,25 +145,10 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
     // what actually distinguishes "unreachable" from "slow" in the logs.
     socketTimeout: 20000,
     greetingTimeout: 20000
-  });
-  // ImapFlow emits an 'error' event on things like an unexpected
-  // disconnect mid-poll - without a listener, that's an unhandled event
-  // that can crash the whole api process, not just this one poll. A
-  // single misconfigured/unreachable mailbox must never take api down.
-  // Includes host:port because the outer catch in pollAllEmailChannels
-  // only has the product name to go on - without this, a bad host,
-  // wrong port, and a provider-side block are indistinguishable in the
-  // logs.
-  client.on('error', (err) => {
-    console.warn(`[email-poller] product ${product.id}: IMAP connection error (${target}): ${err.message}`);
-  });
+  };
 
   let processed = 0, failed = 0, skippedAlready = 0, deletedCount = 0;
-  try {
-    await client.connect();
-  } catch (e) {
-    throw new Error(`connect to ${target} failed: ${e.message}`);
-  }
+  const client = await connectWithRetry(createClient, clientOpts, target, product, deps.connectAttempts || 3, deps.retryDelayMs != null ? deps.retryDelayMs : 2000);
   try {
     const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
     const lock = await client.getMailboxLock(mailbox);

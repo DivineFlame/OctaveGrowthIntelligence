@@ -202,3 +202,68 @@ test('pollProductMailbox: a genuinely new message on a later poll is ingested as
   assert.equal(second.skippedAlready, 0);
   assert.equal(leads.length, 2);
 });
+
+// Connection-retry behavior (added after a live deploy against a
+// Cloudflare-fronted Hostinger mailbox showed every scheduled poll
+// timing out while a manual one-off connection with identical
+// credentials succeeded immediately - consistent with an intermittently
+// bad edge node on the proxy in front of the real mail server, not the
+// mailbox/credentials themselves being wrong). connectWithRetry() is not
+// exported directly; exercised here through pollProductMailbox's
+// deps.createClient/deps.retryDelayMs/deps.connectAttempts seams instead,
+// the same way its search/fetch/dedup logic already is above.
+function makeFailingThenWorkingClientFactory(failuresBeforeSuccess, workingClient) {
+  let calls = 0;
+  return () => {
+    calls++;
+    if (calls <= failuresBeforeSuccess) {
+      return {
+        on: () => {},
+        connect: async () => { throw new Error(`simulated bad edge node (attempt ${calls})`); },
+        close: () => {}
+      };
+    }
+    return workingClient;
+  };
+}
+
+test('pollProductMailbox retries a transient connect failure and succeeds on a later attempt', async () => {
+  const { pool, ingestInboundLead, leads } = makeFakeStore();
+  const product = { id: 'product-1', name: 'RamRaj Design House' };
+  const config = { imap_host: 'imap.hostinger.com', imap_user: 'u', imap_pass: 'p' };
+
+  const workingClient = makeFakeImapClient({ uidsStillUnseen: [42] });
+  let factoryCalls = 0;
+  const createClient = () => {
+    factoryCalls++;
+    return factoryCalls === 1
+      ? { on: () => {}, connect: async () => { throw new Error('simulated bad edge node'); }, close: () => {} }
+      : workingClient;
+  };
+
+  const result = await pollProductMailbox(pool, product, config, ingestInboundLead, {
+    createClient,
+    retryDelayMs: 0 // skip the real backoff wait - only the retry logic itself is under test
+  });
+
+  assert.equal(factoryCalls, 2, 'should have created a second client after the first connect() failed');
+  assert.equal(result.processed, 1);
+  assert.equal(leads.length, 1);
+});
+
+test('pollProductMailbox gives up and throws after exhausting all connect attempts', async () => {
+  const { pool, ingestInboundLead } = makeFakeStore();
+  const product = { id: 'product-1', name: 'RamRaj Design House' };
+  const config = { imap_host: 'imap.hostinger.com', imap_user: 'u', imap_pass: 'p' };
+
+  const createClient = makeFailingThenWorkingClientFactory(Infinity, null);
+
+  await assert.rejects(
+    () => pollProductMailbox(pool, product, config, ingestInboundLead, {
+      createClient,
+      retryDelayMs: 0,
+      connectAttempts: 3
+    }),
+    /connect to imap\.hostinger\.com:993 failed after 3 attempts/
+  );
+});

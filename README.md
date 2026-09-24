@@ -1668,3 +1668,27 @@ code changes were needed.
     attempt surfaces a clear "failed after N attempts" error rather than
     hanging or failing silently. Full suite passes clean (98/98
     non-skipped).
+
+- **IMAP poller: temporary stage-by-stage timing instrumentation (2026-09-24)** -
+  Manual reproduction of the poller's exact connect -> mailbox-lock ->
+  search sequence, run as a one-off script inside the same running
+  container (same network namespace, same credentials, same host), has
+  now succeeded three separate times in under 2 seconds each - yet the
+  actual scheduled poller running inside the long-lived `api` process
+  fails on every single cycle with the same "Socket timeout". That split
+  (works every time in isolation, fails every time in the real process)
+  means the failure is specific to something about running inside that
+  process rather than the IMAP interaction itself, which isn't
+  reproducible by testing the same calls standalone.
+  - Added temporary `console.log` timing checkpoints
+    (`before-connect`/`after-connect`/`before-lock`/`after-lock`/
+    `before-search`/`after-search`/`before-fetch-loop`/
+    `fetch-yielded-uid-N`/`before-reconcile`/`after-reconcile`) around
+    every `await` in `pollProductMailbox()`, each logging milliseconds
+    elapsed since the poll started. Intended to be removed once the next
+    real failure's logs show which specific stage is actually stalling
+    inside the real process - at that point the fix (if any) will be
+    scoped to whatever that stage turns out to be, rather than guessing
+    further via manual reproduction that keeps succeeding.
+  - Full suite still passes clean (98/98 non-skipped) - purely additive
+    logging, no behavior change.

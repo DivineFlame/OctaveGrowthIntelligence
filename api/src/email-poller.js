@@ -148,10 +148,25 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
   };
 
   let processed = 0, failed = 0, skippedAlready = 0, deletedCount = 0;
+  // Stage-by-stage timing, temporary - every manual reproduction of this
+  // exact flow (connect, lock, search) via a one-off script in the same
+  // container has succeeded in under 2s, yet the actual poller running
+  // inside the long-lived api process fails on every cycle. That split
+  // means the failure is specific to running inside this process, not to
+  // the IMAP interaction itself - these logs exist to find out which
+  // await is actually the one stalling in that context, since it clearly
+  // isn't reproducible by testing the same calls in isolation. Remove
+  // once the real cause is found (see README "Hardening notes").
+  const pollStart = Date.now();
+  const stage = (label) => console.log(`[email-poller] product ${product.id}: stage=${label} +${Date.now() - pollStart}ms`);
+  stage('before-connect');
   const client = await connectWithRetry(createClient, clientOpts, target, product, deps.connectAttempts || 3, deps.retryDelayMs != null ? deps.retryDelayMs : 2000);
+  stage('after-connect');
   try {
     const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
+    stage('before-lock');
     const lock = await client.getMailboxLock(mailbox);
+    stage('after-lock');
     try {
       // search() first, then fetch() the specific UIDs it returns -
       // passing a search-criteria object straight to fetch()'s range
@@ -160,9 +175,13 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
       // fetch()'s range must be an explicit UID/sequence range or array,
       // not a query object, so it was not actually limiting to unseen
       // messages the way it looked like it should.
+      stage('before-search');
       const uids = await client.search({ seen: false }, { uid: true });
+      stage('after-search');
       if (uids && uids.length) {
+        stage('before-fetch-loop');
         for await (const msg of client.fetch(uids, { uid: true, envelope: true, source: true }, { uid: true })) {
+          stage(`fetch-yielded-uid-${msg.uid}`);
           try {
             // Belt-and-suspenders against the same failure mode from the
             // other direction: if this exact message was already turned
@@ -206,8 +225,10 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
         }
       }
 
+      stage('before-reconcile');
       try {
         const result = await reconcileDeletedLeads(pool, product, client);
+        stage('after-reconcile');
         deletedCount = result.deleted;
       } catch (e) {
         console.warn(`[email-poller] product ${product.id}: reconcile-deleted pass failed: ${e.message}`);

@@ -43,7 +43,14 @@ const schemas = {
   }),
   replyToLead: z.object({
     body: z.string().trim().min(1).max(5000),
-    channel: z.string().trim().max(20).optional()
+    channel: z.string().trim().max(20).optional(),
+    // WhatsApp replies always send a Meta-approved template (see
+    // channels.js's publishWhatsApp comment) - the composer sends the
+    // chosen template's name plus the values for its {{1}}, {{2}}, ...
+    // placeholders; `body` above still carries the rendered preview text
+    // for the thread's own display/history.
+    template_name: z.string().trim().min(1).max(200).optional(),
+    template_params: z.array(z.string().trim().max(500)).max(10).optional()
   }),
   // Bulk-delete for the Inbox's "select and delete" action - capped at
   // 100 so one request can't be used to walk the whole leads table.

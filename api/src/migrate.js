@@ -34,6 +34,7 @@ const MIGRATIONS_IN_ORDER = [
   'migrate-email-source-uid.sql',
   'migrate-lead-reply-send.sql',
   'migrate-lead-message-attachments.sql',
+  'migrate-lead-email-threading.sql',
   // Collapses multi-tenancy down to a single company (see README.md
   // "Hardening notes" and this file's own header comment) - runs last
   // since it depends on every table/column every earlier migration

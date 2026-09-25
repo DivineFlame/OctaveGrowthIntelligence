@@ -58,14 +58,16 @@ const CHANNEL_SPECS = {
     help: 'Any SMTP-speaking provider works for sending (SendGrid, SES, Mailgun, Postmark, Gmail with an app password, your own mail server) - this uses plain SMTP, not a vendor-specific REST API. To also turn replies into leads, fill in the IMAP fields too - use a dedicated mailbox for this if you can, since IMAP\'s "unread" flag is shared with whatever else reads that inbox (your own mail client marking a message read makes it invisible to the poller).'
   },
   whatsapp: {
-    label: 'WhatsApp Business',
+    label: 'WhatsApp Business (via Vobiz)',
     implemented: true,
     fields: [
-      { key: 'phone_number_id', label: 'Phone Number ID', required: true },
-      { key: 'access_token', label: 'Permanent access token', required: true, secret: true },
+      { key: 'auth_id', label: 'Vobiz Auth ID (e.g. MA_XXXXXXXX)', required: true },
+      { key: 'auth_token', label: 'Vobiz Auth Token', required: true, secret: true },
+      { key: 'channel_id', label: 'Vobiz WhatsApp Channel ID', required: true },
+      { key: 'waba_id', label: 'WhatsApp Business Account ID (WABA ID)', required: true },
       { key: 'default_recipient', label: "Default recipient (E.164, e.g. +919876543210)", required: false }
     ],
-    help: 'From Meta\'s WhatsApp Business Platform (business.facebook.com) - create a WhatsApp Business Account, add a phone number, and generate a permanent access token (not the 24h test token) for it under System Users.'
+    help: 'From the Vobiz Console (console.vobiz.ai): Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in Vobiz. Lead replies over WhatsApp always send an approved Meta message template, never free text - see GET /channels/whatsapp/templates - so sync your templates in Vobiz (Channels > WhatsApp > Templates > Sync from Meta) and make sure at least one is APPROVED before replying to a lead.'
   },
   facebook: {
     label: 'Facebook Page',
@@ -157,10 +159,10 @@ function decryptChannelSecrets(channel, config, decryptSecret) {
   return out;
 }
 
-async function publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments: extraAttachments, to }) {
+async function publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments: extraAttachments, to, inReplyTo, references }, deps = {}) {
   // Lazily required so the dependency is only ever loaded by a product that
   // actually configures an email channel.
-  const nodemailer = require('nodemailer');
+  const nodemailer = deps.nodemailer || require('nodemailer');
   const recipient = to || config.to_default;
   if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient/to_default on the channel config');
 
@@ -205,29 +207,110 @@ async function publishEmail({ config, title, text, html, filePath, fileName, mim
     // multipart message with both when it's present, and mail clients
     // that can't render HTML fall back to the plain-text part above.
     html: html || undefined,
+    // Threads a lead reply into the same email conversation the lead's
+    // own message started, instead of it landing as a brand-new one in
+    // their inbox - see migrate-lead-email-threading.sql and
+    // POST /leads/:id/reply's comment on how this chain is built. Both
+    // are undefined (nodemailer omits the header entirely) for the first
+    // message in a conversation, or any send that isn't a lead reply.
+    inReplyTo: inReplyTo || undefined,
+    references: references || undefined,
     attachments
   });
 
   return { externalId: info.messageId, externalUrl: null };
 }
 
-async function publishWhatsApp({ config, text, to }) {
-  const recipient = (to || config.default_recipient || '').replace(/[^\d+]/g, '');
-  if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient on the channel config');
+const VOBIZ_API_BASE = 'https://api.vobiz.ai/api/v1';
 
-  const resp = await fetch(`https://graph.facebook.com/v20.0/${config.phone_number_id}/messages`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${config.access_token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: recipient,
-      type: 'text',
-      text: { body: text || '' }
-    })
+function vobizHeaders(config) {
+  return {
+    'X-Auth-ID': config.auth_id,
+    'X-Auth-Token': config.auth_token,
+    'Content-Type': 'application/json'
+  };
+}
+
+// Lists this channel's WhatsApp templates from Vobiz, filtered down to
+// only the ones Meta has actually APPROVED - a PENDING_REVIEW, REJECTED,
+// DISABLED or PAUSED template is never a valid thing to send (Meta
+// rejects it outright), so callers never need to re-filter this
+// themselves. Backs GET /channels/whatsapp/templates (server.js, for the
+// Inbox reply composer's template picker) and POST /leads/:id/reply's own
+// server-side check that a reply's chosen template is really approved,
+// not just whatever name a client happened to send.
+//
+// Each template's body text is also parsed for its "{{1}}", "{{2}}", ...
+// placeholders (paramCount = how many distinct ones it uses) so the
+// caller knows how many values it needs to collect before sending,
+// without having to parse Vobiz's raw components shape itself.
+async function listWhatsAppTemplates(config) {
+  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
+  const resp = await fetch(`${VOBIZ_API_BASE}/channels/${config.channel_id}/templates`, {
+    headers: vobizHeaders(config)
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.error?.message || `WhatsApp API error (HTTP ${resp.status})`);
-  return { externalId: data.messages?.[0]?.id || null, externalUrl: null };
+  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error listing templates (HTTP ${resp.status})`);
+
+  const items = data.items || [];
+  return items
+    .filter((t) => t.status === 'APPROVED')
+    .map((t) => {
+      const components = (t.components && t.components.components) || [];
+      const bodyComponent = components.find((c) => (c.type || '').toUpperCase() === 'BODY');
+      const bodyText = (bodyComponent && bodyComponent.text) || '';
+      const paramCount = new Set(bodyText.match(/\{\{\d+\}\}/g) || []).size;
+      return { name: t.name, language: t.language, category: t.category, bodyText, paramCount };
+    });
+}
+
+// Sends a WhatsApp message through Vobiz (docs.vobiz.ai/whatsapp/api/send-message).
+// Two shapes:
+//   - template: { name, language, parameters } - a Meta-approved template
+//     message. This is the only path POST /leads/:id/reply ever uses -
+//     Meta requires every business-initiated WhatsApp message to use an
+//     approved template (free text only works as a reply inside an
+//     existing 24h customer-service window, which this app has no
+//     reliable way to track), so lead replies never attempt free text.
+//   - text: a plain message body - kept only for the Studio content
+//     pipeline's existing broadcast publish (POST /internal/content-
+//     variants/:variantId/publish), which predates template support and
+//     doesn't have a template-picker UI yet; only actually deliverable
+//     within that same 24h window.
+async function publishWhatsApp({ config, template, text, to }) {
+  const recipient = (to || config.default_recipient || '').replace(/[^\d+]/g, '');
+  if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient on the channel config');
+  if (!config.channel_id || !config.waba_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID / WABA ID - configure it under Studio > Channels');
+
+  let body;
+  if (template && template.name) {
+    body = {
+      channel_id: config.channel_id,
+      waba_id: config.waba_id,
+      to: recipient,
+      type: 'template',
+      template: {
+        name: template.name,
+        language: { code: template.language || 'en_US' },
+        components: (template.parameters && template.parameters.length)
+          ? [{ type: 'body', parameters: template.parameters.map((p) => ({ type: 'text', text: String(p) })) }]
+          : []
+      }
+    };
+  } else if (text) {
+    body = { channel_id: config.channel_id, waba_id: config.waba_id, to: recipient, type: 'text', text: { body: text } };
+  } else {
+    throw new Error('Nothing to send: pass either a template or text');
+  }
+
+  const resp = await fetch(`${VOBIZ_API_BASE}/messaging/messages`, {
+    method: 'POST',
+    headers: vobizHeaders(config),
+    body: JSON.stringify(body)
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error sending message (HTTP ${resp.status})`);
+  return { externalId: data.id || null, externalUrl: null };
 }
 
 async function publishFacebook({ config, title, text, filePath, mimeType }) {
@@ -375,14 +458,14 @@ async function publishLinkedIn({ config, title, text }) {
 // Single dispatch point. `config` must already be decrypted (see
 // decryptChannelSecrets). Throws on any failure - callers persist the
 // error message onto content_variants.publish_error rather than swallow it.
-async function publishToChannel(channel, { config, title, text, html, filePath, fileName, mimeType, attachments, publicFileUrl, to }) {
+async function publishToChannel(channel, { config, title, text, html, filePath, fileName, mimeType, attachments, publicFileUrl, to, template, inReplyTo, references }, deps = {}) {
   const spec = CHANNEL_SPECS[channel];
   if (!spec) throw new Error(`Unknown channel: ${channel}`);
   if (!spec.implemented) throw new Error(`${spec.label} publishing is not implemented yet. ${spec.help}`);
 
   switch (channel) {
-    case 'email': return publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments, to });
-    case 'whatsapp': return publishWhatsApp({ config, text: text || title, to });
+    case 'email': return publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments, to, inReplyTo, references }, deps);
+    case 'whatsapp': return publishWhatsApp({ config, template, text: text || title, to });
     case 'facebook': return publishFacebook({ config, title, text, filePath, mimeType });
     case 'instagram': return publishInstagram({ config, title, text, publicFileUrl });
     case 'linkedin': return publishLinkedIn({ config, title, text });
@@ -397,5 +480,6 @@ module.exports = {
   encryptChannelSecrets,
   maskChannelSecrets,
   decryptChannelSecrets,
-  publishToChannel
+  publishToChannel,
+  listWhatsAppTemplates
 };

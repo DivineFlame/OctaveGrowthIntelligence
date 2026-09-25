@@ -227,6 +227,17 @@ function Thread({ lead, onClose }) {
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  // WhatsApp never sends free text here - Meta requires every business-
+  // initiated WhatsApp message to use a template Meta has already
+  // approved (see channels.js's publishWhatsApp comment), so a WhatsApp
+  // lead gets a template picker instead of the rich-text composer below.
+  const isWhatsApp = lead.source_channel === 'whatsapp';
+  const [templates, setTemplates] = useState([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesErr, setTemplatesErr] = useState('');
+  const [selectedTemplateName, setSelectedTemplateName] = useState('');
+  const [templateParams, setTemplateParams] = useState([]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -246,6 +257,63 @@ function Thread({ lead, onClose }) {
       cancelled = true;
     };
   }, [lead.id]);
+
+  useEffect(() => {
+    setSelectedTemplateName('');
+    setTemplateParams([]);
+    if (!isWhatsApp) {
+      setTemplates([]);
+      return;
+    }
+    if (!lead.product_id) {
+      setTemplatesErr('This lead is not associated with a Product, so no WhatsApp channel credentials exist for it.');
+      return;
+    }
+    let cancelled = false;
+    setTemplatesLoading(true);
+    setTemplatesErr('');
+    api
+      .whatsappTemplates(lead.product_id)
+      .then((rows) => {
+        if (!cancelled) setTemplates(rows);
+      })
+      .catch((e) => {
+        if (!cancelled) setTemplatesErr(e instanceof ApiError ? e.message : 'Failed to load WhatsApp templates');
+      })
+      .finally(() => {
+        if (!cancelled) setTemplatesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [lead.id, lead.product_id, isWhatsApp]);
+
+  const selectedTemplate = templates.find((t) => t.name === selectedTemplateName) || null;
+
+  const selectTemplate = (name) => {
+    setSelectedTemplateName(name);
+    const t = templates.find((tpl) => tpl.name === name);
+    setTemplateParams(t ? Array(t.paramCount).fill('') : []);
+  };
+
+  const setTemplateParam = (idx, value) => {
+    setTemplateParams((prev) => {
+      const next = [...prev];
+      next[idx] = value;
+      return next;
+    });
+  };
+
+  // Fills {{1}}, {{2}}, ... in the template's approved body text with
+  // whatever's been typed so far, so the composer shows exactly what the
+  // lead will receive - real WhatsApp template rendering, not a
+  // reconstruction of it.
+  const templatePreview = selectedTemplate
+    ? selectedTemplate.bodyText.replace(/\{\{(\d+)\}\}/g, (m, n) => {
+        const v = templateParams[Number(n) - 1];
+        return v && v.trim() ? v : m;
+      })
+    : '';
 
   // Wraps the current textarea selection in the given markers (or inserts
   // an empty pair at the cursor when nothing's selected) - the same plain
@@ -330,6 +398,25 @@ function Thread({ lead, onClose }) {
     }
   };
 
+  const sendTemplate = async () => {
+    if (!selectedTemplate || !templatePreview.trim()) return;
+    setSending(true);
+    setErr('');
+    try {
+      const sent = await api.replyToLead(lead.id, templatePreview, undefined, undefined, {
+        name: selectedTemplate.name,
+        params: templateParams
+      });
+      setMessages((prev) => [...prev, sent]);
+      setSelectedTemplateName('');
+      setTemplateParams([]);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Reply failed to send');
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col rounded-[12px] border border-black/5 bg-white dark:border-white/[0.08] dark:bg-[#121214]">
       <div className="flex items-center justify-between border-b border-black/5 px-4 py-3 dark:border-white/[0.08]">
@@ -401,6 +488,72 @@ function Thread({ lead, onClose }) {
       {err ? <p className="px-4 text-[12px] text-red-500">{err}</p> : null}
 
       <div className="border-t border-black/5 p-3 dark:border-white/[0.08]">
+        {isWhatsApp ? (
+          <div>
+            {/* Meta requires every business-initiated WhatsApp message to
+                use a template it has already approved - free text (like
+                the rich composer below) isn't a valid thing to send here,
+                so this is a template picker instead: choose one, fill in
+                its {{1}}, {{2}}, ... values, see exactly what will be
+                sent, then send. */}
+            {templatesLoading ? (
+              <p className="text-[12px] text-zinc-500 dark:text-white/50">Loading approved templates…</p>
+            ) : templatesErr ? (
+              <p className="text-[12px] text-red-500">{templatesErr}</p>
+            ) : templates.length === 0 ? (
+              <p className="text-[12px] text-zinc-500 dark:text-white/50">
+                No approved WhatsApp templates yet. Sync/approve one in Vobiz (Channels &gt; WhatsApp &gt; Templates), then refresh this thread.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <select
+                  value={selectedTemplateName}
+                  onChange={(e) => selectTemplate(e.target.value)}
+                  aria-label="Approved WhatsApp template"
+                  className="w-full rounded-[10px] border border-black/10 bg-transparent px-3 py-2 text-[12px] text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
+                >
+                  <option value="" style={{ color: '#111827', backgroundColor: '#ffffff' }}>
+                    Choose an approved template…
+                  </option>
+                  {templates.map((t) => (
+                    <option key={t.name} value={t.name} style={{ color: '#111827', backgroundColor: '#ffffff' }}>
+                      {t.name} ({t.language})
+                    </option>
+                  ))}
+                </select>
+
+                {selectedTemplate ? (
+                  <>
+                    {templateParams.map((val, i) => (
+                      <input
+                        key={i}
+                        value={val}
+                        onChange={(e) => setTemplateParam(i, e.target.value)}
+                        placeholder={`Value for {{${i + 1}}}`}
+                        className="w-full rounded-[10px] border border-black/10 bg-transparent px-3 py-2 text-[12px] text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
+                      />
+                    ))}
+                    <div className="rounded-[10px] border border-dashed border-black/10 bg-black/[0.02] px-3 py-2 text-[12px] leading-snug text-zinc-700 dark:border-white/15 dark:bg-white/[0.03] dark:text-white/80">
+                      {templatePreview}
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={sendTemplate}
+                    disabled={sending || !selectedTemplate || !templatePreview.trim()}
+                    className="flex items-center gap-1.5 rounded-full bg-brand px-3.5 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    {sending ? 'Sending…' : 'Send template'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
         {attachments.length ? (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {attachments.map((f, i) => (
@@ -476,6 +629,8 @@ function Thread({ lead, onClose }) {
             <Send className="h-3.5 w-3.5" />
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );

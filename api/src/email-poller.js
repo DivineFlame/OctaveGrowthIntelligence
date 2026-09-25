@@ -259,7 +259,16 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
                 email: (from.address || '').toLowerCase(),
                 message: body,
                 productId: product.id,
-                sourceUid: msg.uid
+                sourceUid: msg.uid,
+                // Remembered so a later reply (POST /leads/:id/reply) can
+                // thread into this same email conversation instead of
+                // landing as a brand-new one - see
+                // migrate-lead-email-threading.sql and publishEmail() in
+                // channels.js. mailparser normalizes messageId to the
+                // full "<...>" form a Message-ID/In-Reply-To header
+                // expects, so it's used as-is, no reformatting needed.
+                sourceMessageId: parsed.messageId || null,
+                subject: parsed.subject || null
               },
               // ip_address is a Postgres INET column - a marker string like
               // 'internal-imap-poll' there fails with "invalid input

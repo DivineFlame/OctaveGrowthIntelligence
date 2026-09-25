@@ -122,19 +122,31 @@ export const api = {
   // PII-erasure DELETE /leads/:id. See server.js's comment on
   // POST /leads/delete-selected for why these are two different routes.
   deleteLeads: (ids) => apiCall('/leads/delete-selected', { method: 'POST', body: { ids } }),
+  // Approved WhatsApp templates for this product's channel (via Vobiz -
+  // see channels.js's listWhatsAppTemplates) - backs the reply composer's
+  // template picker for a WhatsApp lead, which never sends free text (see
+  // POST /leads/:id/reply's comment on why).
+  whatsappTemplates: (productId) => apiCall(`/channels/whatsapp/templates?product_id=${encodeURIComponent(productId)}`),
   // `files` (optional) is an array of File objects from the reply
   // composer's attach button - switches to a multipart request only when
   // there's actually something to attach, so the common no-attachment
-  // case stays a plain JSON POST exactly as before.
-  replyToLead: (leadId, body, channel, files) => {
+  // case stays a plain JSON POST exactly as before. `template` (optional)
+  // is { name, params } from the WhatsApp template picker - body still
+  // carries the rendered preview text for the thread's own display.
+  replyToLead: (leadId, body, channel, files, template) => {
+    const extra = template ? { template_name: template.name, template_params: template.params } : {};
     if (files && files.length) {
       const form = new FormData();
       form.append('body', body);
       if (channel) form.append('channel', channel);
+      if (template) {
+        form.append('template_name', template.name);
+        (template.params || []).forEach((p) => form.append('template_params', p));
+      }
       files.forEach((f) => form.append('attachments', f));
       return apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: form });
     }
-    return apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: channel ? { body, channel } : { body } });
+    return apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: Object.assign({ body }, channel ? { channel } : {}, extra) });
   },
 
   uploadContent: (file, { productId, brandKit } = {}) => {

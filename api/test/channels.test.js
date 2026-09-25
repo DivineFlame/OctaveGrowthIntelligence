@@ -15,7 +15,8 @@ const {
   encryptChannelSecrets,
   maskChannelSecrets,
   decryptChannelSecrets,
-  publishToChannel
+  publishToChannel,
+  listWhatsAppTemplates
 } = require('../src/channels');
 
 // A fake, reversible "encryption" for tests - channels.js takes
@@ -51,14 +52,14 @@ test('validateChannelConfig lists every missing required field by name', () => {
     /missing required field\(s\): access_token/
   );
   assert.throws(
-    () => validateChannelConfig('whatsapp', {}), // both required fields missing
-    /phone_number_id, access_token/
+    () => validateChannelConfig('whatsapp', {}), // required fields missing
+    /auth_id, auth_token, channel_id, waba_id/
   );
 });
 
 test('validateChannelConfig passes once every required field is present', () => {
   assert.doesNotThrow(() => validateChannelConfig('facebook', { page_id: 'p1', access_token: 'tok' }));
-  assert.doesNotThrow(() => validateChannelConfig('whatsapp', { phone_number_id: '123', access_token: 'tok' }));
+  assert.doesNotThrow(() => validateChannelConfig('whatsapp', { auth_id: 'MA_1', auth_token: 'tok', channel_id: 'ch1', waba_id: 'wa1' }));
 });
 
 test('validateChannelConfig treats a blank/whitespace-only required field as missing', () => {
@@ -69,32 +70,32 @@ test('validateChannelConfig treats a blank/whitespace-only required field as mis
 });
 
 test('encrypt/decrypt round-trips every secret field and leaves non-secret fields untouched', () => {
-  const raw = { phone_number_id: '123456', access_token: 'super-secret-token' };
+  const raw = { channel_id: 'ch1', auth_token: 'super-secret-token' };
   const encrypted = encryptChannelSecrets('whatsapp', raw, fakeEncrypt);
-  assert.equal(encrypted.phone_number_id, '123456', 'non-secret field must not be touched');
-  assert.equal(encrypted.access_token, 'ENC(super-secret-token)', 'secret field must be encrypted');
+  assert.equal(encrypted.channel_id, 'ch1', 'non-secret field must not be touched');
+  assert.equal(encrypted.auth_token, 'ENC(super-secret-token)', 'secret field must be encrypted');
 
   const decrypted = decryptChannelSecrets('whatsapp', encrypted, fakeDecrypt);
   assert.deepEqual(decrypted, raw, 'decrypting the encrypted config must reproduce the original exactly');
 });
 
 test('encryptChannelSecrets does not mutate the config object passed in', () => {
-  const raw = { phone_number_id: '123456', access_token: 'super-secret-token' };
+  const raw = { channel_id: 'ch1', auth_token: 'super-secret-token' };
   const copy = { ...raw };
   encryptChannelSecrets('whatsapp', raw, fakeEncrypt);
   assert.deepEqual(raw, copy, 'the caller\'s original object must be unchanged (shallow-copy contract)');
 });
 
 test('maskChannelSecrets hides every secret field and leaves non-secret fields visible', () => {
-  const raw = { phone_number_id: '123456', access_token: 'super-secret-token' };
+  const raw = { channel_id: 'ch1', auth_token: 'super-secret-token' };
   const masked = maskChannelSecrets('whatsapp', raw);
-  assert.equal(masked.phone_number_id, '123456');
-  assert.equal(masked.access_token, '••••••••');
+  assert.equal(masked.channel_id, 'ch1');
+  assert.equal(masked.auth_token, '••••••••');
 });
 
 test('maskChannelSecrets leaves an empty secret field empty rather than masking nothing', () => {
-  const masked = maskChannelSecrets('whatsapp', { phone_number_id: '123456', access_token: '' });
-  assert.equal(masked.access_token, '', 'an unset secret should stay unset, not show a fake mask');
+  const masked = maskChannelSecrets('whatsapp', { channel_id: 'ch1', auth_token: '' });
+  assert.equal(masked.auth_token, '', 'an unset secret should stay unset, not show a fake mask');
 });
 
 test('validateChannelConfig(email): SMTP fields are required, IMAP fields are not - a send-only config is valid', () => {
@@ -137,6 +138,90 @@ test('publishToChannel refuses an unimplemented channel with a clear error, neve
   // pinned here too before it was implemented - see the youtube-specific
   // tests below instead.
   return assert.rejects(() => publishToChannel('quora', { config: {} }), /not implemented yet/);
+});
+
+// --- WhatsApp via Vobiz --------------------------------------------------
+// Same fetch-mocking approach as the YouTube section below: no live Vobiz
+// credentials exist here, so these verify the actual HTTP calls this code
+// makes (method, URL, headers, body shape) against a fake fetch, not just
+// that some function resolves.
+const VOBIZ_CONFIG = { auth_id: 'MA_TEST', auth_token: 'tok', channel_id: 'chan-1', waba_id: 'waba-1', default_recipient: '+919876543210' };
+
+test('listWhatsAppTemplates requests this channel\'s templates and returns only APPROVED ones, with parsed placeholder counts', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/channels/chan-1/templates');
+    assert.equal(opts.headers['X-Auth-ID'], 'MA_TEST');
+    assert.equal(opts.headers['X-Auth-Token'], 'tok');
+    return {
+      ok: true,
+      json: async () => ({
+        items: [
+          { name: 'order_confirmation', language: 'en_US', category: 'UTILITY', status: 'APPROVED', components: { components: [{ type: 'BODY', text: 'Hi {{1}}, your order {{2}} is confirmed.' }] } },
+          { name: 'still_pending', language: 'en_US', category: 'MARKETING', status: 'PENDING_REVIEW', components: { components: [{ type: 'BODY', text: 'Not usable yet.' }] } }
+        ]
+      })
+    };
+  };
+  return listWhatsAppTemplates(VOBIZ_CONFIG).then((templates) => {
+    assert.equal(templates.length, 1, 'the PENDING_REVIEW template must be filtered out');
+    assert.equal(templates[0].name, 'order_confirmation');
+    assert.equal(templates[0].paramCount, 2);
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('listWhatsAppTemplates surfaces Vobiz\'s own error message on a failed request', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 401, json: async () => ({ message: 'Invalid auth token' }) });
+  return assert.rejects(() => listWhatsAppTemplates(VOBIZ_CONFIG), /Invalid auth token/)
+    .finally(() => { global.fetch = originalFetch; });
+});
+
+test('publishToChannel(whatsapp): a template reply sends type:"template" with the right recipient/name/language/parameters', () => {
+  const originalFetch = global.fetch;
+  let captured;
+  global.fetch = async (url, opts) => {
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/messages');
+    assert.equal(opts.method, 'POST');
+    captured = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ id: 'msg-123' }) };
+  };
+  return publishToChannel('whatsapp', {
+    config: VOBIZ_CONFIG,
+    template: { name: 'order_confirmation', language: 'en_US', parameters: ['Priya', 'ORD-9'] },
+    to: '+919876543210'
+  }).then((result) => {
+    assert.equal(result.externalId, 'msg-123');
+    assert.equal(captured.type, 'template');
+    assert.equal(captured.channel_id, 'chan-1');
+    assert.equal(captured.waba_id, 'waba-1');
+    assert.equal(captured.to, '+919876543210');
+    assert.equal(captured.template.name, 'order_confirmation');
+    assert.equal(captured.template.language.code, 'en_US');
+    assert.deepEqual(captured.template.components, [{ type: 'body', parameters: [{ type: 'text', text: 'Priya' }, { type: 'text', text: 'ORD-9' }] }]);
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('publishToChannel(whatsapp): falls back to a plain text message (Studio broadcast path) when no template is given', () => {
+  const originalFetch = global.fetch;
+  let captured;
+  global.fetch = async (url, opts) => {
+    captured = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ id: 'msg-456' }) };
+  };
+  return publishToChannel('whatsapp', { config: VOBIZ_CONFIG, text: 'Hello there', to: '+919876543210' }).then(() => {
+    assert.equal(captured.type, 'text');
+    assert.deepEqual(captured.text, { body: 'Hello there' });
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('publishToChannel(whatsapp): Vobiz rejecting the send surfaces its own error message', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 400, json: async () => ({ message: 'Template not approved for this WABA' }) });
+  return assert.rejects(
+    () => publishToChannel('whatsapp', { config: VOBIZ_CONFIG, template: { name: 'x' }, to: '+919876543210' }),
+    /Template not approved for this WABA/
+  ).finally(() => { global.fetch = originalFetch; });
 });
 
 // --- YouTube: real resumable-upload publishing --------------------------

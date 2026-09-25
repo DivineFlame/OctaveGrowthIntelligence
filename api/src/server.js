@@ -1085,6 +1085,25 @@ app.get('/channels/spec', authMiddleware, (req, res) => {
   res.json(spec);
 });
 
+// Lists this product's APPROVED WhatsApp templates (via Vobiz - see
+// channels.js's listWhatsAppTemplates) - backs the Inbox reply
+// composer's template picker for WhatsApp leads. Meta requires every
+// business-initiated WhatsApp message to use one of these, so the
+// composer has nothing to send until at least one exists here.
+app.get('/channels/whatsapp/templates', authMiddleware, async (req, res) => {
+  try {
+    const productId = req.query.product_id;
+    if (!productId) return res.status(400).json({ error: 'product_id is required' });
+    const channelRow = await pool.query(`SELECT config, status FROM product_channels WHERE product_id=$1 AND channel='whatsapp'`, [productId]);
+    if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
+      return res.status(400).json({ error: 'WhatsApp is not configured on this product yet (Studio > Channels)' });
+    }
+    const config = channelsLib.decryptChannelSecrets('whatsapp', channelRow.rows[0].config, decryptSecret);
+    const templates = await channelsLib.listWhatsAppTemplates(config);
+    res.json(templates);
+  } catch(e){ serverError(res, e); }
+});
+
 app.get('/products/:id/channels', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
@@ -1354,7 +1373,7 @@ app.get('/leads/:id/messages', authMiddleware, async (req, res) => {
 const LEAD_REPLY_RECIPIENT_CHANNELS = { email: 'email', whatsapp: 'phone' };
 
 app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attachments', 3), validate(schemas.replyToLead), async (req, res) => {
-  const { body, channel: requestedChannel } = req.body;
+  const { body, channel: requestedChannel, template_name: templateName, template_params: templateParams } = req.body;
   const uploadedFiles = req.files || [];
 
   // Every uploaded file lands on disk (multer wrote it before this handler
@@ -1367,7 +1386,10 @@ app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attach
   }
 
   try {
-    const leadRows = await pool.query('SELECT id, product_id, source_channel, email, phone, company_name FROM leads WHERE id=$1', [req.params.id]);
+    const leadRows = await pool.query(
+      'SELECT id, product_id, source_channel, email, phone, company_name, source_message_id, source_subject FROM leads WHERE id=$1',
+      [req.params.id]
+    );
     if (!leadRows.rows.length) { cleanupUploads(); return res.status(404).json({ error: 'Lead not found' }); }
     const lead = leadRows.rows[0];
     const channel = requestedChannel || lead.source_channel;
@@ -1418,9 +1440,60 @@ app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attach
         } else {
           try {
             const config = channelsLib.decryptChannelSecrets(channel, channelRow.rows[0].config, decryptSecret);
+
+            let template;
+            if (channel === 'whatsapp') {
+              // Meta requires every business-initiated WhatsApp message to
+              // use an approved template - see channels.js's
+              // publishWhatsApp comment. Re-checking the chosen template
+              // against Vobiz's own APPROVED list here (not just trusting
+              // whatever name the client sent) means a stale template
+              // picker, or a request built by hand, can't slip an
+              // unapproved/nonexistent template past this.
+              if (!templateName) {
+                throw new Error('WhatsApp replies must use an approved message template - select one first.');
+              }
+              const templates = await channelsLib.listWhatsAppTemplates(config);
+              const found = templates.find((t) => t.name === templateName);
+              if (!found) {
+                throw new Error(`"${templateName}" is not an approved WhatsApp template for this channel - it may be pending review, rejected, or no longer exists. Refresh the template list and try again.`);
+              }
+              const params = templateParams || [];
+              if (params.length !== found.paramCount) {
+                throw new Error(`Template "${found.name}" needs ${found.paramCount} value(s), got ${params.length}.`);
+              }
+              template = { name: found.name, language: found.language, parameters: params };
+            }
+
+            // Threads this reply into the same email conversation the
+            // lead's own message started (matching "Re: <original
+            // subject>" and chaining In-Reply-To/References through every
+            // message already sent on this lead) instead of it landing as
+            // a brand-new, unrelated conversation in their inbox. Only
+            // meaningful for email - other channels ignore these.
+            let emailSubject, inReplyTo, references;
+            if (channel === 'email') {
+              const subj = (lead.source_subject || '').trim();
+              emailSubject = subj
+                ? (/^re:/i.test(subj) ? subj : `Re: ${subj}`)
+                : `Re: message from ${lead.company_name || 'your inquiry'}`;
+
+              const chain = [];
+              if (lead.source_message_id) chain.push(lead.source_message_id);
+              const prior = await pool.query(
+                `SELECT external_id FROM lead_messages WHERE lead_id=$1 AND external_id IS NOT NULL ORDER BY created_at ASC`,
+                [req.params.id]
+              );
+              for (const row of prior.rows) if (row.external_id) chain.push(row.external_id);
+              if (chain.length) {
+                inReplyTo = chain[chain.length - 1];
+                references = chain.join(' ');
+              }
+            }
+
             const result = await channelsLib.publishToChannel(channel, {
               config,
-              title: `Re: message from ${lead.company_name || 'your inquiry'}`,
+              title: emailSubject || `Re: message from ${lead.company_name || 'your inquiry'}`,
               text: body,
               // Formatted HTML (bold/italic/underline/bullets from the
               // composer's toolbar - see reply-formatting.js) only makes
@@ -1428,6 +1501,9 @@ app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attach
               // above, same as before this feature existed.
               html: channel === 'email' ? formatReplyHtml(body) : undefined,
               attachments: channel === 'email' ? transferAttachments : undefined,
+              inReplyTo,
+              references,
+              template,
               to: recipient
             });
             sendStatus = 'sent';
@@ -1836,7 +1912,7 @@ app.post('/integrations/webhook-secret/rotate', authMiddleware, rbacMiddleware([
 // WhatsApp/Facebook one rather than being a second-class path. `req` only
 // needs `.ip`/`.headers['user-agent']` for the audit log - the IMAP poller
 // passes a synthetic one since there's no real HTTP request behind it.
-async function ingestInboundLead({ channel, companyName, contactName, phone, email, message, productId, valueInr = 0, sourceUid = null }, req) {
+async function ingestInboundLead({ channel, companyName, contactName, phone, email, message, productId, valueInr = 0, sourceUid = null, sourceMessageId = null, subject = null }, req) {
   const enrichText = [companyName, contactName, message].filter(Boolean).join(' ');
   const gstinResult = extractGstin(enrichText);
   // Sarvam classifies the message itself (not the company/contact name
@@ -1855,9 +1931,9 @@ async function ingestInboundLead({ channel, companyName, contactName, phone, ema
   // was deleted from the mailbox and remove this lead too. NULL for
   // every other channel/source.
   const insertResult = await pool.query(
-    `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry, source_uid)
-     VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
-    [channel, companyName, contactName, phone, email, valueInr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry, sourceUid]
+    `INSERT INTO leads (source_channel, company_name, contact_name, phone, email, value_inr, status, is_duplicate, product_id, detected_language, gstin, gstin_valid, is_inquiry, source_uid, source_message_id, source_subject)
+     VALUES ($1,$2,$3,$4,$5,$6,'NEW',$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+    [channel, companyName, contactName, phone, email, valueInr, isDuplicate, productId, detectLanguage(enrichText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null, isInquiry, sourceUid, sourceMessageId, subject]
   );
   const leadId = insertResult.rows[0].id;
   if (message) {

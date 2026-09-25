@@ -16,7 +16,8 @@ const {
   maskChannelSecrets,
   decryptChannelSecrets,
   publishToChannel,
-  listWhatsAppTemplates
+  listWhatsAppTemplates,
+  registerWhatsAppWebhook
 } = require('../src/channels');
 
 // A fake, reversible "encryption" for tests - channels.js takes
@@ -175,6 +176,31 @@ test('listWhatsAppTemplates surfaces Vobiz\'s own error message on a failed requ
   global.fetch = async () => ({ ok: false, status: 401, json: async () => ({ message: 'Invalid auth token' }) });
   return assert.rejects(() => listWhatsAppTemplates(VOBIZ_CONFIG), /Invalid auth token/)
     .finally(() => { global.fetch = originalFetch; });
+});
+
+test('registerWhatsAppWebhook POSTs the url/secret to Vobiz\'s webhook-subscription endpoint', () => {
+  const originalFetch = global.fetch;
+  let captured;
+  global.fetch = async (url, opts) => {
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/webhooks');
+    assert.equal(opts.method, 'POST');
+    assert.equal(opts.headers['X-Auth-ID'], 'MA_TEST');
+    captured = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ id: 'sub-1', url: captured.url, status: 'active' }) };
+  };
+  return registerWhatsAppWebhook(VOBIZ_CONFIG, 'https://octave.example.com/webhooks/sekret/whatsapp', 'sekret').then((result) => {
+    assert.deepEqual(captured, { url: 'https://octave.example.com/webhooks/sekret/whatsapp', secret: 'sekret' });
+    assert.equal(result.id, 'sub-1');
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('registerWhatsAppWebhook surfaces Vobiz\'s own error message on failure', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 400, json: async () => ({ message: 'url must be https' }) });
+  return assert.rejects(
+    () => registerWhatsAppWebhook(VOBIZ_CONFIG, 'http://not-https.example.com', 'sekret'),
+    /url must be https/
+  ).finally(() => { global.fetch = originalFetch; });
 });
 
 test('publishToChannel(whatsapp): a template reply sends type:"template" with the right recipient/name/language/parameters', () => {

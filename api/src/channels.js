@@ -275,6 +275,30 @@ async function listWhatsAppTemplates(config) {
     });
 }
 
+// Registers a webhook subscription with Vobiz so it actually starts
+// POSTing inbound WhatsApp events (message.inbound, message.status,
+// call.*) to this app - without this, nothing was ever wired up to
+// receive them at all, which is the real reason no WhatsApp message
+// ever showed up in the Inbox no matter how the channel itself was
+// configured (publishWhatsApp only ever covered sending). One-time
+// setup per Vobiz account, exposed as POST /channels/whatsapp/
+// register-webhook (server.js) so an admin doesn't have to hand-craft
+// this API call themselves. `secret` should be the same value used to
+// gate every other channel's webhook URL (company.webhook_secret) -
+// Vobiz signs its deliveries with it (X-Webhook-Signature, HMAC-SHA256
+// of the raw body), reusing it here means there's only one secret to
+// manage instead of a second one just for WhatsApp.
+async function registerWhatsAppWebhook(config, url, secret) {
+  const resp = await fetch(`${VOBIZ_API_BASE}/messaging/webhooks`, {
+    method: 'POST',
+    headers: vobizHeaders(config),
+    body: JSON.stringify({ url, secret })
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error registering webhook (HTTP ${resp.status})`);
+  return data;
+}
+
 // Sends a WhatsApp message through Vobiz (docs.vobiz.ai/whatsapp/api/send-message).
 // Meta requires every business-initiated WhatsApp message to use an
 // approved template - free text only works as a reply inside an
@@ -496,5 +520,6 @@ module.exports = {
   maskChannelSecrets,
   decryptChannelSecrets,
   publishToChannel,
-  listWhatsAppTemplates
+  listWhatsAppTemplates,
+  registerWhatsAppWebhook
 };

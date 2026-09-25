@@ -20,6 +20,7 @@ const QRCode = require('qrcode');
 const channelsLib = require('./channels');
 const { formatReplyHtml } = require('./reply-formatting');
 const emailPoller = require('./email-poller');
+const whatsappWebhook = require('./whatsapp-webhook');
 const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
@@ -1104,6 +1105,37 @@ app.get('/channels/whatsapp/templates', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
+// One-time setup action: tells Vobiz where to actually deliver inbound
+// WhatsApp events (message.inbound/message.status/call.*) - without ever
+// calling this, Vobiz has nothing registered to POST to, which is why no
+// WhatsApp message reaches this app no matter how the channel itself is
+// configured for sending. Builds the exact same URL shape
+// GET /integrations/webhook-urls already hands out for every other
+// channel (${base}/webhooks/${company.webhook_secret}/whatsapp) and
+// registers company.webhook_secret as Vobiz's own signing secret too -
+// one secret to manage, not a second one just for this.
+app.post('/channels/whatsapp/register-webhook', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
+  try {
+    const productId = req.body.product_id;
+    if (!productId) return res.status(400).json({ error: 'product_id is required' });
+    const channelRow = await pool.query(`SELECT config, status FROM product_channels WHERE product_id=$1 AND channel='whatsapp'`, [productId]);
+    if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
+      return res.status(400).json({ error: 'WhatsApp is not configured on this product yet (Studio > Channels) - save it first.' });
+    }
+    const company = await getCompany();
+    if (!company || !company.webhook_secret) return res.status(400).json({ error: 'No webhook secret provisioned yet - rotate one first (Integrations > Webhooks)' });
+    if (!API_DOMAIN && !APP_DOMAIN) {
+      return res.status(400).json({ error: 'APP_DOMAIN or API_DOMAIN must be set to a real, internet-reachable domain so Vobiz can deliver events to it.' });
+    }
+    const base = `https://${API_DOMAIN || APP_DOMAIN}`;
+    const url = `${base}/webhooks/${company.webhook_secret}/whatsapp`;
+    const config = channelsLib.decryptChannelSecrets('whatsapp', channelRow.rows[0].config, decryptSecret);
+    const result = await channelsLib.registerWhatsAppWebhook(config, url, company.webhook_secret);
+    await auditLog(req.user.id, 'REGISTER_WHATSAPP_WEBHOOK', 'product_channel', productId, req, 'SUCCESS', { url });
+    res.json({ registered: true, url, vobiz: result });
+  } catch(e){ serverError(res, e); }
+});
+
 app.get('/products/:id/channels', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
@@ -1948,6 +1980,71 @@ async function ingestInboundLead({ channel, companyName, contactName, phone, ema
   return { leadId, isDuplicate, isInquiry };
 }
 
+// Vobiz's real inbound-WhatsApp webhook payload (message.inbound/
+// message.status/call.*, see whatsapp-webhook.js) is a completely
+// different shape from every other channel's simple flat POST (company/
+// name/phone/email/message fields directly on the body), so it can't go
+// through the generic handling below at all - this is the reason no
+// WhatsApp message ever showed up in the Inbox even once the channel was
+// configured for sending: nothing ever understood what Vobiz was
+// actually POSTing. Routes each message to the product whose WhatsApp
+// channel owns the WABA it arrived on (same idea as email routing by
+// which mailbox was polled), and dedupes on the WhatsApp message id so a
+// redelivered webhook (Vobiz/Meta both retry on a non-2xx or timeout)
+// never creates a second lead for the same message.
+async function handleWhatsAppInboundWebhook(req, res) {
+  const messages = whatsappWebhook.extractInboundWhatsAppMessages(req.body);
+  if (!messages.length) {
+    // Not an inbound text message (a delivery receipt, a call event, or
+    // a media/interactive message type not handled yet) - nothing to
+    // ingest, but still a 200 so Vobiz doesn't keep retrying this
+    // delivery forever.
+    return res.json({ received: true, ingested: 0 });
+  }
+
+  const { rows: whatsappChannels } = await pool.query(
+    `SELECT product_id, config FROM product_channels WHERE channel='whatsapp' AND status='configured'`
+  );
+  const productIdByWaba = new Map();
+  for (const row of whatsappChannels) {
+    try {
+      const config = channelsLib.decryptChannelSecrets('whatsapp', row.config, decryptSecret);
+      if (config.waba_id) productIdByWaba.set(config.waba_id, row.product_id);
+    } catch (e) {
+      console.warn(`[whatsapp-webhook] product ${row.product_id}: could not decrypt channel config: ${e.message}`);
+    }
+  }
+
+  let ingested = 0, skippedAlready = 0, skippedUnmatched = 0;
+  for (const m of messages) {
+    const productId = productIdByWaba.get(m.wabaId);
+    if (!productId) { skippedUnmatched++; continue; } // no product's WhatsApp channel is configured for this WABA
+
+    const already = await pool.query(
+      `SELECT id FROM leads WHERE product_id=$1 AND source_channel='whatsapp' AND source_message_id=$2 LIMIT 1`,
+      [productId, m.messageId]
+    );
+    if (already.rows.length) { skippedAlready++; continue; }
+
+    await ingestInboundLead(
+      {
+        channel: 'whatsapp',
+        companyName: '',
+        contactName: m.contactName || m.from,
+        phone: `+${m.from}`,
+        email: '',
+        message: m.text,
+        productId,
+        sourceMessageId: m.messageId
+      },
+      req
+    );
+    ingested++;
+  }
+
+  res.json({ received: true, ingested, skipped_already: skippedAlready, skipped_unmatched: skippedUnmatched });
+}
+
 async function handleInboundWebhook(req, res) {
   const { webhookSecret, channel } = req.params;
   if (!INTEGRATION_CHANNELS.includes(channel)) return res.status(404).json({ error: 'Unknown channel' });
@@ -1958,6 +2055,10 @@ async function handleInboundWebhook(req, res) {
     const expected = Buffer.from(company.webhook_secret);
     if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
       return res.status(401).json({ error: 'Invalid webhook secret' });
+    }
+
+    if (channel === 'whatsapp' && req.body && req.body.event_type) {
+      return await handleWhatsAppInboundWebhook(req, res);
     }
 
     const company_name = sanitizeCSVValue(req.body.company || req.body.company_name || 'Unknown');

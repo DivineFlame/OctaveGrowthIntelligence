@@ -907,6 +907,15 @@
             var s = spec[ch];
             var existingConfig = (configured[ch] && configured[ch].config) || {};
             modal.classList.toggle('oc-cw-wide', ch === 'email');
+            // WhatsApp/Vobiz needs one extra, one-time setup step beyond
+            // saving credentials: telling Vobiz where to actually deliver
+            // inbound messages (POST /channels/whatsapp/register-webhook).
+            // Skipping this is the real reason a fully-configured WhatsApp
+            // channel still never shows any inbound message in the Inbox -
+            // Vobiz has nothing registered to send events to at all. Only
+            // offered once the channel has already been saved (needs its
+            // real channel_id/auth on file to call Vobiz with).
+            var showRegisterWebhook = ch === 'whatsapp' && existingConfig.channel_id;
             modal.innerHTML =
               '<div class="oc-panel">' +
                 '<button class="oc-close" id="oc-cw-close" aria-label="Close">&times;</button>' +
@@ -919,9 +928,35 @@
                   '</div>' +
                   '<div class="oc-err" role="alert" aria-live="assertive" id="oc-cw-err" style="display:none"></div>' +
                 '</form>' +
+                (showRegisterWebhook ?
+                  '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--oc-border-08)">' +
+                    '<p class="oc-help" style="margin-bottom:10px">Inbound WhatsApp messages only reach this app once Vobiz knows where to deliver them. Do this once per Vobiz account (safe to repeat if you rotate the webhook secret).</p>' +
+                    '<button type="button" class="oc-secondary" id="oc-cw-register-webhook" style="width:100%">Register webhook with Vobiz</button>' +
+                    '<div id="oc-cw-webhook-status" style="margin-top:8px;font-size:12px"></div>' +
+                  '</div>'
+                : '') +
               '</div>';
             document.getElementById('oc-cw-close').addEventListener('click', close);
             document.getElementById('oc-cw-back').addEventListener('click', renderPicker);
+            if (showRegisterWebhook) {
+              document.getElementById('oc-cw-register-webhook').addEventListener('click', async function(){
+                var btn = document.getElementById('oc-cw-register-webhook');
+                var status = document.getElementById('oc-cw-webhook-status');
+                btn.disabled = true;
+                status.textContent = 'Registering…';
+                status.style.color = '';
+                try {
+                  var result = await api(session, '/channels/whatsapp/register-webhook', { method: 'POST', body: { product_id: productId } });
+                  status.textContent = 'Registered: ' + result.url;
+                  status.style.color = 'var(--oc-success)';
+                } catch(e){
+                  status.textContent = e.message;
+                  status.style.color = 'var(--oc-danger)';
+                } finally {
+                  btn.disabled = false;
+                }
+              });
+            }
             var form = document.getElementById('oc-cw-form');
             if (form.querySelector('input')) {
               form.addEventListener('submit', async function(ev){

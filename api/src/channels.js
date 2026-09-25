@@ -283,8 +283,37 @@ function vobizErrorMessage(data, status, fallbackLabel) {
 // placeholders (paramCount = how many distinct ones it uses) so the
 // caller knows how many values it needs to collect before sending,
 // without having to parse Vobiz's raw components shape itself.
+// Pulls the latest template list/statuses from Meta into Vobiz's own
+// cache - POST /channels/{channelId}/templates/sync. Vobiz's GET
+// .../templates endpoint below only ever returns what's in *its* cache,
+// not what's live in Meta Business Manager: a template approved (or
+// created, or edited) directly in Meta doesn't show up there until this
+// sync runs, per Vobiz's own docs ("call this after creating templates
+// in Meta Business Manager directly / after a status changes from
+// PENDING_REVIEW to APPROVED"). That's exactly what made 5 genuinely
+// APPROVED templates look like zero to this app - the fetch/URL/status
+// filter were all correct, but nothing had ever told Vobiz to go
+// re-check Meta. listWhatsAppTemplates() below calls this first so the
+// reply composer's template picker is never stale without the admin
+// having to know Vobiz's own console has a separate "sync" step.
+async function syncWhatsAppTemplates(config) {
+  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
+  const resp = await fetch(`${VOBIZ_API_BASE}/messaging/channels/${config.channel_id}/templates/sync`, {
+    method: 'POST',
+    headers: vobizHeaders(config)
+  });
+  const data = await resp.json().catch(() => ({}));
+  // Best-effort: a sync failure (rate limit, transient Meta hiccup, etc)
+  // shouldn't block listing whatever Vobiz already has cached - it's
+  // surfaced by returning false rather than thrown, so the caller can
+  // decide whether an empty/stale list matters enough to fail on.
+  if (!resp.ok) { console.warn(`[vobiz] template sync failed: ${vobizErrorMessage(data, resp.status, 'syncing templates')}`); return false; }
+  return true;
+}
+
 async function listWhatsAppTemplates(config) {
   if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
+  await syncWhatsAppTemplates(config);
   // Every other Vobiz call in this file (publishWhatsApp's /messaging/messages,
   // registerWhatsAppWebhook's /messaging/webhooks) sits under the /messaging
   // prefix - this one was missing it (.../v1/channels/{id}/templates instead
@@ -557,5 +586,6 @@ module.exports = {
   decryptChannelSecrets,
   publishToChannel,
   listWhatsAppTemplates,
+  syncWhatsAppTemplates,
   registerWhatsAppWebhook
 };

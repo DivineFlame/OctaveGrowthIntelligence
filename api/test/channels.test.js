@@ -148,12 +148,18 @@ test('publishToChannel refuses an unimplemented channel with a clear error, neve
 // that some function resolves.
 const VOBIZ_CONFIG = { auth_id: 'MA_TEST', auth_token: 'tok', channel_id: 'chan-1', waba_id: 'waba-1', default_recipient: '+919876543210' };
 
-test('listWhatsAppTemplates requests this channel\'s templates and returns only APPROVED ones, with parsed placeholder counts', () => {
+test('listWhatsAppTemplates syncs from Meta first, then requests this channel\'s templates and returns only APPROVED ones, with parsed placeholder counts', () => {
   const originalFetch = global.fetch;
+  const calledUrls = [];
   global.fetch = async (url, opts) => {
-    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates');
+    calledUrls.push(url);
     assert.equal(opts.headers['X-Auth-ID'], 'MA_TEST');
     assert.equal(opts.headers['X-Auth-Token'], 'tok');
+    if (url === 'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates/sync') {
+      assert.equal(opts.method, 'POST');
+      return { ok: true, json: async () => ({ synced: 5 }) };
+    }
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates');
     return {
       ok: true,
       json: async () => ({
@@ -165,9 +171,27 @@ test('listWhatsAppTemplates requests this channel\'s templates and returns only 
     };
   };
   return listWhatsAppTemplates(VOBIZ_CONFIG).then((templates) => {
+    // Sync must happen before the list is fetched - a template just
+    // approved in Meta wouldn't show up in Vobiz's cache otherwise (see
+    // the comment on syncWhatsAppTemplates() in channels.js).
+    assert.deepEqual(calledUrls, [
+      'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates/sync',
+      'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates'
+    ]);
     assert.equal(templates.length, 1, 'the PENDING_REVIEW template must be filtered out');
     assert.equal(templates[0].name, 'order_confirmation');
     assert.equal(templates[0].paramCount, 2);
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('listWhatsAppTemplates still returns the list even when the sync call itself fails', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (url.endsWith('/sync')) return { ok: false, status: 429, json: async () => ({ message: 'Rate limited' }) };
+    return { ok: true, json: async () => ({ items: [] }) };
+  };
+  return listWhatsAppTemplates(VOBIZ_CONFIG).then((templates) => {
+    assert.deepEqual(templates, []);
   }).finally(() => { global.fetch = originalFetch; });
 });
 

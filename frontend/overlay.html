@@ -160,6 +160,25 @@
     #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
     #oc-channel-wizard .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
     #oc-channel-wizard .oc-help{font-size:11px;color:var(--oc-dim-45);margin-bottom:14px;line-height:1.5}
+    /* Email is the one channel with two logically separate groups - SMTP
+       (outbound, required to send) and IMAP (inbound, optional, turns
+       replies into leads) - stuffed into one 13-field list. That made it
+       easy to lose track of which section a field belonged to, and easy
+       to miss one entirely while scrolling (see the "SMTP host missing"
+       report - it was the first field in the list, right after a long
+       help paragraph, on a modal that wasn't wide enough to hint there
+       was more above the fold). Side-by-side columns on a wider modal
+       fix both: the two groups are visually distinct, and the full SMTP
+       column - including SMTP host - fits without scrolling on common
+       screen sizes.
+    */
+    #oc-channel-wizard.oc-cw-wide .oc-panel{max-width:640px}
+    #oc-channel-wizard .oc-channel-cols{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:4px}
+    #oc-channel-wizard .oc-channel-col-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-6);margin:0 0 4px;padding-bottom:8px;border-bottom:1px solid var(--oc-border-08)}
+    @media (max-width:560px){
+      #oc-channel-wizard.oc-cw-wide .oc-panel{max-width:480px}
+      #oc-channel-wizard .oc-channel-cols{grid-template-columns:1fr;gap:0}
+    }
     #oc-onboarding{position:fixed;inset:0;z-index:99998;background:var(--oc-overlay-7);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
     #oc-onboarding .oc-panel{position:relative;width:100%;max-width:440px;background:var(--oc-panel);color:var(--oc-text);border-radius:16px;border:1px solid var(--oc-border-08);padding:28px;font-family:Inter,system-ui,sans-serif}
     #oc-onboarding .oc-steps{display:flex;gap:6px;margin-bottom:18px}
@@ -788,14 +807,39 @@
             return '<div class="oc-help">' + (s.help || 'Not implemented yet.') + '</div>';
           }
           var existing = existingConfig || {};
-          return (s.help ? '<div class="oc-help">' + s.help + '</div>' : '') +
-            s.fields.map(function(f){
-              var val = existing[f.key] || '';
-              var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
-              return '<label for="oc-cf-' + f.key + '">' + f.label + (f.required ? ' *' : '') + '</label>' +
-                '<input id="oc-cf-' + f.key + '" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
-                (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
-            }).join('');
+
+          function fieldHtml(f){
+            var val = existing[f.key] || '';
+            var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+            return '<label for="oc-cf-' + f.key + '">' + f.label + (f.required ? ' *' : '') + '</label>' +
+              '<input id="oc-cf-' + f.key + '" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
+              (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
+          }
+
+          var helpHtml = s.help ? '<div class="oc-help">' + s.help + '</div>' : '';
+
+          // Email is the only channel with two distinct groups - SMTP
+          // (outbound sending) and IMAP (inbound, optional) - so it gets
+          // its own side-by-side layout (see the CSS comment on
+          // .oc-cw-wide for why). Every other channel keeps the plain
+          // single-column list.
+          if (ch === 'email') {
+            var smtpFields = s.fields.filter(function(f){ return f.key.indexOf('imap_') !== 0; });
+            var imapFields = s.fields.filter(function(f){ return f.key.indexOf('imap_') === 0; });
+            return helpHtml +
+              '<div class="oc-channel-cols">' +
+                '<div class="oc-channel-col">' +
+                  '<h4 class="oc-channel-col-title">SMTP &middot; Outbound</h4>' +
+                  smtpFields.map(fieldHtml).join('') +
+                '</div>' +
+                '<div class="oc-channel-col">' +
+                  '<h4 class="oc-channel-col-title">IMAP &middot; Inbound (optional)</h4>' +
+                  imapFields.map(fieldHtml).join('') +
+                '</div>' +
+              '</div>';
+          }
+
+          return helpHtml + s.fields.map(fieldHtml).join('');
         }
 
         // A focused, two-step modal (pick a channel -> fill its fields) for
@@ -816,6 +860,7 @@
           modal.addEventListener('click', function(ev){ if (ev.target === modal) close(); });
 
           function renderPicker(){
+            modal.classList.remove('oc-cw-wide');
             var all = Object.keys(spec);
             modal.innerHTML =
               '<div class="oc-panel">' +
@@ -843,6 +888,7 @@
           function renderForm(ch){
             var s = spec[ch];
             var existingConfig = (configured[ch] && configured[ch].config) || {};
+            modal.classList.toggle('oc-cw-wide', ch === 'email');
             modal.innerHTML =
               '<div class="oc-panel">' +
                 '<button class="oc-close" id="oc-cw-close" aria-label="Close">&times;</button>' +

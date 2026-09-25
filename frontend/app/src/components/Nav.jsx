@@ -44,7 +44,20 @@ export default function Nav({ active, onChange, products, selectedProductId, onS
           className="ml-auto rounded-full border border-black/10 bg-transparent px-3 py-1.5 text-[12px] text-zinc-700 outline-none focus:border-brand dark:border-white/15 dark:text-white/80"
         >
           {products.map((p) => (
-            <option key={p.id} value={p.id}>
+            // Native <option> elements don't reliably inherit Tailwind's
+            // text-color utility classes from the parent <select> in every
+            // browser's dropdown popup rendering (it uses its own
+            // platform-native list chrome) - dark:text-white/80 on the
+            // <select> made the closed control's text readable but left
+            // non-selected options in the open popup rendered as white-on-
+            // white (invisible) in dark mode. Set explicit, readable
+            // colors directly on each <option> so they're visible
+            // regardless of the surrounding theme.
+            <option
+              key={p.id}
+              value={p.id}
+              style={{ color: '#111827', backgroundColor: '#ffffff' }}
+            >
               {p.name}
             </option>
           ))}

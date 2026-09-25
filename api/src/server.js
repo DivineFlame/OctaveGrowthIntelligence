@@ -1156,8 +1156,8 @@ app.get('/channels/whatsapp/templates', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'WhatsApp is not configured on this product yet (Studio > Channels)' });
     }
     const config = channelsLib.decryptChannelSecrets('whatsapp', channelRow.rows[0].config, decryptSecret);
-    const templates = await channelsLib.listWhatsAppTemplates(config);
-    res.json(templates);
+    const { templates, diagnostics } = await channelsLib.listWhatsAppTemplatesWithDiagnostics(config);
+    res.json({ templates, diagnostics });
   } catch(e){ upstreamError(res, e); }
 });
 

@@ -311,9 +311,21 @@ async function syncWhatsAppTemplates(config) {
   return true;
 }
 
-async function listWhatsAppTemplates(config) {
+// Raw fetch, no APPROVED-only filtering - every item Vobiz has cached for
+// this channel_id, whatever its status. listWhatsAppTemplates() below is
+// just this filtered/mapped down to what's actually sendable; this raw
+// version exists so GET /channels/whatsapp/templates (server.js) can tell
+// an admin *why* the approved list is empty - "Vobiz has 0 templates
+// cached for this channel_id at all" (wrong/mismatched channel_id - a
+// template belongs to whichever channel_id owns it in Vobiz, which isn't
+// always the same UUID as the channel an admin expects, especially with
+// more than one WhatsApp channel/number in the same Vobiz account) is a
+// completely different problem from "Vobiz has templates, all still
+// PENDING_REVIEW" - a bare "No approved templates yet" collapses both
+// into the same unhelpful message.
+async function fetchWhatsAppTemplatesRaw(config) {
   if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
-  await syncWhatsAppTemplates(config);
+  const synced = await syncWhatsAppTemplates(config);
   // Every other Vobiz call in this file (publishWhatsApp's /messaging/messages,
   // registerWhatsAppWebhook's /messaging/webhooks) sits under the /messaging
   // prefix - this one was missing it (.../v1/channels/{id}/templates instead
@@ -327,17 +339,31 @@ async function listWhatsAppTemplates(config) {
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(vobizErrorMessage(data, resp.status, 'listing templates'));
+  return { items: data.items || [], synced };
+}
 
-  const items = data.items || [];
-  return items
-    .filter((t) => t.status === 'APPROVED')
-    .map((t) => {
-      const components = (t.components && t.components.components) || [];
-      const bodyComponent = components.find((c) => (c.type || '').toUpperCase() === 'BODY');
-      const bodyText = (bodyComponent && bodyComponent.text) || '';
-      const paramCount = new Set(bodyText.match(/\{\{\d+\}\}/g) || []).size;
-      return { name: t.name, language: t.language, category: t.category, bodyText, paramCount };
-    });
+function mapWhatsAppTemplate(t) {
+  const components = (t.components && t.components.components) || [];
+  const bodyComponent = components.find((c) => (c.type || '').toUpperCase() === 'BODY');
+  const bodyText = (bodyComponent && bodyComponent.text) || '';
+  const paramCount = new Set(bodyText.match(/\{\{\d+\}\}/g) || []).size;
+  return { name: t.name, language: t.language, category: t.category, bodyText, paramCount };
+}
+
+async function listWhatsAppTemplates(config) {
+  const { items } = await fetchWhatsAppTemplatesRaw(config);
+  return items.filter((t) => t.status === 'APPROVED').map(mapWhatsAppTemplate);
+}
+
+// Same data as listWhatsAppTemplates(), plus the diagnostics described
+// above - what GET /channels/whatsapp/templates actually calls so an
+// empty result comes with a reason instead of a guess.
+async function listWhatsAppTemplatesWithDiagnostics(config) {
+  const { items, synced } = await fetchWhatsAppTemplatesRaw(config);
+  const templates = items.filter((t) => t.status === 'APPROVED').map(mapWhatsAppTemplate);
+  const statusCounts = {};
+  for (const t of items) { const s = t.status || 'UNKNOWN'; statusCounts[s] = (statusCounts[s] || 0) + 1; }
+  return { templates, diagnostics: { synced, totalCached: items.length, statusCounts, channelId: config.channel_id } };
 }
 
 // Registers a webhook subscription with Vobiz so it actually starts
@@ -586,6 +612,7 @@ module.exports = {
   decryptChannelSecrets,
   publishToChannel,
   listWhatsAppTemplates,
+  listWhatsAppTemplatesWithDiagnostics,
   syncWhatsAppTemplates,
   registerWhatsAppWebhook
 };

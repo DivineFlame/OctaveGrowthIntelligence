@@ -235,6 +235,12 @@ function Thread({ lead, onClose }) {
   const [templates, setTemplates] = useState([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templatesErr, setTemplatesErr] = useState('');
+  // Set only when the fetch succeeded but came back with zero APPROVED
+  // templates - server.js's diagnostics tell us why (no templates cached
+  // for this channel_id at all vs. templates cached but none APPROVED
+  // yet), instead of the old one-size-fits-all "sync/approve one" hint
+  // that was equally shown whether or not that was actually the problem.
+  const [templatesDiag, setTemplatesDiag] = useState(null);
   const [selectedTemplateName, setSelectedTemplateName] = useState('');
   const [templateParams, setTemplateParams] = useState([]);
 
@@ -272,10 +278,17 @@ function Thread({ lead, onClose }) {
     let cancelled = false;
     setTemplatesLoading(true);
     setTemplatesErr('');
+    setTemplatesDiag(null);
     api
       .whatsappTemplates(lead.product_id)
-      .then((rows) => {
-        if (!cancelled) setTemplates(rows);
+      .then((result) => {
+        if (cancelled) return;
+        // GET /channels/whatsapp/templates returns { templates, diagnostics }
+        // - fall back to treating a bare array as the template list, in
+        // case an older cached frontend bundle is talking to this API.
+        const rows = Array.isArray(result) ? result : result.templates || [];
+        setTemplates(rows);
+        if (!Array.isArray(result) && rows.length === 0) setTemplatesDiag(result.diagnostics || null);
       })
       .catch((e) => {
         if (!cancelled) setTemplatesErr(e instanceof ApiError ? e.message : 'Failed to load WhatsApp templates');
@@ -501,9 +514,26 @@ function Thread({ lead, onClose }) {
             ) : templatesErr ? (
               <p className="text-[12px] text-red-500">{templatesErr}</p>
             ) : templates.length === 0 ? (
-              <p className="text-[12px] text-zinc-500 dark:text-white/50">
-                No approved WhatsApp templates yet. Sync/approve one in Vobiz (Channels &gt; WhatsApp &gt; Templates), then refresh this thread.
-              </p>
+              <div className="text-[12px] text-zinc-500 dark:text-white/50">
+                {templatesDiag && templatesDiag.totalCached === 0 ? (
+                  <p>
+                    Vobiz has no templates cached for this channel at all (Channel ID{' '}
+                    <code className="text-[11px]">{templatesDiag.channelId}</code>). Your approved templates
+                    likely belong to a different channel in Vobiz - open Vobiz &gt; Messaging &gt; Templates,
+                    open one of them, and check which Channel it's attached to, then match that Channel ID
+                    here (Studio &gt; Channels &gt; WhatsApp).
+                    {templatesDiag.synced === false ? ' (Also: the last sync-from-Meta call to Vobiz failed - see server logs.)' : ''}
+                  </p>
+                ) : templatesDiag && templatesDiag.totalCached > 0 ? (
+                  <p>
+                    Vobiz has {templatesDiag.totalCached} template(s) cached for this channel, but none are
+                    APPROVED yet ({Object.entries(templatesDiag.statusCounts).map(([status, count]) => `${count} ${status}`).join(', ')}).
+                    Approve one in Meta Business Manager, then refresh this thread.
+                  </p>
+                ) : (
+                  <p>No approved WhatsApp templates yet. Sync/approve one in Vobiz (Messaging &gt; Templates), then refresh this thread.</p>
+                )}
+              </div>
             ) : (
               <div className="space-y-2">
                 <select

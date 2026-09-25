@@ -117,8 +117,20 @@ export const api = {
     return apiCall(`/leads${q ? `?${q}` : ''}`);
   },
   leadMessages: (leadId) => apiCall(`/leads/${leadId}/messages`),
-  replyToLead: (leadId, body, channel) =>
-    apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: channel ? { body, channel } : { body } }),
+  // `files` (optional) is an array of File objects from the reply
+  // composer's attach button - switches to a multipart request only when
+  // there's actually something to attach, so the common no-attachment
+  // case stays a plain JSON POST exactly as before.
+  replyToLead: (leadId, body, channel, files) => {
+    if (files && files.length) {
+      const form = new FormData();
+      form.append('body', body);
+      if (channel) form.append('channel', channel);
+      files.forEach((f) => form.append('attachments', f));
+      return apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: form });
+    }
+    return apiCall(`/leads/${leadId}/reply`, { method: 'POST', body: channel ? { body, channel } : { body } });
+  },
 
   uploadContent: (file, { productId, brandKit } = {}) => {
     const form = new FormData();

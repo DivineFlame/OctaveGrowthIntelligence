@@ -18,6 +18,7 @@ const { rateLimit } = require('express-rate-limit');
 const { authenticator } = require('otplib');
 const QRCode = require('qrcode');
 const channelsLib = require('./channels');
+const { formatReplyHtml } = require('./reply-formatting');
 const emailPoller = require('./email-poller');
 const { normalizeDomain, sanitizeCSVValue } = require('./validators');
 const schemas = require('./schemas');
@@ -319,6 +320,23 @@ const upload = multer({
   }
 });
 const csvUpload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
+
+// Lead-reply attachments (POST /leads/:id/reply) - image/PDF only, small
+// and few, since these ride along on a single outbound email rather than
+// being stored as a Product's content library. Same disk/ClamAV path as
+// every other upload in this app (see scanFile below), just a narrower
+// MIME allowlist and size/count cap.
+const REPLY_ATTACHMENT_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+const replyAttachmentUpload = multer({
+  storage,
+  limits: { fileSize: 15 * 1024 * 1024, files: 3 }, // 15MB/file, 3 files
+  fileFilter: (req, file, cb) => {
+    if (!REPLY_ATTACHMENT_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error(`Unsupported file type: ${file.mimetype} - only images and PDFs can be attached to a reply.`));
+    }
+    cb(null, true);
+  }
+});
 
 // Helpers
 async function auditLog(user_id, action, resource_type, resource_id, req, result='SUCCESS', details={}) {
@@ -1240,7 +1258,7 @@ app.get('/leads/:id/messages', authMiddleware, async (req, res) => {
     if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
     const { rows } = await pool.query(
       `SELECT lm.id, lm.direction, lm.channel, lm.body, lm.sent_by, u.email AS sent_by_email,
-              lm.send_status, lm.send_error, lm.external_id, lm.created_at
+              lm.send_status, lm.send_error, lm.external_id, lm.attachments, lm.created_at
        FROM lead_messages lm LEFT JOIN users u ON u.id = lm.sent_by
        WHERE lm.lead_id=$1 ORDER BY lm.created_at`,
       [req.params.id]
@@ -1255,13 +1273,50 @@ app.get('/leads/:id/messages', authMiddleware, async (req, res) => {
 // page/feed/channel at large.
 const LEAD_REPLY_RECIPIENT_CHANNELS = { email: 'email', whatsapp: 'phone' };
 
-app.post('/leads/:id/reply', authMiddleware, validate(schemas.replyToLead), async (req, res) => {
+app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attachments', 3), validate(schemas.replyToLead), async (req, res) => {
   const { body, channel: requestedChannel } = req.body;
+  const uploadedFiles = req.files || [];
+
+  // Every uploaded file lands on disk (multer wrote it before this handler
+  // ran) whether or not the rest of the request succeeds - always clean
+  // up on the way out, the same reasoning as POST /content/upload's own
+  // cleanup comment (unreferenced attachments would otherwise accumulate
+  // on disk forever, since nothing else ever points at these paths).
+  function cleanupUploads() {
+    for (const f of uploadedFiles) fs.unlink(f.path, () => {});
+  }
+
   try {
     const leadRows = await pool.query('SELECT id, product_id, source_channel, email, phone, company_name FROM leads WHERE id=$1', [req.params.id]);
-    if (!leadRows.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    if (!leadRows.rows.length) { cleanupUploads(); return res.status(404).json({ error: 'Lead not found' }); }
     const lead = leadRows.rows[0];
     const channel = requestedChannel || lead.source_channel;
+
+    // Virus-scan every attachment before anything else - same fail-closed
+    // scanFile() every other upload route in this app uses. One bad file
+    // rejects the whole reply rather than silently dropping it and
+    // sending the rest.
+    for (const f of uploadedFiles) {
+      let scan;
+      try {
+        scan = await scanFile(f.path);
+      } catch (scanErr) {
+        cleanupUploads();
+        return res.status(503).json({ error: scanErr.message });
+      }
+      if (scan.isInfected) {
+        cleanupUploads();
+        await auditLog(req.user.id, 'VIRUS_DETECTED', 'lead_message_attachment', req.params.id, req, 'BLOCKED', { file: f.originalname, viruses: scan.viruses });
+        return res.status(400).json({ error: `Attachment "${f.originalname}" failed virus scan`, viruses: scan.viruses });
+      }
+    }
+
+    // What actually gets attached to the outbound email (real disk paths,
+    // deleted after send below) vs. what gets remembered in lead_messages
+    // for the thread's history (name/type/size only - the file itself is
+    // never kept around, see the migration's comment).
+    const transferAttachments = uploadedFiles.map(f => ({ filePath: f.path, fileName: f.originalname, mimeType: f.mimetype }));
+    const attachmentMeta = uploadedFiles.map(f => ({ name: f.originalname, mimeType: f.mimetype, size: f.size }));
 
     let sendStatus = 'not_sent', sendError = null, externalId = null;
     const recipientField = LEAD_REPLY_RECIPIENT_CHANNELS[channel];
@@ -1270,6 +1325,8 @@ app.post('/leads/:id/reply', authMiddleware, validate(schemas.replyToLead), asyn
       sendError = `"${channel}" doesn't support replying to one lead directly - only recorded, not sent. (email/whatsapp are the channels this can actually send a 1:1 reply through.)`;
     } else if (!lead.product_id) {
       sendError = 'This lead is not associated with a Product, so no channel credentials exist for it - only recorded, not sent.';
+    } else if (uploadedFiles.length && channel !== 'email') {
+      sendError = `Attachments can only be sent over email, not "${channel}" - only recorded, not sent.`;
     } else {
       const recipient = lead[recipientField];
       if (!recipient) {
@@ -1282,7 +1339,16 @@ app.post('/leads/:id/reply', authMiddleware, validate(schemas.replyToLead), asyn
           try {
             const config = channelsLib.decryptChannelSecrets(channel, channelRow.rows[0].config, decryptSecret);
             const result = await channelsLib.publishToChannel(channel, {
-              config, title: `Re: message from ${lead.company_name || 'your inquiry'}`, text: body, to: recipient
+              config,
+              title: `Re: message from ${lead.company_name || 'your inquiry'}`,
+              text: body,
+              // Formatted HTML (bold/italic/underline/bullets from the
+              // composer's toolbar - see reply-formatting.js) only makes
+              // sense for email; other channels just get the plain text
+              // above, same as before this feature existed.
+              html: channel === 'email' ? formatReplyHtml(body) : undefined,
+              attachments: channel === 'email' ? transferAttachments : undefined,
+              to: recipient
             });
             sendStatus = 'sent';
             externalId = result.externalId || null;
@@ -1293,14 +1359,16 @@ app.post('/leads/:id/reply', authMiddleware, validate(schemas.replyToLead), asyn
       }
     }
 
+    cleanupUploads();
+
     const { rows } = await pool.query(
-      `INSERT INTO lead_messages (lead_id, direction, channel, body, sent_by, send_status, send_error, external_id)
-       VALUES ($1,'outbound',$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [req.params.id, channel, body, req.user.id, sendStatus, sendError, externalId]
+      `INSERT INTO lead_messages (lead_id, direction, channel, body, sent_by, send_status, send_error, external_id, attachments)
+       VALUES ($1,'outbound',$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [req.params.id, channel, body, req.user.id, sendStatus, sendError, externalId, JSON.stringify(attachmentMeta)]
     );
     await auditLog(req.user.id, 'REPLY_TO_LEAD', 'lead', req.params.id, req, sendStatus === 'sent' ? 'SUCCESS' : 'PARTIAL', { channel, send_status: sendStatus, send_error: sendError });
     res.json(rows[0]);
-  } catch(e){ serverError(res, e); }
+  } catch(e){ cleanupUploads(); serverError(res, e); }
 });
 
 // Leads - CSV Upload (Secure: 10MB, 5000 rows, sanitize, dedup, ClamAV)

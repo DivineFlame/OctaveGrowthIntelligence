@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Facebook,
   Instagram,
@@ -9,8 +9,106 @@ import {
   Globe,
   Send,
   Inbox as InboxIcon,
+  Bold,
+  Italic,
+  Underline,
+  List,
+  Paperclip,
+  X,
+  FileText,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { api, ApiError } from '../lib/api.js';
+
+const MAX_ATTACHMENTS = 3;
+const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024; // 15MB, matches the API's per-file limit
+const ATTACHMENT_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,application/pdf';
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Renders the same tiny formatting subset as the API's reply-formatting.js
+// (**bold**, *italic*/_italic_, __underline__, "- " bullet lines) but as
+// real React elements built from plain text - never dangerouslySetInnerHTML
+// - so a lead's own words can never inject markup into this app's own UI.
+// Kept deliberately in lockstep with reply-formatting.js's rules; if one
+// changes, the other should too.
+function renderInline(line, keyPrefix) {
+  const nodes = [];
+  const re = /\*\*(.+?)\*\*|__(.+?)__|(?:\*|_)([^*_]+?)(?:\*|_)/g;
+  let last = 0;
+  let m;
+  let i = 0;
+  while ((m = re.exec(line))) {
+    if (m.index > last) nodes.push(line.slice(last, m.index));
+    if (m[1] !== undefined) nodes.push(<strong key={`${keyPrefix}-${i++}`}>{m[1]}</strong>);
+    else if (m[2] !== undefined) nodes.push(<u key={`${keyPrefix}-${i++}`}>{m[2]}</u>);
+    else nodes.push(<em key={`${keyPrefix}-${i++}`}>{m[3]}</em>);
+    last = re.lastIndex;
+  }
+  if (last < line.length) nodes.push(line.slice(last));
+  return nodes;
+}
+
+function renderFormattedBody(body) {
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let listBuffer = null;
+  let paraBuffer = [];
+
+  function flushList() {
+    if (listBuffer) {
+      blocks.push(
+        <ul key={`ul-${blocks.length}`} className="my-1 list-disc pl-4">
+          {listBuffer.map((text, i) => (
+            <li key={i}>{renderInline(text, `li-${blocks.length}-${i}`)}</li>
+          ))}
+        </ul>
+      );
+      listBuffer = null;
+    }
+  }
+  function flushPara() {
+    if (paraBuffer.length) {
+      const idx = blocks.length;
+      blocks.push(
+        <p key={`p-${idx}`} className={idx > 0 ? 'mt-1' : ''}>
+          {paraBuffer.map((text, i) => (
+            <React.Fragment key={i}>
+              {i > 0 ? <br /> : null}
+              {renderInline(text, `p-${idx}-${i}`)}
+            </React.Fragment>
+          ))}
+        </p>
+      );
+      paraBuffer = [];
+    }
+  }
+
+  for (const rawLine of lines) {
+    const bulletMatch = /^\s*-\s+(.*)$/.exec(rawLine);
+    if (bulletMatch) {
+      flushPara();
+      if (!listBuffer) listBuffer = [];
+      listBuffer.push(bulletMatch[1]);
+      continue;
+    }
+    flushList();
+    if (rawLine.trim() === '') {
+      flushPara();
+      continue;
+    }
+    paraBuffer.push(rawLine);
+  }
+  flushList();
+  flushPara();
+
+  return blocks.length ? blocks : null;
+}
 
 const CHANNEL_ICONS = {
   whatsapp: MessageCircle,
@@ -86,12 +184,31 @@ function LeadRow({ lead, active, onClick }) {
   );
 }
 
+function AttachmentChip({ name, mimeType, size, onRemove }) {
+  const Icon = (mimeType || '').startsWith('image/') ? ImageIcon : FileText;
+  return (
+    <span className="flex items-center gap-1.5 rounded-full border border-black/10 bg-black/[0.03] px-2.5 py-1 text-[11px] text-zinc-700 dark:border-white/15 dark:bg-white/[0.06] dark:text-white/80">
+      <Icon className="h-3 w-3 shrink-0" />
+      <span className="max-w-[140px] truncate">{name}</span>
+      {size != null ? <span className="text-zinc-400 dark:text-white/40">{formatBytes(size)}</span> : null}
+      {onRemove ? (
+        <button type="button" onClick={onRemove} aria-label={`Remove ${name}`} className="ml-0.5 text-zinc-400 hover:text-red-500 dark:text-white/40">
+          <X className="h-3 w-3" />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
 function Thread({ lead, onClose }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   const [reply, setReply] = useState('');
+  const [attachments, setAttachments] = useState([]); // File[]
   const [sending, setSending] = useState(false);
+  const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,14 +230,82 @@ function Thread({ lead, onClose }) {
     };
   }, [lead.id]);
 
+  // Wraps the current textarea selection in the given markers (or inserts
+  // an empty pair at the cursor when nothing's selected) - the same plain
+  // tokens the API's reply-formatting.js parses, so what's typed here is
+  // exactly what ends up formatted in the sent email.
+  const wrapSelection = (before, after = before) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const { selectionStart, selectionEnd, value } = el;
+    const selected = value.slice(selectionStart, selectionEnd);
+    const next = value.slice(0, selectionStart) + before + selected + after + value.slice(selectionEnd);
+    setReply(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = selectionStart + before.length + selected.length + (selected ? after.length : 0);
+      el.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  // Toggles "- " on every non-blank line the selection touches (or just
+  // the current line, if nothing's selected) - un-bullets instead if every
+  // touched line already has one.
+  const toggleBullets = () => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const { selectionStart, selectionEnd, value } = el;
+    const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+    const lineEndIdx = value.indexOf('\n', selectionEnd);
+    const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx;
+    const block = value.slice(lineStart, lineEnd);
+    const lines = block.split('\n');
+    const allBulleted = lines.every((l) => /^\s*-\s/.test(l) || l.trim() === '');
+    const nextLines = lines.map((l) => {
+      if (l.trim() === '') return l;
+      return allBulleted ? l.replace(/^\s*-\s+/, '') : `- ${l}`;
+    });
+    const nextBlock = nextLines.join('\n');
+    const next = value.slice(0, lineStart) + nextBlock + value.slice(lineEnd);
+    setReply(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(lineStart, lineStart + nextBlock.length);
+    });
+  };
+
+  const addFiles = (fileList) => {
+    const incoming = Array.from(fileList || []);
+    if (!incoming.length) return;
+    setErr('');
+    const room = MAX_ATTACHMENTS - attachments.length;
+    if (room <= 0) {
+      setErr(`Up to ${MAX_ATTACHMENTS} attachments per reply.`);
+      return;
+    }
+    const accepted = [];
+    for (const f of incoming.slice(0, room)) {
+      if (f.size > MAX_ATTACHMENT_BYTES) {
+        setErr(`"${f.name}" is over ${formatBytes(MAX_ATTACHMENT_BYTES)} - not attached.`);
+        continue;
+      }
+      accepted.push(f);
+    }
+    if (accepted.length) setAttachments((prev) => [...prev, ...accepted]);
+    if (incoming.length > room) setErr(`Up to ${MAX_ATTACHMENTS} attachments per reply - only the first ${room} were added.`);
+  };
+
+  const removeAttachment = (idx) => setAttachments((prev) => prev.filter((_, i) => i !== idx));
+
   const send = async () => {
     if (!reply.trim()) return;
     setSending(true);
     setErr('');
     try {
-      const sent = await api.replyToLead(lead.id, reply.trim());
+      const sent = await api.replyToLead(lead.id, reply.trim(), undefined, attachments);
       setMessages((prev) => [...prev, sent]);
       setReply('');
+      setAttachments([]);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Reply failed to send');
     } finally {
@@ -161,8 +346,19 @@ function Thread({ lead, onClose }) {
                   an email-sourced message can contain a long unbroken run of
                   characters (a tracking URL, an un-spaced run left over from a
                   template) that whitespace-pre-wrap alone won't wrap, and would
-                  otherwise push past this bubble's max-width. */}
-              <p className="whitespace-pre-wrap break-words">{m.body}</p>
+                  otherwise push past this bubble's max-width. Formatting (bold/
+                  italic/underline/bullets) is rendered as real elements via
+                  renderFormattedBody - never dangerouslySetInnerHTML, so this
+                  stays safe even for an inbound message whose text happens to
+                  contain the same markers. */}
+              <div className="break-words leading-snug">{renderFormattedBody(m.body)}</div>
+              {m.attachments && m.attachments.length ? (
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {m.attachments.map((a, i) => (
+                    <AttachmentChip key={i} name={a.name} mimeType={a.mimeType} size={a.size} />
+                  ))}
+                </div>
+              ) : null}
               <p className="mt-1 text-[10px] text-zinc-400 dark:text-white/30">
                 {m.direction === 'outbound' ? `You${m.sent_by_email ? ` (${m.sent_by_email})` : ''}` : 'Them'} ·{' '}
                 {new Date(m.created_at).toLocaleString()}
@@ -187,27 +383,82 @@ function Thread({ lead, onClose }) {
 
       {err ? <p className="px-4 text-[12px] text-red-500">{err}</p> : null}
 
-      <div className="flex items-center gap-2 border-t border-black/5 p-3 dark:border-white/[0.08]">
-        <input
-          value={reply}
-          onChange={(e) => setReply(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-          placeholder={`Reply via ${lead.source_channel || 'the lead’s channel'}…`}
-          className="flex-1 rounded-full border border-black/10 bg-transparent px-3.5 py-2 text-[12px] text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
-        />
-        <button
-          onClick={send}
-          disabled={sending || !reply.trim()}
-          aria-label="Send reply"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand text-white disabled:opacity-50"
-        >
-          <Send className="h-3.5 w-3.5" />
-        </button>
+      <div className="border-t border-black/5 p-3 dark:border-white/[0.08]">
+        {attachments.length ? (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((f, i) => (
+              <AttachmentChip key={i} name={f.name} mimeType={f.type} size={f.size} onRemove={() => removeAttachment(i)} />
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mb-1.5 flex items-center gap-1">
+          <button type="button" onClick={() => wrapSelection('**')} title="Bold" aria-label="Bold" className="rounded p-1.5 text-zinc-500 hover:bg-black/5 hover:text-zinc-900 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white">
+            <Bold className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" onClick={() => wrapSelection('*')} title="Italic" aria-label="Italic" className="rounded p-1.5 text-zinc-500 hover:bg-black/5 hover:text-zinc-900 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white">
+            <Italic className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" onClick={() => wrapSelection('__')} title="Underline" aria-label="Underline" className="rounded p-1.5 text-zinc-500 hover:bg-black/5 hover:text-zinc-900 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white">
+            <Underline className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" onClick={toggleBullets} title="Bullet list" aria-label="Bullet list" className="rounded p-1.5 text-zinc-500 hover:bg-black/5 hover:text-zinc-900 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white">
+            <List className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            disabled={attachments.length >= MAX_ATTACHMENTS}
+            title="Attach image or PDF"
+            aria-label="Attach image or PDF"
+            className="rounded p-1.5 text-zinc-500 hover:bg-black/5 hover:text-zinc-900 disabled:opacity-40 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white"
+          >
+            <Paperclip className="h-3.5 w-3.5" />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ATTACHMENT_ACCEPT}
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
+        </div>
+
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={textareaRef}
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter alone makes a new line, like any normal email/chat
+              // composer once it's multi-line; Ctrl/Cmd+Enter or
+              // Shift+Enter sends.
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            onPaste={(e) => {
+              const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+              if (files.length) addFiles(files);
+            }}
+            rows={3}
+            placeholder={`Reply via ${lead.source_channel || 'the lead\u2019s channel'}\u2026 (**bold**, *italic*, __underline__, "- " for bullets)`}
+            className="flex-1 resize-y rounded-[10px] border border-black/10 bg-transparent px-3.5 py-2 text-[12px] leading-normal text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
+          />
+          <button
+            onClick={send}
+            disabled={sending || !reply.trim()}
+            aria-label="Send reply (Ctrl/Cmd+Enter)"
+            className="flex h-8 w-8 shrink-0 items-center justify-center self-end rounded-full bg-brand text-white disabled:opacity-50"
+          >
+            <Send className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
     </div>
   );

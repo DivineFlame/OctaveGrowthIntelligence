@@ -157,7 +157,7 @@ function decryptChannelSecrets(channel, config, decryptSecret) {
   return out;
 }
 
-async function publishEmail({ config, title, text, filePath, fileName, mimeType, to }) {
+async function publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments: extraAttachments, to }) {
   // Lazily required so the dependency is only ever loaded by a product that
   // actually configures an email channel.
   const nodemailer = require('nodemailer');
@@ -185,12 +185,26 @@ async function publishEmail({ config, title, text, filePath, fileName, mimeType,
   if (filePath && fs.existsSync(filePath)) {
     attachments.push({ filename: fileName || 'attachment', path: filePath, contentType: mimeType || undefined });
   }
+  // Lead replies (POST /leads/:id/reply) can carry several image/PDF
+  // attachments at once, unlike the single content-asset file this
+  // function originally only ever sent - kept as a separate param rather
+  // than overloading filePath so both call sites stay simple.
+  for (const a of (extraAttachments || [])) {
+    if (a && a.filePath && fs.existsSync(a.filePath)) {
+      attachments.push({ filename: a.fileName || 'attachment', path: a.filePath, contentType: a.mimeType || undefined });
+    }
+  }
 
   const info = await transporter.sendMail({
     from: config.from_email,
     to: recipient,
     subject: title || 'New content from OrgComms',
     text: text || title || '',
+    // html is optional (only the reply composer's formatting toolbar
+    // produces it - see reply-formatting.js) - nodemailer sends a
+    // multipart message with both when it's present, and mail clients
+    // that can't render HTML fall back to the plain-text part above.
+    html: html || undefined,
     attachments
   });
 
@@ -361,13 +375,13 @@ async function publishLinkedIn({ config, title, text }) {
 // Single dispatch point. `config` must already be decrypted (see
 // decryptChannelSecrets). Throws on any failure - callers persist the
 // error message onto content_variants.publish_error rather than swallow it.
-async function publishToChannel(channel, { config, title, text, filePath, fileName, mimeType, publicFileUrl, to }) {
+async function publishToChannel(channel, { config, title, text, html, filePath, fileName, mimeType, attachments, publicFileUrl, to }) {
   const spec = CHANNEL_SPECS[channel];
   if (!spec) throw new Error(`Unknown channel: ${channel}`);
   if (!spec.implemented) throw new Error(`${spec.label} publishing is not implemented yet. ${spec.help}`);
 
   switch (channel) {
-    case 'email': return publishEmail({ config, title, text, filePath, fileName, mimeType, to });
+    case 'email': return publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments, to });
     case 'whatsapp': return publishWhatsApp({ config, text: text || title, to });
     case 'facebook': return publishFacebook({ config, title, text, filePath, mimeType });
     case 'instagram': return publishInstagram({ config, title, text, publicFileUrl });

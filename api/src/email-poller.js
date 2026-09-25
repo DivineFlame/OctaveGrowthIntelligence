@@ -133,7 +133,12 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
   const clientOpts = {
     host,
     port,
-    secure: String(config.imap_secure || 'true') !== 'false',
+    // Same case-sensitivity bug as channels.js's SMTP secure flag (see its
+    // comment) - "FALSE" saved from the form wouldn't match the lowercase
+    // 'false' literal here, so it would keep IMAP TLS on when the user
+    // asked to turn it off. Normalize case/whitespace to fix both
+    // directions consistently.
+    secure: String(config.imap_secure || 'true').trim().toLowerCase() !== 'false',
     auth: { user, pass },
     logger: false,
     // ImapFlow's own default (5 minutes) is generous enough for a slow

@@ -37,7 +37,7 @@ const CHANNEL_SPECS = {
     fields: [
       { key: 'smtp_host', label: 'SMTP host', required: true },
       { key: 'smtp_port', label: 'SMTP port', required: true, default: '587' },
-      { key: 'smtp_secure', label: 'Use TLS (true/false)', required: false, default: 'false' },
+      { key: 'smtp_secure', label: 'Use TLS', type: 'boolean', required: false, default: 'false' },
       { key: 'smtp_user', label: 'SMTP username', required: true },
       { key: 'smtp_pass', label: 'SMTP password', required: true, secret: true },
       { key: 'from_email', label: 'From address', required: true },
@@ -50,7 +50,7 @@ const CHANNEL_SPECS = {
       // ever need to send.
       { key: 'imap_host', label: 'IMAP host (leave blank to skip inbound fetching)', required: false },
       { key: 'imap_port', label: 'IMAP port', required: false, default: '993' },
-      { key: 'imap_secure', label: 'Use TLS (true/false)', required: false, default: 'true' },
+      { key: 'imap_secure', label: 'Use TLS', type: 'boolean', required: false, default: 'true' },
       { key: 'imap_user', label: 'IMAP username (often the same as SMTP username)', required: false },
       { key: 'imap_pass', label: 'IMAP password (often the same as SMTP password, or an app password)', required: false, secret: true },
       { key: 'imap_mailbox', label: 'Mailbox to poll (default INBOX)', required: false, default: 'INBOX' }
@@ -164,10 +164,20 @@ async function publishEmail({ config, title, text, filePath, fileName, mimeType,
   const recipient = to || config.to_default;
   if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient/to_default on the channel config');
 
+  // Case-sensitive `=== 'true'` here used to silently treat a config saved
+  // as "TRUE" (the field's own label reads "Use TLS (true/false)", with no
+  // hint that case matters, and that's exactly what got typed and saved)
+  // as false - so a port-465 (implicit TLS) account would get a plaintext
+  // connection attempt, which the server would never respond to with a
+  // valid SMTP greeting before timing out ("Greeting never received").
+  // Normalize case/whitespace so "TRUE"/"True"/" true " all mean the same
+  // thing as "true".
+  const smtpSecure = String(config.smtp_secure || '').trim().toLowerCase() === 'true';
+
   const transporter = nodemailer.createTransport({
     host: config.smtp_host,
     port: parseInt(config.smtp_port, 10) || 587,
-    secure: String(config.smtp_secure) === 'true',
+    secure: smtpSecure,
     auth: { user: config.smtp_user, pass: config.smtp_pass }
   });
 

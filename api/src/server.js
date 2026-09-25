@@ -1062,7 +1062,7 @@ app.delete('/products/:id/members/:userId', authMiddleware, async (req, res) => 
 app.get('/channels/spec', authMiddleware, (req, res) => {
   const spec = {};
   for (const [key, def] of Object.entries(channelsLib.CHANNEL_SPECS)) {
-    spec[key] = { label: def.label, implemented: def.implemented, help: def.help, fields: def.fields.map(f => ({ key: f.key, label: f.label, required: f.required, secret: !!f.secret, default: f.default || '' })) };
+    spec[key] = { label: def.label, implemented: def.implemented, help: def.help, fields: def.fields.map(f => ({ key: f.key, label: f.label, required: f.required, secret: !!f.secret, default: f.default || '', type: f.type || 'text' })) };
   }
   res.json(spec);
 });

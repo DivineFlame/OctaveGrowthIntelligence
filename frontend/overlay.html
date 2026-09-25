@@ -155,6 +155,7 @@
     #oc-channel-wizard .oc-chcard.oc-disabled:hover{border-color:var(--oc-border-1);background:var(--oc-card-bg-subtle)}
     #oc-channel-wizard label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--oc-dim-5);margin:12px 0 6px}
     #oc-channel-wizard input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px}
+    #oc-channel-wizard select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text);font-size:13px;font-family:inherit}
     #oc-channel-wizard .oc-row{display:flex;gap:8px;margin-top:20px}
     #oc-channel-wizard .oc-primary{flex:1;padding:11px;border-radius:999px;border:none;background:var(--oc-brand);color:#fff;font-weight:600;font-size:13px;cursor:pointer}
     #oc-channel-wizard .oc-secondary{padding:11px 16px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:13px;cursor:pointer}
@@ -194,6 +195,7 @@
     #oc-onboarding .oc-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:var(--oc-dim-4);background:none;border:none;cursor:pointer;width:100%}
     #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
     #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:var(--oc-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
+    #oc-gate select option,#oc-admin select option,#oc-products select option,#oc-onboarding select option,#oc-channel-wizard select option{background:var(--oc-panel);color:var(--oc-text)}
   </style>
   <script>
   (function(){
@@ -811,6 +813,22 @@
           function fieldHtml(f){
             var val = existing[f.key] || '';
             var isMasked = f.secret && val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+            // A free-text "true/false" field let a saved "TRUE" (natural
+            // capitalization, nothing in the label warned it mattered)
+            // silently mean the opposite of what was typed wherever the
+            // backend did a case-sensitive === 'true' check - the actual
+            // cause of the "Greeting never received" SMTP failures. A
+            // fixed-choice dropdown with lowercase values makes that
+            // whole class of typo impossible instead of just fixing this
+            // one instance of it.
+            if (f.type === 'boolean') {
+              var boolVal = String(val || f.default || 'false').trim().toLowerCase() === 'true' ? 'true' : 'false';
+              return '<label for="oc-cf-' + f.key + '">' + f.label + (f.required ? ' *' : '') + '</label>' +
+                '<select id="oc-cf-' + f.key + '" name="' + f.key + '">' +
+                  '<option value="true"' + (boolVal === 'true' ? ' selected' : '') + '>True</option>' +
+                  '<option value="false"' + (boolVal === 'false' ? ' selected' : '') + '>False</option>' +
+                '</select>';
+            }
             return '<label for="oc-cf-' + f.key + '">' + f.label + (f.required ? ' *' : '') + '</label>' +
               '<input id="oc-cf-' + f.key + '" name="' + f.key + '" type="' + (f.secret ? 'password' : 'text') + '"' +
               (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';

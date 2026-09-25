@@ -178,6 +178,17 @@ const decryptSecret = (encoded) => cryptoSecrets.decrypt(encoded, ENCRYPTION_KEY
 // (and optionally SARVAM_MODEL) in the environment.
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY || '';
 const SARVAM_MODEL = process.env.SARVAM_MODEL || 'sarvam-105b';
+// Kept broad on purpose - the earlier wording ("genuine product/service
+// inquiry") reads literally, and a model applying it literally treats
+// any message that doesn't name a specific product/service as
+// off-topic, even a clearly commercial one like "I want to know about
+// your business plan." (see the few-shot examples below, which is where
+// the actual behavior gets anchored). "When genuinely unsure, prefer
+// INQUIRY" matters more than the definition text itself: an
+// over-eager NOISE call silently hides a real lead from the Leads
+// panel's inquiry filter, while an over-eager INQUIRY call just leaves
+// one extra badge to ignore.
+const SARVAM_CLASSIFIER_SYSTEM_PROMPT = 'You classify inbound messages sent to a business through its sales/lead channels (email, WhatsApp, web forms, etc). Reply with exactly one word: INQUIRY if the message shows genuine interest from a prospective customer - including questions about pricing, plans, packages, features, availability, demos, or "how does this work" - or NOISE if it is not (spam, a bare greeting with no follow-up, an automated/system message, or something wholly unrelated to the business). Judge by intent, not by whether a specific product name is mentioned. When genuinely unsure, prefer INQUIRY over NOISE. No other text.';
 
 // Returns true (inquiry), false (not an inquiry), or null (not classified -
 // either SARVAM_API_KEY isn't set, there's no text to classify, or the call
@@ -206,8 +217,33 @@ async function classifyInquiryWithSarvam(text) {
       headers: { 'api-subscription-key': SARVAM_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: SARVAM_MODEL,
+        temperature: 0,
         messages: [
-          { role: 'system', content: 'Reply with exactly one word: INQUIRY if this message is a genuine product/service inquiry from a prospective customer, or NOISE if it is not (spam, a bare greeting, an unrelated message, etc). No other text.' },
+          { role: 'system', content: SARVAM_CLASSIFIER_SYSTEM_PROMPT },
+          // Few-shot examples, not real conversation history - the
+          // original one-line prompt ("genuine product/service inquiry")
+          // was too literal: a real lead asking "I want to know about
+          // your business plan." (a very common, colloquial way of
+          // asking about pricing/packages) got misread as unrelated to
+          // any specific "product/service" and classified NOISE. These
+          // examples anchor "plan"/"pricing"/"package" questions, and
+          // brief-but-genuine questions in general, as INQUIRY, and bias
+          // the model toward INQUIRY when genuinely unsure - a message
+          // that's actually noise costs one ignorable badge, but a real
+          // lead misfiled as NOISE is invisible to the Leads panel's
+          // inquiry filter and can be missed entirely.
+          { role: 'user', content: 'Hi' },
+          { role: 'assistant', content: 'NOISE' },
+          { role: 'user', content: 'I want to know about your business plan.' },
+          { role: 'assistant', content: 'INQUIRY' },
+          { role: 'user', content: 'What are your pricing plans / packages?' },
+          { role: 'assistant', content: 'INQUIRY' },
+          { role: 'user', content: 'Do you offer a free trial or demo?' },
+          { role: 'assistant', content: 'INQUIRY' },
+          { role: 'user', content: 'Congratulations on the launch!' },
+          { role: 'assistant', content: 'NOISE' },
+          { role: 'user', content: 'Please unsubscribe me from this list.' },
+          { role: 'assistant', content: 'NOISE' },
           { role: 'user', content: text.slice(0, 2000) }
         ]
       }),

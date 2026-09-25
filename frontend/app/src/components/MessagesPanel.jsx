@@ -17,6 +17,7 @@ import {
   X,
   FileText,
   Image as ImageIcon,
+  Trash2,
 } from 'lucide-react';
 import { api, ApiError } from '../lib/api.js';
 
@@ -153,17 +154,33 @@ function ChannelList({ channels, active, onSelect }) {
   );
 }
 
-function LeadRow({ lead, active, onClick }) {
+function LeadRow({ lead, active, onClick, selected, onToggleSelect }) {
   const Icon = CHANNEL_ICONS[lead.source_channel] || Globe;
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className={`flex w-full flex-col gap-0.5 rounded-lg border px-3 py-2.5 text-left text-[12px] transition-colors
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className={`flex w-full cursor-pointer flex-col gap-0.5 rounded-lg border px-3 py-2.5 text-left text-[12px] transition-colors
         ${active
           ? 'border-brand/50 bg-brand/5'
           : 'border-transparent hover:bg-zinc-50 dark:hover:bg-white/[0.04]'}`}
     >
       <div className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={!!selected}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => onToggleSelect(lead.id, e.target.checked)}
+          aria-label={`Select ${lead.contact_name || lead.company_name || 'this lead'}`}
+          className="h-3.5 w-3.5 shrink-0 accent-brand"
+        />
         <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-white/50" />
         <span className="truncate font-medium text-zinc-900 dark:text-white">
           {lead.contact_name || lead.company_name || 'Unknown'}
@@ -180,7 +197,7 @@ function LeadRow({ lead, active, onClick }) {
       </div>
       <span className="truncate text-zinc-500 dark:text-white/50">{lead.company_name || lead.email || lead.phone || '—'}</span>
       <span className="text-[10px] text-zinc-400 dark:text-white/30">{new Date(lead.created_at).toLocaleString()}</span>
-    </button>
+    </div>
   );
 }
 
@@ -476,6 +493,52 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   const [selectedLead, setSelectedLead] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [deleting, setDeleting] = useState(false);
+  const [deleteErr, setDeleteErr] = useState('');
+
+  const toggleSelect = (id, checked) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  // Real delete - removes the DB rows AND, for any selected lead that
+  // came in over email/IMAP, the source message from the actual mailbox
+  // too (see server.js's POST /leads/delete-selected). Irreversible, so
+  // confirm() first, same pattern overlay.html already uses for its own
+  // destructive actions (disabling a user, rotating the webhook secret).
+  const deleteSelected = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    const label = ids.length === 1 ? 'this email' : `these ${ids.length} emails`;
+    if (!confirm(`Delete ${label}? This removes it from Octave and, for emails received here, deletes the message from the mailbox too. This can't be undone.`)) return;
+
+    setDeleting(true);
+    setDeleteErr('');
+    try {
+      const result = await api.deleteLeads(ids);
+      const deletedSet = new Set(result.deleted || []);
+      setLeads((prev) => prev.filter((l) => !deletedSet.has(l.id)));
+      setSelectedIds(new Set());
+      if (selectedLead && deletedSet.has(selectedLead.id)) setSelectedLead(null);
+      if (result.failed && result.failed.length) {
+        setDeleteErr(`${result.failed.length} of ${ids.length} could not be deleted (still referenced elsewhere).`);
+      } else {
+        const mailboxFailures = Object.values(result.mailbox || {}).filter((m) => m && !m.skipped && !m.ok);
+        if (mailboxFailures.length) {
+          setDeleteErr('Deleted here, but the mailbox message could not be removed for one or more emails (it may still appear in the mailbox).');
+        }
+      }
+    } catch (e) {
+      setDeleteErr(e instanceof ApiError ? e.message : 'Delete failed');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   useEffect(() => {
     if (!productId) {
@@ -502,6 +565,10 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
     };
   }, [productId, activeChannel, inquiryOnly]);
 
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [productId, activeChannel, inquiryOnly]);
+
   if (!productId) {
     return (
       <div className="rounded-[12px] border border-black/5 bg-white p-6 text-center text-[13px] text-zinc-500 dark:border-white/[0.08] dark:bg-[#121214] dark:text-white/50">
@@ -518,10 +585,24 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
 
       <div className="grid gap-4 md:grid-cols-[1fr_1.2fr]">
         <section className="rounded-[12px] border border-black/5 bg-white p-3 dark:border-white/[0.08] dark:bg-[#121214]">
-          <div className="mb-2 px-1">
-            <h2 className="text-[13px] font-semibold text-zinc-900 dark:text-white">{title}</h2>
-            {subtitle ? <p className="text-[11px] text-zinc-500 dark:text-white/50">{subtitle}</p> : null}
+          <div className="mb-2 flex items-start justify-between gap-2 px-1">
+            <div>
+              <h2 className="text-[13px] font-semibold text-zinc-900 dark:text-white">{title}</h2>
+              {subtitle ? <p className="text-[11px] text-zinc-500 dark:text-white/50">{subtitle}</p> : null}
+            </div>
+            {selectedIds.size > 0 ? (
+              <button
+                type="button"
+                onClick={deleteSelected}
+                disabled={deleting}
+                className="flex shrink-0 items-center gap-1 rounded-full border border-red-500/30 px-2.5 py-1 text-[11px] font-medium text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+              >
+                <Trash2 className="h-3 w-3" />
+                {deleting ? 'Deleting…' : `Delete (${selectedIds.size})`}
+              </button>
+            ) : null}
           </div>
+          {deleteErr ? <p className="mb-2 px-1 text-[11px] text-red-500">{deleteErr}</p> : null}
           {loading ? (
             <p className="px-1 text-[12px] text-zinc-500 dark:text-white/50">Loading…</p>
           ) : err ? (
@@ -534,6 +615,8 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
                   lead={lead}
                   active={selectedLead && selectedLead.id === lead.id}
                   onClick={() => setSelectedLead(lead)}
+                  selected={selectedIds.has(lead.id)}
+                  onToggleSelect={toggleSelect}
                 />
               ))}
             </div>

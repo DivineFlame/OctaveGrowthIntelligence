@@ -44,6 +44,11 @@ const schemas = {
   replyToLead: z.object({
     body: z.string().trim().min(1).max(5000),
     channel: z.string().trim().max(20).optional()
+  }),
+  // Bulk-delete for the Inbox's "select and delete" action - capped at
+  // 100 so one request can't be used to walk the whole leads table.
+  deleteSelectedLeads: z.object({
+    ids: z.array(z.string().uuid()).min(1).max(100)
   })
 };
 

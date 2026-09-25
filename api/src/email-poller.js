@@ -298,6 +298,76 @@ async function pollProductMailbox(pool, product, config, ingestInboundLead, deps
   return { skipped: false, processed, failed, skippedAlready, deleted: deletedCount };
 }
 
+// Deletes specific messages from a mailbox by IMAP UID - the mailbox
+// side of POST /leads/delete-selected (server.js). Deleting a lead there
+// used to only remove the DB row: the source email would sit in the real
+// mailbox forever (already marked \\Seen by the poll that ingested it,
+// so it would never come back as a "new" lead - but never actually gone
+// either), which isn't what "delete this email" means to someone using
+// the app. Connects once and deletes every UID given for one product's
+// mailbox in a single EXPUNGE, so a bulk delete of many selected emails
+// from the same product costs one IMAP round trip, not one per message.
+//
+// Best-effort by design: an unreachable/misconfigured mailbox returns
+// { ok: false, error } instead of throwing, so the caller can still
+// delete the DB rows for a bulk request spanning several products even
+// if one of their mailboxes is down right now (that message is orphaned
+// in its mailbox, same as any lead ingested before this function existed
+// already is - not a new failure mode, just not fully cleaned up this
+// time).
+//
+// `deps.createClient` is the same test-only injection seam
+// pollProductMailbox() uses - production code never passes it.
+async function deleteFromMailbox(config, uids, deps = {}) {
+  const host = (config.imap_host || '').trim();
+  const user = (config.imap_user || '').trim();
+  const pass = config.imap_pass || '';
+  if (!host || !user || !pass) return { skipped: true, ok: false, reason: 'IMAP not configured for this product' };
+  if (!uids || !uids.length) return { skipped: true, ok: false, reason: 'no messages to delete' };
+
+  const port = Number(config.imap_port) || 993;
+  const target = `${host}:${port}`;
+  const createClient = deps.createClient || ((opts) => new ImapFlow(opts));
+  const clientOpts = {
+    host,
+    port,
+    secure: String(config.imap_secure || 'true').trim().toLowerCase() !== 'false',
+    auth: { user, pass },
+    logger: false,
+    socketTimeout: 20000,
+    greetingTimeout: 20000,
+    disableCompression: true
+  };
+
+  let client;
+  try {
+    client = await connectWithRetry(createClient, clientOpts, target, { id: 'delete-selected' }, deps.connectAttempts || 3, deps.retryDelayMs != null ? deps.retryDelayMs : 2000);
+  } catch (e) {
+    return { skipped: false, ok: false, error: e.message };
+  }
+  try {
+    const mailbox = (config.imap_mailbox || 'INBOX').trim() || 'INBOX';
+    const lock = await client.getMailboxLock(mailbox);
+    try {
+      // ImapFlow's messageDelete() flags the given UIDs \Deleted then
+      // expunges - with UIDPLUS (most providers today) that's a targeted
+      // "UID EXPUNGE <these uids>"; without it, a plain EXPUNGE removes
+      // every \Deleted-flagged message in the mailbox, not just these -
+      // an unlikely edge case (another client mid-delete in the same
+      // mailbox) but worth knowing if a provider without UIDPLUS ever
+      // surfaces it.
+      const ok = await client.messageDelete(uids, { uid: true });
+      return { skipped: false, ok: !!ok };
+    } finally {
+      lock.release();
+    }
+  } catch (e) {
+    return { skipped: false, ok: false, error: e.message };
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
 // Polls every product's Email channel that has IMAP fields configured.
 // A single mailbox failing to connect (bad credentials, host unreachable)
 // is logged and skipped, never allowed to stop the rest from being
@@ -335,4 +405,4 @@ async function pollAllEmailChannels(pool, { decryptSecret, ingestInboundLead, ch
   return { mailboxesPolled, totalProcessed, totalFailed, totalSkippedAlready, totalDeleted };
 }
 
-module.exports = { pollAllEmailChannels, pollProductMailbox, cleanEmailText, reconcileDeletedLeads };
+module.exports = { pollAllEmailChannels, pollProductMailbox, cleanEmailText, reconcileDeletedLeads, deleteFromMailbox };

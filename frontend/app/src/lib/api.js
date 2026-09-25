@@ -117,6 +117,11 @@ export const api = {
     return apiCall(`/leads${q ? `?${q}` : ''}`);
   },
   leadMessages: (leadId) => apiCall(`/leads/${leadId}/messages`),
+  // Bulk-deletes selected Inbox/Leads rows - a real delete (DB row +, for
+  // an IMAP-sourced email, the actual mailbox message), not the separate
+  // PII-erasure DELETE /leads/:id. See server.js's comment on
+  // POST /leads/delete-selected for why these are two different routes.
+  deleteLeads: (ids) => apiCall('/leads/delete-selected', { method: 'POST', body: { ids } }),
   // `files` (optional) is an array of File objects from the reply
   // composer's attach button - switches to a multipart request only when
   // there's actually something to attach, so the common no-attachment

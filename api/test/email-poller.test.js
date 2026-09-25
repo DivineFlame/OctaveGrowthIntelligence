@@ -8,7 +8,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { cleanEmailText, reconcileDeletedLeads } = require('../src/email-poller');
+const { cleanEmailText, reconcileDeletedLeads, deleteFromMailbox } = require('../src/email-poller');
 
 test('cleanEmailText strips the zero-width/combining-mark padding real marketing templates use to hide preheader text', () => {
   // The exact pattern a real Hostinger "Welcome to Hostinger Email"
@@ -316,3 +316,76 @@ test('pollProductMailbox fully drains fetch() before issuing any messageFlagsAdd
     `every fetch yield must happen before any STORE call - got order: ${callOrder.join(', ')}`
   );
 });
+
+// deleteFromMailbox() - the mailbox side of POST /leads/delete-selected
+// (server.js). Exercised the same way pollProductMailbox's connect/lock
+// logic is above: a minimal ImapFlow-shaped fake client injected via
+// deps.createClient, no real mailbox needed.
+function makeFakeDeleteClient({ messageDeleteResult = true, throwOnDelete = null } = {}) {
+  const calls = { getMailboxLock: [], messageDelete: [] };
+  return {
+    on: () => {},
+    connect: async () => {},
+    getMailboxLock: async (mailbox) => {
+      calls.getMailboxLock.push(mailbox);
+      return { release: () => {} };
+    },
+    messageDelete: async (uids, opts) => {
+      calls.messageDelete.push({ uids, opts });
+      if (throwOnDelete) throw throwOnDelete;
+      return messageDeleteResult;
+    },
+    logout: async () => {},
+    _calls: calls
+  };
+}
+
+test('deleteFromMailbox skips (without connecting) when the product has no IMAP config', async () => {
+  const result = await deleteFromMailbox({}, [42]);
+  assert.equal(result.skipped, true);
+  assert.equal(result.ok, false);
+});
+
+test('deleteFromMailbox skips when given no UIDs to delete', async () => {
+  const config = { imap_host: 'imap.example.com', imap_user: 'u', imap_pass: 'p' };
+  const result = await deleteFromMailbox(config, []);
+  assert.equal(result.skipped, true);
+  assert.equal(result.ok, false);
+});
+
+test('deleteFromMailbox opens the configured mailbox and deletes every given UID in one call', async () => {
+  const config = { imap_host: 'imap.example.com', imap_user: 'u', imap_pass: 'p', imap_mailbox: 'INBOX' };
+  const fakeClient = makeFakeDeleteClient({ messageDeleteResult: true });
+
+  const result = await deleteFromMailbox(config, [42, 43], { createClient: () => fakeClient });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.ok, true);
+  assert.deepEqual(fakeClient._calls.getMailboxLock, ['INBOX']);
+  assert.equal(fakeClient._calls.messageDelete.length, 1, 'should be a single batched delete, not one per UID');
+  assert.deepEqual(fakeClient._calls.messageDelete[0].uids, [42, 43]);
+  assert.deepEqual(fakeClient._calls.messageDelete[0].opts, { uid: true });
+});
+
+test('deleteFromMailbox reports ok:false (without throwing) when messageDelete itself fails', async () => {
+  const config = { imap_host: 'imap.example.com', imap_user: 'u', imap_pass: 'p' };
+  const fakeClient = makeFakeDeleteClient({ throwOnDelete: new Error('mailbox rejected EXPUNGE') });
+
+  const result = await deleteFromMailbox(config, [42], { createClient: () => fakeClient });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /mailbox rejected EXPUNGE/);
+});
+
+test('deleteFromMailbox reports ok:false (without throwing) when the mailbox is unreachable', async () => {
+  const config = { imap_host: 'imap.example.com', imap_user: 'u', imap_pass: 'p' };
+  const createClient = () => ({ on: () => {}, connect: async () => { throw new Error('connection refused'); }, close: () => {} });
+
+  const result = await deleteFromMailbox(config, [42], { createClient, retryDelayMs: 0, connectAttempts: 1 });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /connection refused/);
+});
+

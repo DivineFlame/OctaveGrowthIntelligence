@@ -1241,6 +1241,86 @@ app.delete('/leads/:id', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), asy
   } catch(e){ serverError(res, e); }
 });
 
+// Actually deletes selected leads - not the GDPR-erasure route above
+// (that only redacts PII in place; agent_runs.lead_id has no ON DELETE
+// clause so a lead with runs against it can't even be hard-deleted, and
+// the row is kept on purpose for reporting). This is the Inbox "select
+// some emails, delete them" action: a real, irreversible delete of the
+// DB rows (lead_messages cascades via ON DELETE CASCADE - see
+// postgres/init-secure.sql), and, for any selected lead that came from
+// IMAP polling (source_channel='email' with a source_uid - see
+// email-poller.js), the real message in the actual mailbox too. Without
+// the mailbox half, "delete" from inside the app would just orphan the
+// source email forever: it's already marked \Seen so the poller would
+// never re-ingest it, but it would never actually be gone from the
+// mailbox either - not what someone deleting an email expects.
+//
+// Only leads with agent_runs against them are refused by the FK either
+// way (surfaced as a per-id failure below, not a whole-request 500), so
+// a mixed selection still deletes everything it safely can.
+app.post('/leads/delete-selected', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(schemas.deleteSelectedLeads), async (req, res) => {
+  try {
+    const ids = req.body.ids;
+    const { rows: leads } = await pool.query(
+      `SELECT id, source_channel, source_uid, product_id FROM leads WHERE id = ANY($1::uuid[])`,
+      [ids]
+    );
+    const foundIds = new Set(leads.map((l) => l.id));
+    const notFound = ids.filter((id) => !foundIds.has(id));
+
+    // Group email leads with a real source_uid by product, so each
+    // mailbox only needs one IMAP connection no matter how many of its
+    // messages are in this bulk delete.
+    const uidsByProduct = new Map();
+    for (const lead of leads) {
+      if (lead.source_channel === 'email' && lead.source_uid != null && lead.product_id) {
+        if (!uidsByProduct.has(lead.product_id)) uidsByProduct.set(lead.product_id, []);
+        uidsByProduct.get(lead.product_id).push(Number(lead.source_uid));
+      }
+    }
+
+    const mailboxResults = {}; // product_id -> { skipped, ok, error? }
+    for (const [productId, uids] of uidsByProduct) {
+      try {
+        const { rows: chRows } = await pool.query(
+          `SELECT config FROM product_channels WHERE product_id=$1 AND channel='email' LIMIT 1`,
+          [productId]
+        );
+        if (!chRows.length) {
+          mailboxResults[productId] = { skipped: true, ok: false, reason: 'Email channel not configured' };
+          continue;
+        }
+        const config = channelsLib.decryptChannelSecrets('email', chRows[0].config, decryptSecret);
+        mailboxResults[productId] = await emailPoller.deleteFromMailbox(config, uids);
+      } catch (e) {
+        mailboxResults[productId] = { skipped: false, ok: false, error: e.message };
+      }
+    }
+
+    const deletedIds = [];
+    const failedIds = [];
+    for (const lead of leads) {
+      try {
+        await pool.query('DELETE FROM leads WHERE id=$1', [lead.id]);
+        deletedIds.push(lead.id);
+        const mailbox = lead.source_channel === 'email' && lead.product_id ? mailboxResults[lead.product_id] : null;
+        await auditLog(req.user.id, 'DELETE_LEAD', 'lead', lead.id, req, 'SUCCESS', {
+          source_channel: lead.source_channel,
+          mailbox_deleted: mailbox ? !!mailbox.ok : null
+        });
+      } catch (e) {
+        // Most likely an agent_runs FK (no ON DELETE clause - see comment
+        // above) - report it against this one id instead of failing the
+        // whole bulk request for everything else that deleted cleanly.
+        failedIds.push({ id: lead.id, error: e.message });
+        await auditLog(req.user.id, 'DELETE_LEAD', 'lead', lead.id, req, 'FAILURE', { error: e.message });
+      }
+    }
+
+    res.json({ deleted: deletedIds, not_found: notFound, failed: failedIds, mailbox: mailboxResults });
+  } catch (e) { serverError(res, e); }
+});
+
 // Leads - Inbox reply thread. GET returns the full message thread for a
 // lead; POST records an outbound reply AND actually sends it through the
 // lead's channel via channels.js's publishToChannel, the same real

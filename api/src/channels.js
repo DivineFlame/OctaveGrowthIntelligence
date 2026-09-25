@@ -242,6 +242,34 @@ function vobizHeaders(config) {
   };
 }
 
+// Vobiz's error responses aren't consistently shaped - sometimes
+// { message: "..." }, sometimes { error: "..." }, and sometimes
+// { error: { message, code } } or { errors: [...] } (an object/array
+// where a plain string was assumed used to produce a useless
+// "Error: [object Object]" once thrown, with the real reason lost).
+// Digs through every shape actually seen and falls back to the raw
+// response body (or just the HTTP status) rather than ever losing the
+// underlying reason.
+function vobizErrorMessage(data, status, fallbackLabel) {
+  const fallback = `Vobiz API error ${fallbackLabel} (HTTP ${status})`;
+  if (!data || typeof data !== 'object') return fallback;
+  if (typeof data.message === 'string' && data.message) return data.message;
+  if (typeof data.error === 'string' && data.error) return data.error;
+  if (data.error && typeof data.error === 'object') {
+    if (typeof data.error.message === 'string' && data.error.message) return data.error.message;
+    try { return JSON.stringify(data.error); } catch (e) { /* fall through to below */ }
+  }
+  if (Array.isArray(data.errors) && data.errors.length) {
+    return data.errors.map((e) => (e && (e.message || e.detail)) || JSON.stringify(e)).join('; ');
+  }
+  try {
+    const raw = JSON.stringify(data);
+    return raw && raw !== '{}' ? `${fallback}: ${raw}` : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
 // Lists this channel's WhatsApp templates from Vobiz, filtered down to
 // only the ones Meta has actually APPROVED - a PENDING_REVIEW, REJECTED,
 // DISABLED or PAUSED template is never a valid thing to send (Meta
@@ -261,7 +289,7 @@ async function listWhatsAppTemplates(config) {
     headers: vobizHeaders(config)
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error listing templates (HTTP ${resp.status})`);
+  if (!resp.ok) throw new Error(vobizErrorMessage(data, resp.status, 'listing templates'));
 
   const items = data.items || [];
   return items
@@ -295,7 +323,7 @@ async function registerWhatsAppWebhook(config, url, secret) {
     body: JSON.stringify({ url, secret })
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error registering webhook (HTTP ${resp.status})`);
+  if (!resp.ok) throw new Error(vobizErrorMessage(data, resp.status, 'registering webhook'));
   return data;
 }
 
@@ -348,7 +376,7 @@ async function publishWhatsApp({ config, template, text, to }) {
     body: JSON.stringify(body)
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.message || data.error || `Vobiz API error sending message (HTTP ${resp.status})`);
+  if (!resp.ok) throw new Error(vobizErrorMessage(data, resp.status, 'sending message'));
   return { externalId: data.id || null, externalUrl: null };
 }
 

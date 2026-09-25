@@ -178,6 +178,30 @@ test('listWhatsAppTemplates surfaces Vobiz\'s own error message on a failed requ
     .finally(() => { global.fetch = originalFetch; });
 });
 
+// Regression test for a real production error: Vobiz doesn't always
+// return { message: "..." } or { error: "..." } as a plain string - a
+// nested { error: { message, code } } shape (seen live, HTTP 500 on
+// GET .../templates) used to produce a useless "Error: [object Object]"
+// because `data.message || data.error` picked the object itself and
+// `new Error(object)` stringifies to that. Every shape actually seen
+// must still surface a readable reason.
+test('listWhatsAppTemplates surfaces a readable message even when Vobiz nests the error as an object, not a string', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: { code: 'internal_error', message: 'Channel not fully provisioned yet' } }) });
+  return assert.rejects(() => listWhatsAppTemplates(VOBIZ_CONFIG), /Channel not fully provisioned yet/)
+    .finally(() => { global.fetch = originalFetch; });
+});
+
+test('listWhatsAppTemplates falls back to the raw body instead of "[object Object]" when the error shape is unrecognized', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 503, json: async () => ({ status: 'unavailable' }) });
+  return assert.rejects(() => listWhatsAppTemplates(VOBIZ_CONFIG), (err) => {
+    assert.doesNotMatch(err.message, /\[object Object\]/);
+    assert.match(err.message, /unavailable/);
+    return true;
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
 test('registerWhatsAppWebhook POSTs the url/secret to Vobiz\'s webhook-subscription endpoint', () => {
   const originalFetch = global.fetch;
   let captured;

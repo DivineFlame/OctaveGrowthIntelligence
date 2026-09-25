@@ -202,17 +202,27 @@ test('publishToChannel(whatsapp): a template reply sends type:"template" with th
   }).finally(() => { global.fetch = originalFetch; });
 });
 
-test('publishToChannel(whatsapp): falls back to a plain text message (Studio broadcast path) when no template is given', () => {
+test('publishToChannel(whatsapp): a Studio broadcast (text, no template chosen) wraps it as the configured broadcast template\'s one parameter - never sent as free text', () => {
   const originalFetch = global.fetch;
   let captured;
   global.fetch = async (url, opts) => {
     captured = JSON.parse(opts.body);
     return { ok: true, json: async () => ({ id: 'msg-456' }) };
   };
-  return publishToChannel('whatsapp', { config: VOBIZ_CONFIG, text: 'Hello there', to: '+919876543210' }).then(() => {
-    assert.equal(captured.type, 'text');
-    assert.deepEqual(captured.text, { body: 'Hello there' });
+  const configWithBroadcastTemplate = Object.assign({}, VOBIZ_CONFIG, { broadcast_template_name: 'marketing_broadcast', broadcast_template_language: 'en_US' });
+  return publishToChannel('whatsapp', { config: configWithBroadcastTemplate, text: 'Hello there', to: '+919876543210' }).then(() => {
+    assert.equal(captured.type, 'template', 'must never fall back to a free-text send - Meta requires an approved template');
+    assert.equal(captured.template.name, 'marketing_broadcast');
+    assert.equal(captured.template.language.code, 'en_US');
+    assert.deepEqual(captured.template.components, [{ type: 'body', parameters: [{ type: 'text', text: 'Hello there' }] }]);
   }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('publishToChannel(whatsapp): a Studio broadcast refuses with a clear, actionable error when no broadcast template is configured', () => {
+  return assert.rejects(
+    () => publishToChannel('whatsapp', { config: VOBIZ_CONFIG, text: 'Hello there', to: '+919876543210' }),
+    /set a "Broadcast template name"/
+  );
 });
 
 test('publishToChannel(whatsapp): Vobiz rejecting the send surfaces its own error message', () => {

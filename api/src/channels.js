@@ -65,9 +65,20 @@ const CHANNEL_SPECS = {
       { key: 'auth_token', label: 'Vobiz Auth Token', required: true, secret: true },
       { key: 'channel_id', label: 'Vobiz WhatsApp Channel ID', required: true },
       { key: 'waba_id', label: 'WhatsApp Business Account ID (WABA ID)', required: true },
-      { key: 'default_recipient', label: "Default recipient (E.164, e.g. +919876543210)", required: false }
+      { key: 'default_recipient', label: "Default recipient (E.164, e.g. +919876543210)", required: false },
+      // Lead replies (POST /leads/:id/reply) always pick their own
+      // template per-message via the Inbox composer - see
+      // GET /channels/whatsapp/templates. Studio's content pipeline has
+      // no per-post template picker, so it needs one template configured
+      // once here instead: get a single-variable template like
+      // "{{1}}" approved in Vobiz specifically for broadcasting your own
+      // generated copy through, and set its name/language below. Every
+      // WhatsApp send this app makes - lead reply or Studio broadcast -
+      // goes through an approved template; there is no free-text path.
+      { key: 'broadcast_template_name', label: 'Broadcast template name (for Studio > Content publishing - a generic single-variable template)', required: false },
+      { key: 'broadcast_template_language', label: 'Broadcast template language code', required: false, default: 'en_US' }
     ],
-    help: 'From the Vobiz Console (console.vobiz.ai): Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in Vobiz. Lead replies over WhatsApp always send an approved Meta message template, never free text - see GET /channels/whatsapp/templates - so sync your templates in Vobiz (Channels > WhatsApp > Templates > Sync from Meta) and make sure at least one is APPROVED before replying to a lead.'
+    help: 'From the Vobiz Console (console.vobiz.ai): Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in Vobiz. Meta requires every business-initiated WhatsApp message to use an approved template - this app never sends free text. Lead replies pick a template per-message in the Inbox; Studio > Content publishing instead uses the single broadcast_template_name/language configured here (get a generic single-variable template like "{{1}}" approved for this purpose in Vobiz, then set its name here) - your generated post text becomes that template\'s one parameter. Sync/check template approval status in Vobiz under Channels > WhatsApp > Templates.'
   },
   facebook: {
     label: 'Facebook Page',
@@ -265,43 +276,47 @@ async function listWhatsAppTemplates(config) {
 }
 
 // Sends a WhatsApp message through Vobiz (docs.vobiz.ai/whatsapp/api/send-message).
-// Two shapes:
-//   - template: { name, language, parameters } - a Meta-approved template
-//     message. This is the only path POST /leads/:id/reply ever uses -
-//     Meta requires every business-initiated WhatsApp message to use an
-//     approved template (free text only works as a reply inside an
-//     existing 24h customer-service window, which this app has no
-//     reliable way to track), so lead replies never attempt free text.
-//   - text: a plain message body - kept only for the Studio content
-//     pipeline's existing broadcast publish (POST /internal/content-
-//     variants/:variantId/publish), which predates template support and
-//     doesn't have a template-picker UI yet; only actually deliverable
-//     within that same 24h window.
+// Meta requires every business-initiated WhatsApp message to use an
+// approved template - free text only works as a reply inside an
+// existing 24h customer-service window, which this app has no reliable
+// way to track, so this never sends a bare text message. Two ways in:
+//   - template: { name, language, parameters } - an explicit, already-
+//     chosen template (POST /leads/:id/reply's Inbox composer picks one
+//     per message - see GET /channels/whatsapp/templates).
+//   - text: a plain string with no template picked for it (the Studio
+//     content pipeline's generated post copy, which has no per-post
+//     template-picker UI) - wrapped as the single parameter of the
+//     channel's configured broadcast_template_name/broadcast_template_language
+//     (CHANNEL_SPECS.whatsapp above). Throws a clear, actionable error if
+//     that isn't configured, rather than silently sending nothing or
+//     falling back to a free-text call Meta would just reject anyway.
 async function publishWhatsApp({ config, template, text, to }) {
   const recipient = (to || config.default_recipient || '').replace(/[^\d+]/g, '');
   if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient on the channel config');
   if (!config.channel_id || !config.waba_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID / WABA ID - configure it under Studio > Channels');
 
-  let body;
-  if (template && template.name) {
-    body = {
-      channel_id: config.channel_id,
-      waba_id: config.waba_id,
-      to: recipient,
-      type: 'template',
-      template: {
-        name: template.name,
-        language: { code: template.language || 'en_US' },
-        components: (template.parameters && template.parameters.length)
-          ? [{ type: 'body', parameters: template.parameters.map((p) => ({ type: 'text', text: String(p) })) }]
-          : []
-      }
-    };
-  } else if (text) {
-    body = { channel_id: config.channel_id, waba_id: config.waba_id, to: recipient, type: 'text', text: { body: text } };
-  } else {
-    throw new Error('Nothing to send: pass either a template or text');
+  let resolvedTemplate = template && template.name ? template : null;
+  if (!resolvedTemplate) {
+    if (!text) throw new Error('Nothing to send: pass either a template or text');
+    if (!config.broadcast_template_name) {
+      throw new Error('WhatsApp requires an approved message template for every send - set a "Broadcast template name" on this channel (Studio > Channels > WhatsApp) to publish generated content through WhatsApp.');
+    }
+    resolvedTemplate = { name: config.broadcast_template_name, language: config.broadcast_template_language || 'en_US', parameters: [text] };
   }
+
+  const body = {
+    channel_id: config.channel_id,
+    waba_id: config.waba_id,
+    to: recipient,
+    type: 'template',
+    template: {
+      name: resolvedTemplate.name,
+      language: { code: resolvedTemplate.language || 'en_US' },
+      components: (resolvedTemplate.parameters && resolvedTemplate.parameters.length)
+        ? [{ type: 'body', parameters: resolvedTemplate.parameters.map((p) => ({ type: 'text', text: String(p) })) }]
+        : []
+    }
+  };
 
   const resp = await fetch(`${VOBIZ_API_BASE}/messaging/messages`, {
     method: 'POST',

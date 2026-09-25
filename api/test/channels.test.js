@@ -151,7 +151,7 @@ const VOBIZ_CONFIG = { auth_id: 'MA_TEST', auth_token: 'tok', channel_id: 'chan-
 test('listWhatsAppTemplates requests this channel\'s templates and returns only APPROVED ones, with parsed placeholder counts', () => {
   const originalFetch = global.fetch;
   global.fetch = async (url, opts) => {
-    assert.equal(url, 'https://api.vobiz.ai/api/v1/channels/chan-1/templates');
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/channels/chan-1/templates');
     assert.equal(opts.headers['X-Auth-ID'], 'MA_TEST');
     assert.equal(opts.headers['X-Auth-Token'], 'tok');
     return {

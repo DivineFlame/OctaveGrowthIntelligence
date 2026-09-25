@@ -285,7 +285,15 @@ function vobizErrorMessage(data, status, fallbackLabel) {
 // without having to parse Vobiz's raw components shape itself.
 async function listWhatsAppTemplates(config) {
   if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
-  const resp = await fetch(`${VOBIZ_API_BASE}/channels/${config.channel_id}/templates`, {
+  // Every other Vobiz call in this file (publishWhatsApp's /messaging/messages,
+  // registerWhatsAppWebhook's /messaging/webhooks) sits under the /messaging
+  // prefix - this one was missing it (.../v1/channels/{id}/templates instead
+  // of .../v1/messaging/channels/{id}/templates), which doesn't match any
+  // route on Vobiz's side and got their API gateway's generic "Service not
+  // found" back instead of an actual templates response or a real Vobiz
+  // error. See https://www.vobiz.ai/docs/whatsapp/api/templates for the
+  // documented path.
+  const resp = await fetch(`${VOBIZ_API_BASE}/messaging/channels/${config.channel_id}/templates`, {
     headers: vobizHeaders(config)
   });
   const data = await resp.json().catch(() => ({}));

@@ -484,6 +484,26 @@ function serverError(res, e) {
   return res.status(500).json({ error: e.message });
 }
 
+// For routes whose only failure modes are curated, safe-to-display Error
+// messages we threw ourselves - channel misconfiguration ("missing its
+// Vobiz Channel ID") or an upstream API's own error text parsed out by
+// vobizErrorMessage() (see channels.js) - never a raw DB/driver error.
+// serverError() above deliberately swallows e.message in production
+// because *that* one also has to handle genuine internal errors (a
+// Postgres constraint violation, a null-pointer bug) whose text can leak
+// schema internals; that blanket sanitizing was hiding the actual,
+// actionable reason ("WhatsApp channel is missing its Vobiz Channel ID",
+// or Vobiz's own rejection reason) behind an opaque "Internal server
+// error" in the reply composer, making a fixable config/upstream problem
+// look like the app itself was broken. 502 (not 500) reflects that the
+// failure is this route's dependency on Vobiz, not this server.
+function upstreamError(res, e, status = 502) {
+  console.error(e);
+  metrics.recordError();
+  errorTracking.captureError(e);
+  return res.status(status).json({ error: e.message });
+}
+
 // Routes
 
 // Health
@@ -1138,7 +1158,7 @@ app.get('/channels/whatsapp/templates', authMiddleware, async (req, res) => {
     const config = channelsLib.decryptChannelSecrets('whatsapp', channelRow.rows[0].config, decryptSecret);
     const templates = await channelsLib.listWhatsAppTemplates(config);
     res.json(templates);
-  } catch(e){ serverError(res, e); }
+  } catch(e){ upstreamError(res, e); }
 });
 
 // One-time setup action: tells Vobiz where to actually deliver inbound
@@ -1169,7 +1189,7 @@ app.post('/channels/whatsapp/register-webhook', authMiddleware, rbacMiddleware([
     const result = await channelsLib.registerWhatsAppWebhook(config, url, company.webhook_secret);
     await auditLog(req.user.id, 'REGISTER_WHATSAPP_WEBHOOK', 'product_channel', productId, req, 'SUCCESS', { url });
     res.json({ registered: true, url, vobiz: result });
-  } catch(e){ serverError(res, e); }
+  } catch(e){ upstreamError(res, e); }
 });
 
 app.get('/products/:id/channels', authMiddleware, async (req, res) => {

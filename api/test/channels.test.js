@@ -17,6 +17,8 @@ const {
   decryptChannelSecrets,
   publishToChannel,
   listWhatsAppTemplates,
+  listWhatsAppTemplatesWithDiagnostics,
+  listWhatsAppChannels,
   registerWhatsAppWebhook
 } = require('../src/channels');
 
@@ -223,6 +225,77 @@ test('listWhatsAppTemplates falls back to the raw body instead of "[object Objec
     assert.doesNotMatch(err.message, /\[object Object\]/);
     assert.match(err.message, /unavailable/);
     return true;
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('listWhatsAppChannels requests the account\'s WhatsApp channels and maps the fields diagnostics need', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    assert.equal(url, 'https://api.vobiz.ai/api/v1/messaging/channels/whatsapp');
+    assert.equal(opts.headers['X-Auth-ID'], 'MA_TEST');
+    return {
+      ok: true,
+      json: async () => ({
+        items: [
+          { id: 'chan-2', phone_number: '+919999999999', display_name: 'Support Line', waba_id: 'waba-2', status: 'active' }
+        ]
+      })
+    };
+  };
+  return listWhatsAppChannels(VOBIZ_CONFIG).then((channels) => {
+    assert.deepEqual(channels, [{ id: 'chan-2', phoneNumber: '+919999999999', displayName: 'Support Line', wabaId: 'waba-2', status: 'active' }]);
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+// Regression test for the actual reported bug: 5 templates were genuinely
+// APPROVED in Meta/Vobiz, but the composer said "No approved templates" -
+// the channel_id configured in Studio > Channels > WhatsApp simply didn't
+// own any of them (a different WhatsApp number in the same Vobiz account
+// did). listWhatsAppTemplatesWithDiagnostics() must say that plainly,
+// including which other channel(s) exist on the account, instead of
+// leaving the admin to guess between "wrong channel_id" and "nothing's
+// approved yet".
+test('listWhatsAppTemplatesWithDiagnostics lists the account\'s other WhatsApp channels when nothing is cached for the configured one', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (url.endsWith('/templates/sync')) return { ok: true, json: async () => ({ synced: 0 }) };
+    if (url.endsWith('/templates')) return { ok: true, json: async () => ({ items: [] }) };
+    if (url.endsWith('/channels/whatsapp')) {
+      return { ok: true, json: async () => ({ items: [{ id: 'chan-2', phone_number: '+919999999999', display_name: 'Support Line', waba_id: 'waba-2', status: 'active' }] }) };
+    }
+    throw new Error(`unexpected URL in test: ${url}`);
+  };
+  return listWhatsAppTemplatesWithDiagnostics(VOBIZ_CONFIG).then((result) => {
+    assert.deepEqual(result.templates, []);
+    assert.equal(result.diagnostics.totalCached, 0);
+    assert.equal(result.diagnostics.channelId, 'chan-1');
+    assert.equal(result.diagnostics.availableChannels.length, 1);
+    assert.equal(result.diagnostics.availableChannels[0].id, 'chan-2');
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
+test('listWhatsAppTemplatesWithDiagnostics reports status breakdown (not the channel list) when templates exist but none are approved', () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (url.endsWith('/templates/sync')) return { ok: true, json: async () => ({ synced: 2 }) };
+    if (url.endsWith('/templates')) {
+      return {
+        ok: true,
+        json: async () => ({
+          items: [
+            { name: 'a', status: 'PENDING_REVIEW', components: { components: [] } },
+            { name: 'b', status: 'PENDING_REVIEW', components: { components: [] } }
+          ]
+        })
+      };
+    }
+    throw new Error(`unexpected URL in test: ${url}`);
+  };
+  return listWhatsAppTemplatesWithDiagnostics(VOBIZ_CONFIG).then((result) => {
+    assert.deepEqual(result.templates, []);
+    assert.equal(result.diagnostics.totalCached, 2);
+    assert.deepEqual(result.diagnostics.statusCounts, { PENDING_REVIEW: 2 });
+    assert.equal(result.diagnostics.availableChannels, undefined, 'no need to list channels when the configured one already has templates cached');
   }).finally(() => { global.fetch = originalFetch; });
 });
 

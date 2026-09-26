@@ -516,14 +516,33 @@ function Thread({ lead, onClose }) {
             ) : templates.length === 0 ? (
               <div className="text-[12px] text-zinc-500 dark:text-white/50">
                 {templatesDiag && templatesDiag.totalCached === 0 ? (
-                  <p>
-                    Vobiz has no templates cached for this channel at all (Channel ID{' '}
-                    <code className="text-[11px]">{templatesDiag.channelId}</code>). Your approved templates
-                    likely belong to a different channel in Vobiz - open Vobiz &gt; Messaging &gt; Templates,
-                    open one of them, and check which Channel it's attached to, then match that Channel ID
-                    here (Studio &gt; Channels &gt; WhatsApp).
-                    {templatesDiag.synced === false ? ' (Also: the last sync-from-Meta call to Vobiz failed - see server logs.)' : ''}
-                  </p>
+                  <div>
+                    <p>
+                      Vobiz has no templates cached for this channel at all (Channel ID{' '}
+                      <code className="text-[11px]">{templatesDiag.channelId}</code>). Your approved templates
+                      likely belong to a different WhatsApp channel/number in this Vobiz account.
+                      {templatesDiag.synced === false ? ' (Also: the last sync-from-Meta call to Vobiz failed - see server logs.)' : ''}
+                    </p>
+                    {templatesDiag.availableChannels && templatesDiag.availableChannels.length ? (
+                      <div className="mt-2">
+                        <p className="text-zinc-400 dark:text-white/40">
+                          WhatsApp channels on this Vobiz account - copy the right one's ID into Studio &gt; Channels &gt; WhatsApp:
+                        </p>
+                        <ul className="mt-1 space-y-0.5">
+                          {templatesDiag.availableChannels.map((c) => (
+                            <li key={c.id}>
+                              <code className="text-[11px]">{c.id}</code> - {c.displayName || c.phoneNumber || 'unnamed'}
+                              {c.phoneNumber ? ` (${c.phoneNumber})` : ''}{c.status ? `, ${c.status}` : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-zinc-400 dark:text-white/40">
+                        Open Vobiz &gt; Messaging &gt; Templates, open one of the approved templates, and check which Channel it's attached to.
+                      </p>
+                    )}
+                  </div>
                 ) : templatesDiag && templatesDiag.totalCached > 0 ? (
                   <p>
                     Vobiz has {templatesDiag.totalCached} template(s) cached for this channel, but none are

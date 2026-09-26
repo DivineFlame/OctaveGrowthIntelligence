@@ -355,6 +355,31 @@ async function listWhatsAppTemplates(config) {
   return items.filter((t) => t.status === 'APPROVED').map(mapWhatsAppTemplate);
 }
 
+// GET /channels/whatsapp - every WhatsApp channel/number on this Vobiz
+// account (id, phone_number, display_name, waba_id, status), not scoped
+// to any one channel_id. Used only for diagnostics below: an admin
+// account with more than one WhatsApp number in Vobiz can easily put the
+// wrong one's UUID into Studio > Channels > WhatsApp's "Channel ID"
+// field, and templates are cached per-channel in Vobiz, so that alone is
+// enough to make a channel with 5 genuinely APPROVED templates look
+// completely empty to this app. Best-effort: if this call itself fails,
+// diagnostics just proceed without the channel list rather than hiding
+// the more important totalCached/statusCounts info behind it.
+async function listWhatsAppChannels(config) {
+  const resp = await fetch(`${VOBIZ_API_BASE}/messaging/channels/whatsapp`, {
+    headers: vobizHeaders(config)
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(vobizErrorMessage(data, resp.status, 'listing WhatsApp channels'));
+  return (data.items || []).map((c) => ({
+    id: c.id,
+    phoneNumber: c.phone_number,
+    displayName: c.display_name,
+    wabaId: c.waba_id,
+    status: c.status
+  }));
+}
+
 // Same data as listWhatsAppTemplates(), plus the diagnostics described
 // above - what GET /channels/whatsapp/templates actually calls so an
 // empty result comes with a reason instead of a guess.
@@ -363,7 +388,12 @@ async function listWhatsAppTemplatesWithDiagnostics(config) {
   const templates = items.filter((t) => t.status === 'APPROVED').map(mapWhatsAppTemplate);
   const statusCounts = {};
   for (const t of items) { const s = t.status || 'UNKNOWN'; statusCounts[s] = (statusCounts[s] || 0) + 1; }
-  return { templates, diagnostics: { synced, totalCached: items.length, statusCounts, channelId: config.channel_id } };
+  const diagnostics = { synced, totalCached: items.length, statusCounts, channelId: config.channel_id };
+  if (items.length === 0) {
+    try { diagnostics.availableChannels = await listWhatsAppChannels(config); }
+    catch (e) { console.warn(`[vobiz] could not list account's WhatsApp channels for diagnostics: ${e.message}`); }
+  }
+  return { templates, diagnostics };
 }
 
 // Registers a webhook subscription with Vobiz so it actually starts
@@ -613,6 +643,7 @@ module.exports = {
   publishToChannel,
   listWhatsAppTemplates,
   listWhatsAppTemplatesWithDiagnostics,
+  listWhatsAppChannels,
   syncWhatsAppTemplates,
   registerWhatsAppWebhook
 };

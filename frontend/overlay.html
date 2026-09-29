@@ -196,6 +196,16 @@
     #oc-onboarding .oc-err{margin-top:10px;font-size:12px;color:var(--oc-danger)}
     #oc-onboarding .oc-done-icon{width:48px;height:48px;border-radius:999px;background:var(--oc-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 16px}
     #oc-gate select option,#oc-admin select option,#oc-products select option,#oc-onboarding select option,#oc-channel-wizard select option{background:var(--oc-panel);color:var(--oc-text)}
+    /* Always-on "Powered by OctaveAIAutomation" badge - separate from
+       Company Settings' logo (which replaces this app's own branding
+       elsewhere in the UI): this one always shows Octave's own mark,
+       regardless of what a company uploads as its logo. z-index matches
+       the highest this app's own fixed overlays use (#oc-gate/#oc-channel-
+       wizard at 99999) so a company's own branding never hides it. */
+    #oc-powered-by{position:fixed;bottom:12px;right:12px;z-index:99999;display:flex;gap:6px;align-items:center;background:var(--oc-panel);border:1px solid var(--oc-border-1);border-radius:999px;padding:6px 12px 6px 8px;font:11px Inter,system-ui,sans-serif;color:var(--oc-dim-6);opacity:.72;transition:opacity .15s;text-decoration:none}
+    #oc-powered-by:hover{opacity:1}
+    #oc-powered-by img{width:16px;height:16px;border-radius:4px;background:#fff;object-fit:contain;padding:1px}
+    #oc-powered-by span{white-space:nowrap}
   </style>
   <script>
   (function(){
@@ -216,10 +226,34 @@
     // HR / Social Media map onto the existing DEPT_ADMIN / HR_ADMIN /
     // CONTENT_CREATOR role values) - display only, the underlying role
     // value sent to the API is always the raw name.
-    var ROLE_LABELS = { DEPT_ADMIN: 'Manager', HR_ADMIN: 'HR', CONTENT_CREATOR: 'Social Media' };
+    var ROLE_LABELS = { SUPER_ADMIN: 'Admin', DEPT_ADMIN: 'Manager', HR_ADMIN: 'HR', CONTENT_CREATOR: 'Social Media' };
     function roleLabel(r){ return ROLE_LABELS[r] || r; }
     var API_BASE = 'https://api.octaveaiautomation.com';
     var SESSION_KEY = 'orgcomms_session';
+
+    // Company Settings (Admin-only, see renderAdmin's Company tab below)
+    // lets this single-tenant app's Admin swap in their own company's
+    // logo, shown wherever this app otherwise shows Octave's own default
+    // branding - the sign-in screen, the top bar, and the Admin panel
+    // header. GET /company/logo is public (no auth) specifically so the
+    // sign-in screen can show it before anyone has a token; it 404s when
+    // no logo has been uploaded, which the <img onerror> below turns into
+    // a fallback to Octave's own bundled asset - so every call site here
+    // works identically whether or not a company logo has ever been set.
+    // `session` is optional (the sign-in screen calls this before one
+    // exists) - when present and its cached /company response says a
+    // logo exists, its logo_updated_at cache-busts the URL so a freshly
+    // uploaded/removed logo shows up without waiting out the server's
+    // 5-minute Cache-Control on that route.
+    function companyLogoUrl(session){
+      var v = (session && session.company && session.company.has_logo && session.company.logo_updated_at) ? ('?v=' + encodeURIComponent(session.company.logo_updated_at)) : '';
+      return API_BASE.replace(/\/$/,'') + '/company/logo' + v;
+    }
+    function brandImgTag(cls, altText, fallbackSrc, session, style){
+      return '<img src="' + companyLogoUrl(session) + '" alt="' + esc(altText) + '"' +
+        (cls ? ' class="' + cls + '"' : '') + (style ? ' style="' + style + '"' : '') +
+        ' onerror="this.onerror=null;this.src=\'' + fallbackSrc + '\';">';
+    }
 
     function loadSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e){ return null; } }
     function saveSession(s){ localStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
@@ -304,8 +338,8 @@
         var isSignup = mode === 'signup';
         gate.innerHTML =
           '<div class="oc-card">' +
-            '<img src="/octave-logo.png" alt="Octave Growth Intelligence" class="oc-logo">' +
-            '<h1>' + (isSignup ? 'Create Super Admin Account' : 'Sign In') + '</h1>' +
+            brandImgTag('oc-logo', 'Company logo', '/octave-logo.png', null) +
+            '<h1>' + (isSignup ? 'Create Admin Account' : 'Sign In') + '</h1>' +
             '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your company' : 'Sign in to your company') + '</p>' +
             '<form id="oc-auth-form">' +
               (isSignup ? '<label for="oc-company">Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
@@ -391,7 +425,7 @@
       bar.id = 'oc-bar';
       var canManageUsers = USER_ACCOUNT_ROLES.indexOf(session.user.role) !== -1;
       bar.innerHTML =
-        '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
+        brandImgTag('oc-bar-icon', 'Company logo', '/octave-icon.png', session) +
         '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(roleLabel(session.user.role)) + (session.company ? ' &middot; ' + esc(session.company.name) : '') + '</span>' +
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
@@ -925,14 +959,14 @@
             var s = spec[ch];
             var existingConfig = (configured[ch] && configured[ch].config) || {};
             modal.classList.toggle('oc-cw-wide', ch === 'email');
-            // WhatsApp/Vobiz needs one extra, one-time setup step beyond
-            // saving credentials: telling Vobiz where to actually deliver
-            // inbound messages (POST /channels/whatsapp/register-webhook).
+            // WhatsApp needs one extra, one-time setup step beyond
+            // saving credentials: telling the provider where to actually
+            // deliver inbound messages (POST /channels/whatsapp/register-webhook).
             // Skipping this is the real reason a fully-configured WhatsApp
             // channel still never shows any inbound message in the Inbox -
-            // Vobiz has nothing registered to send events to at all. Only
-            // offered once the channel has already been saved (needs its
-            // real channel_id/auth on file to call Vobiz with).
+            // nothing is registered to send events to at all. Only offered
+            // once the channel has already been saved (needs its real
+            // channel_id/auth on file to register with).
             var showRegisterWebhook = ch === 'whatsapp' && existingConfig.channel_id;
             modal.innerHTML =
               '<div class="oc-panel">' +
@@ -948,8 +982,8 @@
                 '</form>' +
                 (showRegisterWebhook ?
                   '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--oc-border-08)">' +
-                    '<p class="oc-help" style="margin-bottom:10px">Inbound WhatsApp messages only reach this app once Vobiz knows where to deliver them. Do this once per Vobiz account (safe to repeat if you rotate the webhook secret).</p>' +
-                    '<button type="button" class="oc-secondary" id="oc-cw-register-webhook" style="width:100%">Register webhook with Vobiz</button>' +
+                    '<p class="oc-help" style="margin-bottom:10px">Inbound WhatsApp messages only reach this app once your WhatsApp provider knows where to deliver them. Do this once per account (safe to repeat if you rotate the webhook secret).</p>' +
+                    '<button type="button" class="oc-secondary" id="oc-cw-register-webhook" style="width:100%">Register webhook</button>' +
                     '<div id="oc-cw-webhook-status" style="margin-top:8px;font-size:12px"></div>' +
                   '</div>'
                 : '') +
@@ -1153,6 +1187,12 @@
       if (existing) existing.remove();
       var isSuperAdmin = session.user.role === 'SUPER_ADMIN';
       var canSeeWebhooks = isSuperAdmin || session.user.role === 'IT_ADMIN';
+      // Company Settings (rename + logo) is scoped to true Admins only
+      // (ORG_ADMIN_ROLES = SUPER_ADMIN/IT_ADMIN, matching the backend's
+      // hierarchy.ADMIN_ROLES gate on PATCH /company and
+      // POST/DELETE /company/logo) - a Manager (DEPT_ADMIN) or HR
+      // shouldn't be able to rebrand the whole company.
+      var canSeeCompany = ORG_ADMIN_ROLES.indexOf(session.user.role) !== -1;
       var wrap = document.createElement('div');
       wrap.id = 'oc-admin';
       wrap.setAttribute('role', 'dialog');
@@ -1160,12 +1200,14 @@
       wrap.innerHTML =
         '<div class="oc-panel">' +
           '<button class="oc-close" id="oc-admin-close" aria-label="Close">&times;</button>' +
-          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><img src="/octave-icon.png" alt="Octave" style="width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px"><h2 style="margin:0">Company &amp; User Administration</h2></div>' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">' + brandImgTag('', 'Company logo', '/octave-icon.png', session, 'width:24px;height:24px;border-radius:6px;background:#fff;object-fit:contain;padding:1px') + '<h2 style="margin:0">Company &amp; User Administration</h2></div>' +
           '<div class="oc-tabs">' +
             '<button class="oc-tab oc-active" data-tab="users">Users</button>' +
+            (canSeeCompany ? '<button class="oc-tab" data-tab="company">Company</button>' : '') +
             (canSeeWebhooks ? '<button class="oc-tab" data-tab="webhooks">Webhooks</button>' : '') +
           '</div>' +
           '<div id="oc-tab-users" style="display:block"></div>' +
+          '<div id="oc-tab-company" style="display:none"></div>' +
           '<div id="oc-tab-webhooks" style="display:none"></div>' +
         '</div>';
       document.body.appendChild(wrap);
@@ -1176,6 +1218,7 @@
           wrap.querySelectorAll('.oc-tab').forEach(function(t){ t.classList.remove('oc-active'); });
           tab.classList.add('oc-active');
           document.getElementById('oc-tab-users').style.display = tab.dataset.tab === 'users' ? 'block' : 'none';
+          document.getElementById('oc-tab-company').style.display = tab.dataset.tab === 'company' ? 'block' : 'none';
           document.getElementById('oc-tab-webhooks').style.display = tab.dataset.tab === 'webhooks' ? 'block' : 'none';
         });
       });
@@ -1313,11 +1356,91 @@
         }
       }
 
+      async function loadCompany(){
+        var el = document.getElementById('oc-tab-company');
+        el.innerHTML = 'Loading&hellip;';
+        try {
+          var company = await api(session, '/company');
+          session.company = company; // keep the cached copy (top bar, etc.) fresh
+          saveSession(session);
+          el.innerHTML =
+            '<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">' +
+              brandImgTag('', 'Current company logo', '/octave-icon.png', session, 'width:64px;height:64px;border-radius:10px;background:#fff;object-fit:contain;padding:4px;border:1px solid var(--oc-border-08)') +
+              '<div style="font-size:12px;color:var(--oc-dim-6)">' + (company.has_logo ? 'Current logo - shown in the top bar and sign-in screen.' : 'No logo uploaded yet - Octave\'s default branding is shown instead.') + '</div>' +
+            '</div>' +
+            '<form id="oc-company-name-form">' +
+              '<label class="oc-full">Company Name</label>' +
+              '<input name="name" class="oc-full" required maxlength="200" value="' + esc(company.name || '') + '" aria-label="Company name">' +
+              '<button class="oc-submit" type="submit">Save Name</button>' +
+              '<div class="oc-msg oc-full" aria-live="polite" id="oc-company-name-msg"></div>' +
+            '</form>' +
+            '<form id="oc-company-logo-form" style="margin-top:16px">' +
+              '<label class="oc-full">Company Logo (PNG/JPEG/WebP, up to 3MB)</label>' +
+              '<input name="logo" type="file" accept="image/png,image/jpeg,image/webp" class="oc-full" aria-label="Company logo file">' +
+              '<button class="oc-submit" type="submit">Upload Logo</button>' +
+              (company.has_logo ? '<button type="button" class="oc-secondary" id="oc-company-logo-remove">Remove Logo</button>' : '') +
+              '<div class="oc-msg oc-full" aria-live="polite" id="oc-company-logo-msg"></div>' +
+            '</form>';
+
+          document.getElementById('oc-company-name-form').addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-company-name-msg');
+            var fd = new FormData(ev.target);
+            try {
+              await api(session, '/company', { method: 'PATCH', body: { name: fd.get('name') } });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Saved.';
+              loadCompany();
+              renderBar(session);
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+
+          document.getElementById('oc-company-logo-form').addEventListener('submit', async function(ev){
+            ev.preventDefault();
+            var msg = document.getElementById('oc-company-logo-msg');
+            var fileInput = ev.target.querySelector('input[name="logo"]');
+            if (!fileInput.files.length) { msg.className = 'oc-msg oc-bad'; msg.textContent = 'Choose a file first.'; return; }
+            var fd = new FormData();
+            fd.append('logo', fileInput.files[0]);
+            try {
+              await api(session, '/company/logo', { method: 'POST', body: fd });
+              msg.className = 'oc-msg oc-ok'; msg.textContent = 'Uploaded.';
+              loadCompany();
+              renderBar(session);
+            } catch(e){ msg.className = 'oc-msg oc-bad'; msg.textContent = e.message; }
+          });
+
+          var removeBtn = document.getElementById('oc-company-logo-remove');
+          if (removeBtn) removeBtn.addEventListener('click', async function(){
+            if (!confirm('Remove the company logo? Octave\'s default branding will show instead.')) return;
+            try {
+              await api(session, '/company/logo', { method: 'DELETE' });
+              loadCompany();
+              renderBar(session);
+            } catch(e){ alert(e.message); }
+          });
+        } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
+      }
+
       loadUsers();
+      if (canSeeCompany) loadCompany();
       if (canSeeWebhooks) loadWebhooks();
     }
 
+    // Always visible, regardless of sign-in state or which company logo
+    // (if any) is configured in Company Settings - this is Octave's own
+    // mark, not the tenant's. Rendered once and never re-rendered/removed
+    // by any other render*() function here (they only ever touch their
+    // own #oc-* element), so it survives login/logout/dialog churn.
+    function renderPoweredByBadge(){
+      if (document.getElementById('oc-powered-by')) return;
+      var badge = document.createElement('div');
+      badge.id = 'oc-powered-by';
+      badge.innerHTML = '<img src="/octave-icon.png" alt="Octave"><span>Powered by OctaveAIAutomation</span>';
+      document.body.appendChild(badge);
+    }
+
     function boot(){
+      renderPoweredByBadge();
       var session = loadSession();
       if (!session || !session.token) {
         renderLoginGate();

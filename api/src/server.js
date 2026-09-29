@@ -359,6 +359,26 @@ const upload = multer({
 });
 const csvUpload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
+// Company logo (Company Settings, Admin-only - see PATCH /company and
+// POST/DELETE /company/logo below). Small and image-only, unlike the
+// general content-upload allowlist above: this is a UI-chrome asset
+// rendered at small sizes everywhere (top bar, sign-in screen, Admin
+// panel header), not a content-library asset. SVG is deliberately left
+// off the allowlist - an SVG can carry a <script>, and this file is
+// served back out to every visitor (including pre-login, see GET
+// /company/logo) with no further sanitization.
+const LOGO_UPLOAD_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const logoUpload = multer({
+  storage,
+  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB - a logo, not a content asset
+  fileFilter: (req, file, cb) => {
+    if (!LOGO_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error(`Unsupported file type: ${file.mimetype} - logo must be PNG, JPEG, or WebP.`));
+    }
+    cb(null, true);
+  }
+});
+
 // Lead-reply attachments (POST /leads/:id/reply) - image/PDF only, small
 // and few, since these ride along on a single outbound email rather than
 // being stored as a Product's content library. Same disk/ClamAV path as
@@ -749,7 +769,108 @@ app.get('/company', authMiddleware, async (req, res) => {
   try {
     const company = await getCompany();
     if (!company) return res.status(404).json({ error: 'Company not set up yet' });
-    res.json({ id: company.id, name: company.name, created_at: company.created_at });
+    res.json({
+      id: company.id,
+      name: company.name,
+      created_at: company.created_at,
+      has_logo: !!company.logo_path,
+      logo_updated_at: company.logo_updated_at
+    });
+  } catch(e){ serverError(res, e); }
+});
+
+// Company Settings - rename and logo, Admin-only (hierarchy.ADMIN_ROLES:
+// SUPER_ADMIN/IT_ADMIN). Single-tenant app, single company row, so this
+// is genuinely "the" company - no id needed in the URL.
+app.patch('/company', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), async (req, res) => {
+  const { name } = req.body;
+  if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  if (name.length > 200) return res.status(400).json({ error: 'name must be 200 characters or fewer' });
+  try {
+    const company = await getCompany();
+    if (!company) return res.status(404).json({ error: 'Company not set up yet' });
+    const { rows } = await pool.query(
+      'UPDATE company SET name=$1 WHERE id=$2 RETURNING id, name, created_at, logo_path, logo_updated_at',
+      [name.trim(), company.id]
+    );
+    companyCache = null; // force a fresh read next time getCompany() is called
+    await auditLog(req.user.id, 'UPDATE_COMPANY', 'company', company.id, req, 'SUCCESS', { name: name.trim() });
+    res.json({ id: rows[0].id, name: rows[0].name, created_at: rows[0].created_at, has_logo: !!rows[0].logo_path, logo_updated_at: rows[0].logo_updated_at });
+  } catch(e){ serverError(res, e); }
+});
+
+// Company logo upload - same disk-storage + ClamAV pattern as every other
+// upload in this app (see POST /content/upload above). Replaces any
+// existing logo file (this is a singleton "the company's current logo",
+// not a library of past uploads) - the old file is unlinked only after
+// the new one is confirmed clean and the DB row is updated, so a failed
+// upload never leaves the company without a logo file that still exists
+// on disk (even if the DB no longer/not-yet points at it).
+app.post('/company/logo', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), uploadLimiter, logoUpload.single('logo'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  try {
+    const company = await getCompany();
+    if (!company) { fs.unlink(req.file.path, () => {}); return res.status(404).json({ error: 'Company not set up yet' }); }
+
+    let scan;
+    try {
+      scan = await scanFile(req.file.path);
+    } catch (scanErr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(503).json({ error: scanErr.message });
+    }
+    if (scan.isInfected) {
+      fs.unlink(req.file.path, () => {});
+      await auditLog(req.user.id, 'VIRUS_DETECTED', 'company_logo', company.id, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
+    }
+
+    const previousPath = company.logo_path;
+    const { rows } = await pool.query(
+      'UPDATE company SET logo_path=$1, logo_mime=$2, logo_updated_at=NOW() WHERE id=$3 RETURNING logo_updated_at',
+      [req.file.path, req.file.mimetype, company.id]
+    );
+    companyCache = null;
+    if (previousPath && previousPath !== req.file.path) fs.unlink(previousPath, () => {});
+
+    await auditLog(req.user.id, 'UPLOAD_COMPANY_LOGO', 'company', company.id, req, 'SUCCESS', { file: req.file.originalname, size: req.file.size });
+    res.json({ has_logo: true, logo_updated_at: rows[0].logo_updated_at });
+  } catch(e){
+    if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
+    serverError(res, e);
+  }
+});
+
+app.delete('/company/logo', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), async (req, res) => {
+  try {
+    const company = await getCompany();
+    if (!company) return res.status(404).json({ error: 'Company not set up yet' });
+    if (!company.logo_path) return res.json({ has_logo: false });
+    await pool.query('UPDATE company SET logo_path=NULL, logo_mime=NULL, logo_updated_at=NOW() WHERE id=$1', [company.id]);
+    companyCache = null;
+    fs.unlink(company.logo_path, () => {});
+    await auditLog(req.user.id, 'REMOVE_COMPANY_LOGO', 'company', company.id, req, 'SUCCESS');
+    res.json({ has_logo: false });
+  } catch(e){ serverError(res, e); }
+});
+
+// Serves the company's current logo file. Deliberately NOT behind
+// authMiddleware: the sign-in/sign-up screen (frontend/overlay.html's
+// #oc-gate) needs to show it before anyone has a token, and a company
+// logo isn't sensitive - it's the same thing every visitor to the login
+// page already sees. Single-tenant app, so there's no risk of leaking one
+// company's logo to another's users the way this would in a multi-tenant
+// setup. 404s (rather than falling back to a default image itself) when
+// no logo is set - the frontend's <img onerror=...> handles the fallback
+// to Octave's own default branding, so this route only ever needs to know
+// about the one thing it actually stores.
+app.get('/company/logo', async (req, res) => {
+  try {
+    const company = await getCompany();
+    if (!company || !company.logo_path || !fs.existsSync(company.logo_path)) return res.status(404).end();
+    res.set('Cache-Control', 'public, max-age=300');
+    res.set('Content-Type', company.logo_mime || 'application/octet-stream');
+    fs.createReadStream(company.logo_path).pipe(res);
   } catch(e){ serverError(res, e); }
 });
 
@@ -1297,14 +1418,14 @@ app.post('/channels/whatsapp/register-webhook', authMiddleware, rbacMiddleware([
     const company = await getCompany();
     if (!company || !company.webhook_secret) return res.status(400).json({ error: 'No webhook secret provisioned yet - rotate one first (Integrations > Webhooks)' });
     if (!API_DOMAIN && !APP_DOMAIN) {
-      return res.status(400).json({ error: 'APP_DOMAIN or API_DOMAIN must be set to a real, internet-reachable domain so Vobiz can deliver events to it.' });
+      return res.status(400).json({ error: 'APP_DOMAIN or API_DOMAIN must be set to a real, internet-reachable domain so your WhatsApp provider can deliver events to it.' });
     }
     const base = `https://${API_DOMAIN || APP_DOMAIN}`;
     const url = `${base}/webhooks/${company.webhook_secret}/whatsapp`;
     const config = channelsLib.decryptChannelSecrets('whatsapp', channelRow.rows[0].config, decryptSecret);
     const result = await channelsLib.registerWhatsAppWebhook(config, url, company.webhook_secret);
     await auditLog(req.user.id, 'REGISTER_WHATSAPP_WEBHOOK', 'product_channel', productId, req, 'SUCCESS', { url });
-    res.json({ registered: true, url, vobiz: result });
+    res.json({ registered: true, url, provider: result });
   } catch(e){ upstreamError(res, e); }
 });
 

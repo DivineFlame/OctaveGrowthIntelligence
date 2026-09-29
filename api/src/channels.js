@@ -58,12 +58,12 @@ const CHANNEL_SPECS = {
     help: 'Any SMTP-speaking provider works for sending (SendGrid, SES, Mailgun, Postmark, Gmail with an app password, your own mail server) - this uses plain SMTP, not a vendor-specific REST API. To also turn replies into leads, fill in the IMAP fields too - use a dedicated mailbox for this if you can, since IMAP\'s "unread" flag is shared with whatever else reads that inbox (your own mail client marking a message read makes it invisible to the poller).'
   },
   whatsapp: {
-    label: 'WhatsApp Business (via Vobiz)',
+    label: 'WhatsApp Business',
     implemented: true,
     fields: [
-      { key: 'auth_id', label: 'Vobiz Auth ID (e.g. MA_XXXXXXXX)', required: true },
-      { key: 'auth_token', label: 'Vobiz Auth Token', required: true, secret: true },
-      { key: 'channel_id', label: 'Vobiz WhatsApp Channel ID', required: true },
+      { key: 'auth_id', label: 'WhatsApp Auth ID (e.g. MA_XXXXXXXX)', required: true },
+      { key: 'auth_token', label: 'WhatsApp Auth Token', required: true, secret: true },
+      { key: 'channel_id', label: 'WhatsApp Channel ID', required: true },
       { key: 'waba_id', label: 'WhatsApp Business Account ID (WABA ID)', required: true },
       { key: 'default_recipient', label: "Default recipient (E.164, e.g. +919876543210)", required: false },
       // Lead replies (POST /leads/:id/reply) always pick their own
@@ -71,14 +71,15 @@ const CHANNEL_SPECS = {
       // GET /channels/whatsapp/templates. Studio's content pipeline has
       // no per-post template picker, so it needs one template configured
       // once here instead: get a single-variable template like
-      // "{{1}}" approved in Vobiz specifically for broadcasting your own
-      // generated copy through, and set its name/language below. Every
-      // WhatsApp send this app makes - lead reply or Studio broadcast -
-      // goes through an approved template; there is no free-text path.
+      // "{{1}}" approved with your WhatsApp provider specifically for
+      // broadcasting your own generated copy through, and set its
+      // name/language below. Every WhatsApp send this app makes - lead
+      // reply or Studio broadcast - goes through an approved template;
+      // there is no free-text path.
       { key: 'broadcast_template_name', label: 'Broadcast template name (for Studio > Content publishing - a generic single-variable template)', required: false },
       { key: 'broadcast_template_language', label: 'Broadcast template language code', required: false, default: 'en_US' }
     ],
-    help: 'From the Vobiz Console (console.vobiz.ai): Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in Vobiz. Meta requires every business-initiated WhatsApp message to use an approved template - this app never sends free text. Lead replies pick a template per-message in the Inbox; Studio > Content publishing instead uses the single broadcast_template_name/language configured here (get a generic single-variable template like "{{1}}" approved for this purpose in Vobiz, then set its name here) - your generated post text becomes that template\'s one parameter. Sync/check template approval status in Vobiz under Channels > WhatsApp > Templates.'
+    help: 'From your WhatsApp Business API provider\'s console: Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in your provider\'s console. Meta requires every business-initiated WhatsApp message to use an approved template - this app never sends free text. Lead replies pick a template per-message in the Inbox; Studio > Content publishing instead uses the single broadcast_template_name/language configured here (get a generic single-variable template like "{{1}}" approved for this purpose with your provider, then set its name here) - your generated post text becomes that template\'s one parameter. Sync/check template approval status with your provider under Channels > WhatsApp > Templates.'
   },
   facebook: {
     label: 'Facebook Page',
@@ -251,7 +252,7 @@ function vobizHeaders(config) {
 // response body (or just the HTTP status) rather than ever losing the
 // underlying reason.
 function vobizErrorMessage(data, status, fallbackLabel) {
-  const fallback = `Vobiz API error ${fallbackLabel} (HTTP ${status})`;
+  const fallback = `WhatsApp provider error ${fallbackLabel} (HTTP ${status})`;
   if (!data || typeof data !== 'object') return fallback;
   if (typeof data.message === 'string' && data.message) return data.message;
   if (typeof data.error === 'string' && data.error) return data.error;
@@ -297,7 +298,7 @@ function vobizErrorMessage(data, status, fallbackLabel) {
 // reply composer's template picker is never stale without the admin
 // having to know Vobiz's own console has a separate "sync" step.
 async function syncWhatsAppTemplates(config) {
-  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
+  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Channel ID');
   const resp = await fetch(`${VOBIZ_API_BASE}/messaging/channels/${config.channel_id}/templates/sync`, {
     method: 'POST',
     headers: vobizHeaders(config)
@@ -324,7 +325,7 @@ async function syncWhatsAppTemplates(config) {
 // PENDING_REVIEW" - a bare "No approved templates yet" collapses both
 // into the same unhelpful message.
 async function fetchWhatsAppTemplatesRaw(config) {
-  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID');
+  if (!config.channel_id) throw new Error('WhatsApp channel is missing its Channel ID');
   const synced = await syncWhatsAppTemplates(config);
   // Every other Vobiz call in this file (publishWhatsApp's /messaging/messages,
   // registerWhatsAppWebhook's /messaging/webhooks) sits under the /messaging
@@ -438,7 +439,7 @@ async function registerWhatsAppWebhook(config, url, secret) {
 async function publishWhatsApp({ config, template, text, to }) {
   const recipient = (to || config.default_recipient || '').replace(/[^\d+]/g, '');
   if (!recipient) throw new Error('No recipient: pass one when publishing, or set a default_recipient on the channel config');
-  if (!config.channel_id || !config.waba_id) throw new Error('WhatsApp channel is missing its Vobiz Channel ID / WABA ID - configure it under Studio > Channels');
+  if (!config.channel_id || !config.waba_id) throw new Error('WhatsApp channel is missing its Channel ID / WABA ID - configure it under Studio > Channels');
 
   let resolvedTemplate = template && template.name ? template : null;
   if (!resolvedTemplate) {

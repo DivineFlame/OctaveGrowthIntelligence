@@ -263,7 +263,7 @@ export default function App() {
                 channelStatuses={channelList}
                 inquiryOnly
                 title={selectedProduct ? `${selectedProduct.name} · Leads` : 'Leads'}
-                subtitle="Messages Sarvam AI classified as genuine product inquiries."
+                subtitle="Messages our AI classified as genuine product inquiries."
               />
             ) : (
               <Studio

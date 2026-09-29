@@ -97,6 +97,21 @@ export function currentUser() {
   return session || null;
 }
 
+// The company's own uploaded logo (see overlay.html's Company Settings
+// tab / api/src/server.js's GET /company/logo) - public, no auth needed,
+// so this can be used directly as an <img src>. Returns null when there's
+// no session yet to read an apiBase from; callers should fall back to
+// Octave's own default asset either way (via <img onError>), since the
+// route itself 404s when no logo has been uploaded.
+export function companyLogoUrl() {
+  const session = loadSession();
+  if (!session || !session.apiBase) return null;
+  const v = session.company && session.company.has_logo && session.company.logo_updated_at
+    ? `?v=${encodeURIComponent(session.company.logo_updated_at)}`
+    : '';
+  return `${session.apiBase.replace(/\/$/, '')}/company/logo${v}`;
+}
+
 // --- Typed endpoint helpers -------------------------------------------
 
 export const api = {

@@ -113,6 +113,11 @@ the schema or API any more).
 
 Once signed in, a user with `SUPER_ADMIN`, `IT_ADMIN`, or `HR_ADMIN` sees an
 **Admin** button (top-right) - this is `USER_ACCOUNT_ROLES` in the code.
+`SUPER_ADMIN` is displayed to users simply as **"Admin"** (`ROLE_LABELS` in
+`frontend/overlay.html`, the same display-only indirection the Manager/HR/
+Social Media labels below already use) - the underlying `SUPER_ADMIN`
+value stored in the database and used for every RBAC check is unchanged,
+only its on-screen label changed.
 Available roles come from the `roles` table (`HR_ADMIN`, `SALES_LEAD`,
 `CONTENT_CREATOR`, `APPROVER`, `DEPT_ADMIN`, `IT_ADMIN`, `SUPER_ADMIN`) —
 a user's permission flags (history window, revenue/integrations
@@ -392,11 +397,50 @@ API_DOMAIN=api.octaveaiautomation.com
 (icon mark only, cropped from the same source since the full lockup's text
 isn't legible at favicon/badge sizes) are both copied into the nginx image
 by `frontend/Dockerfile` — served at `/octave-logo.png` and
-`/octave-icon.png`. Used for: the browser tab favicon, the header badge and
-wordmark inside the main app bundle, and the login screen/session
-bar/admin panel (the parts of the frontend outside that bundle). Replace
-either file and redeploy to update the brand everywhere at once — nothing
-else references the old placeholder "O" badge or "OrgComms" text anymore.
+`/octave-icon.png`, and used for the browser tab favicon and the always-on
+"Powered by" badge described below. They are Octave's own platform marks,
+separate from the customer's company branding covered next.
+
+### Company Settings (logo + name)
+
+Since this app is single-tenant (exactly one `company` row), branding is a
+company-wide setting rather than a per-user preference. An Admin
+(`SUPER_ADMIN`/`IT_ADMIN`, `hierarchy.ADMIN_ROLES`) can rename the company
+and upload/remove its logo from a **Company** tab in the Admin panel:
+
+- `PATCH /company` — updates `company.name` (Admin-only).
+- `POST /company/logo` — uploads a new logo (Admin-only, `multer`
+  disk-storage, PNG/JPEG/WebP only, 3MB max, ClamAV-scanned before it's
+  accepted — same pattern as `POST /content/upload`). The previous logo
+  file is only deleted once the new one is confirmed clean and the DB row
+  is updated.
+- `DELETE /company/logo` — removes the logo, reverting the app to
+  Octave's default marks.
+- `GET /company/logo` — streams the current logo. **Deliberately has no
+  `authMiddleware`** so the pre-login sign-in screen can render it before
+  any token exists; this is safe specifically because there is only ever
+  one company in this deployment (no cross-tenant image leak is possible).
+  Responses set `Cache-Control: public, max-age=300`; the frontend
+  cache-busts with a `?v=<logo_updated_at>` query param so an admin's own
+  upload/removal is reflected immediately in their session.
+
+Wherever the app previously showed Octave's own logo to a signed-in user
+(login screen, top session bar, admin panel header, the main app bundle's
+header), it now shows the company's uploaded logo when one is set,
+falling back to the Octave mark if not (`brandImgTag()` in
+`frontend/overlay.html`; `companyLogoUrl()` in `frontend/app/src/lib/api.js`).
+
+### "Powered by OctaveAIAutomation" badge
+
+A small, fixed, always-visible badge in the bottom-right corner of every
+screen (`#oc-powered-by` in `frontend/overlay.html`, `z-index:99999` —
+above every other overlay) reads "Powered by OctaveAIAutomation" next to
+Octave's own icon mark. Unlike everywhere else in the app, this badge
+**always** renders Octave's static bundled `/octave-icon.png` — never the
+company's uploaded logo — since its purpose is Octave's own platform
+attribution, not the tenant's branding. It renders unconditionally on
+page load (`renderPoweredByBadge()`, called first thing in `boot()`), so
+it's visible on the login screen too, before any session exists.
 
 ## Rate limiting
 
@@ -1890,3 +1934,53 @@ code changes were needed.
     (`CONTENT_CREATOR`) to the Studio tab; `MessagesPanel.jsx` added the
     bulk "Assign to" control next to the existing bulk-delete button.
   - Full unit suite passes (148/148); `npm run build` succeeds.
+
+
+## Company Settings, Admin display rename, and third-party brand scrub
+
+- **Company Settings** (name + logo) added as an Admin-only panel - see
+  "Branding" above for the full route/UI breakdown. New migration
+  `postgres/migrate-company-logo.sql` adds `logo_path`/`logo_mime`/
+  `logo_updated_at` to the `company` table; run it once if your database
+  predates this (same pattern as the other migrations, and it's already
+  registered in `api/src/migrate.js`).
+- **`SUPER_ADMIN` now displays as "Admin"** everywhere a user sees it
+  (signup screen, top bar, admin panel) via the existing `ROLE_LABELS`
+  display-only map - the actual `SUPER_ADMIN` role value used for every
+  RBAC check, in the database, and in `hierarchy.js`/`rbac.js` is
+  completely unchanged.
+- **Always-on "Powered by OctaveAIAutomation" badge** added, bottom-right,
+  visible on every screen including the pre-login sign-in screen - see
+  "Branding" above.
+- **Third-party provider names scrubbed from user-facing surfaces.** This
+  app integrates with Vobiz (WhatsApp delivery) and Sarvam AI (lead-inquiry
+  language classification) as implementation details, not as
+  user-presented brands. Audited every occurrence of "vobiz"/"sarvam"
+  (case-insensitive) across the codebase and fixed the ones a user could
+  actually see:
+  - `api/src/channels.js`: the WhatsApp channel's display label, its field
+    labels/help text, and every error message that can reach the frontend
+    (`vobizErrorMessage()`'s fallback string, the "missing Channel ID"
+    errors) no longer say "Vobiz".
+  - `api/src/server.js`: the webhook-registration route's error message and
+    its JSON response key (`vobiz: result` -> `provider: result`) no
+    longer say "Vobiz" - confirmed no frontend code reads the old key name.
+  - `frontend/overlay.html` and `frontend/app/src/components/{Header,MessagesPanel,StatTiles}.jsx`,
+    `frontend/app/src/App.jsx`: the WhatsApp channel wizard's button/help
+    text, four WhatsApp-template diagnostic strings, the `SARVAM_LANGS`
+    stat tile label ("Sarvam Langs" -> "Languages Detected", constant
+    renamed to `SUPPORTED_LANGS`), and the Leads-tab subtitle no longer
+    name either provider.
+  - **Deliberately left unchanged** (not user-facing): environment
+    variable names (`VOBIZ_API_BASE`, etc.), internal function/variable
+    names (`vobizHeaders()`, `vobizErrorMessage()`, `classifyInquiryWithSarvam`),
+    server-side code comments, and `console.warn`/log-line prefixes
+    (`[vobiz]`, `[sarvam-filter]`) - these are developer-facing internals,
+    not something an end user of the app ever sees.
+- New integration coverage in `test/integration/routes.integration.js`:
+  `PATCH /company` (member 403 / Admin 200 + a real DB verify), and the
+  full `POST /company/logo` -> `GET /company/logo` (no auth) ->
+  `DELETE /company/logo` -> `GET /company/logo` (404 again) round trip
+  using a real tiny PNG upload, plus a member-403 check on the upload
+  route.
+- Full unit suite passes (150/150); `npm run build` succeeds.

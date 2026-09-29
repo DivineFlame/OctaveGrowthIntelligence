@@ -1,7 +1,7 @@
 import React from 'react';
 import { Boxes, Languages, Sparkles, Users, Server, CircleCheck } from 'lucide-react';
 
-const SARVAM_LANGS = ['HI', 'TA', 'TE', 'KN', 'ML', 'MR', 'GU', 'BN', 'PA', 'OR', 'AS', 'EN'];
+const SUPPORTED_LANGS = ['HI', 'TA', 'TE', 'KN', 'ML', 'MR', 'GU', 'BN', 'PA', 'OR', 'AS', 'EN'];
 
 function Tile({ icon: Icon, label, value, sub }) {
   return (
@@ -25,7 +25,7 @@ export default function StatTiles({ activeChannels, totalChannels, transformedTo
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
       <Tile icon={Boxes} label="Active Channels" value={activeChannels} sub={activeChannels === totalChannels && totalChannels > 0 ? 'All synced' : channelHealth} />
-      <Tile icon={Languages} label="Sarvam Langs" value={SARVAM_LANGS.length} sub={SARVAM_LANGS.slice(0, 4).join(', ') + '...'} />
+      <Tile icon={Languages} label="Languages Detected" value={SUPPORTED_LANGS.length} sub={SUPPORTED_LANGS.slice(0, 4).join(', ') + '...'} />
       <Tile icon={Sparkles} label="Transformed Today" value={transformedToday} />
       <Tile icon={Users} label="Leads Imported" value={leadsImported} />
       <Tile icon={CircleCheck} label="Channel Health" value={channelHealth} />

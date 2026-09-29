@@ -546,4 +546,66 @@ function runSuite() {
     const loginAttempt = await call('/auth/login', { method: 'POST', ipTag: 63, body: { email: REPORT_EMAIL, password: REPORT_PASSWORD } });
     assert.equal(loginAttempt.status, 401, 'the cascaded-disabled report must not be able to log in any more');
   });
+
+  // Company Settings: name + logo, against the real /company row and real Postgres.
+  // GET /company/logo is deliberately unauthenticated (this app is single-tenant, so
+  // there is no cross-tenant leak risk), which is why these tests use raw fetch() for
+  // that route instead of the call() helper's Authorization header.
+  const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  test('PATCH /company: a regular member cannot rename the company', async () => {
+    const { status, data } = await call('/company', { method: 'PATCH', headers: { Authorization: `Bearer ${tokenMember}` }, body: { name: 'Hijacked Co' } });
+    assert.equal(status, 403, JSON.stringify(data));
+  });
+
+  test('PATCH /company: an Admin can rename the company', async () => {
+    const { status, data } = await call('/company', { method: 'PATCH', headers: { Authorization: `Bearer ${tokenA}` }, body: { name: 'Renamed Integration Co' } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.equal(data.name, 'Renamed Integration Co');
+
+    const { rows } = await db.query('SELECT name FROM company WHERE id = $1', [data.id]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].name, 'Renamed Integration Co');
+  });
+
+  test('GET /company/logo: 404s with no logo set, no auth required', async () => {
+    const res = await fetch(`${BASE}/company/logo`);
+    assert.equal(res.status, 404);
+  });
+
+  test('POST /company/logo: a regular member cannot upload a logo', async () => {
+    const form = new FormData();
+    form.append('logo', new Blob([Buffer.from(TINY_PNG_BASE64, 'base64')], { type: 'image/png' }), 'logo.png');
+    const res = await fetch(`${BASE}/company/logo`, { method: 'POST', headers: { Authorization: `Bearer ${tokenMember}` }, body: form });
+    assert.equal(res.status, 403);
+  });
+
+  test('POST /company/logo then GET /company/logo: an Admin uploads a real logo, then anyone (no auth) can fetch it', async () => {
+    const pngBytes = Buffer.from(TINY_PNG_BASE64, 'base64');
+    const form = new FormData();
+    form.append('logo', new Blob([pngBytes], { type: 'image/png' }), 'logo.png');
+    const uploadRes = await fetch(`${BASE}/company/logo`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form });
+    const uploadData = await uploadRes.json();
+    assert.equal(uploadRes.status, 200, JSON.stringify(uploadData));
+    assert.equal(uploadData.has_logo, true);
+
+    const fetchRes = await fetch(`${BASE}/company/logo`);
+    assert.equal(fetchRes.status, 200);
+    assert.equal(fetchRes.headers.get('content-type'), 'image/png');
+    const fetchedBytes = Buffer.from(await fetchRes.arrayBuffer());
+    assert.equal(fetchedBytes.length, pngBytes.length, 'served logo bytes must match the uploaded PNG');
+
+    const companyView = await call('/company', { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(companyView.status, 200, JSON.stringify(companyView.data));
+    assert.equal(companyView.data.has_logo, true);
+  });
+
+  test('DELETE /company/logo: an Admin removes the logo, GET /company/logo 404s again', async () => {
+    const { status, data } = await call('/company/logo', { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.equal(data.has_logo, false);
+
+    const fetchRes = await fetch(`${BASE}/company/logo`);
+    assert.equal(fetchRes.status, 404);
+  });
 }

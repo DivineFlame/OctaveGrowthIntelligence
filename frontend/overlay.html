@@ -199,7 +199,25 @@
   </style>
   <script>
   (function(){
-    var MANAGER_ROLES = ['SUPER_ADMIN','IT_ADMIN','DEPT_ADMIN'];
+    // Role groups, mirroring the split made in api/src/server.js for the
+    // user-hierarchy feature: a company-wide "Manager" (DEPT_ADMIN) no
+    // longer administers users or creates products - they only manage the
+    // product(s) they're a member/admin of, and their reports' product
+    // access is live-mirrored from them. USER_ACCOUNT_ROLES controls who
+    // sees the Admin panel and can view/create users (HR does user
+    // creation per the hierarchy spec); USER_ADMIN_ROLES controls who can
+    // actually change a user's role/status/reporting head or reset their
+    // password; ORG_ADMIN_ROLES controls who creates products and sees
+    // the full company user picker when adding product members.
+    var USER_ACCOUNT_ROLES = ['SUPER_ADMIN','IT_ADMIN','HR_ADMIN'];
+    var USER_ADMIN_ROLES = ['SUPER_ADMIN','IT_ADMIN'];
+    var ORG_ADMIN_ROLES = ['SUPER_ADMIN','IT_ADMIN'];
+    // Friendly labels for the roles named in the hierarchy spec (Manager /
+    // HR / Social Media map onto the existing DEPT_ADMIN / HR_ADMIN /
+    // CONTENT_CREATOR role values) - display only, the underlying role
+    // value sent to the API is always the raw name.
+    var ROLE_LABELS = { DEPT_ADMIN: 'Manager', HR_ADMIN: 'HR', CONTENT_CREATOR: 'Social Media' };
+    function roleLabel(r){ return ROLE_LABELS[r] || r; }
     var API_BASE = 'https://api.octaveaiautomation.com';
     var SESSION_KEY = 'orgcomms_session';
 
@@ -371,10 +389,10 @@
 
       var bar = document.createElement('div');
       bar.id = 'oc-bar';
-      var canManageUsers = MANAGER_ROLES.indexOf(session.user.role) !== -1;
+      var canManageUsers = USER_ACCOUNT_ROLES.indexOf(session.user.role) !== -1;
       bar.innerHTML =
         '<img src="/octave-icon.png" alt="Octave" class="oc-bar-icon">' +
-        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(session.user.role) + (session.company ? ' &middot; ' + esc(session.company.name) : '') + '</span>' +
+        '<span class="oc-who">' + esc(session.user.email) + ' &middot; ' + esc(roleLabel(session.user.role)) + (session.company ? ' &middot; ' + esc(session.company.name) : '') + '</span>' +
         '<button class="oc-logout-btn" id="oc-open-products">Products</button>' +
         '<button class="oc-logout-btn" id="oc-open-security">Security</button>' +
         (canManageUsers ? '<button class="oc-admin-btn" id="oc-open-admin">Admin</button>' : '') +
@@ -660,7 +678,7 @@
     // Dismissible at any step; never nags again once dismissed or once a
     // product exists.
     async function maybeShowOnboarding(session){
-      if (MANAGER_ROLES.indexOf(session.user.role) === -1) return;
+      if (ORG_ADMIN_ROLES.indexOf(session.user.role) === -1) return;
       var dismissKey = 'orgcomms_onboarding_dismissed';
       try { if (localStorage.getItem(dismissKey)) return; } catch(e){}
       try {
@@ -672,7 +690,7 @@
     function renderProducts(session){
       var existing = document.getElementById('oc-products');
       if (existing) existing.remove();
-      var isOrgAdmin = MANAGER_ROLES.indexOf(session.user.role) !== -1;
+      var isOrgAdmin = ORG_ADMIN_ROLES.indexOf(session.user.role) !== -1;
       var wrap = document.createElement('div');
       wrap.id = 'oc-products';
       wrap.setAttribute('role', 'dialog');
@@ -1165,43 +1183,72 @@
       async function loadUsers(){
         var el = document.getElementById('oc-tab-users');
         el.innerHTML = 'Loading&hellip;';
+        var canAdminUsers = USER_ADMIN_ROLES.indexOf(session.user.role) !== -1;
         try {
           var roles = await api(session, '/roles');
           var users = await api(session, '/users');
-          var roleOptions = roles.map(function(r){ return '<option value="' + esc(r.name) + '">' + esc(r.name) + '</option>'; }).join('');
+          var roleOptions = roles.map(function(r){ return '<option value="' + esc(r.name) + '">' + esc(roleLabel(r.name)) + '</option>'; }).join('');
+          // "Reports to" picker options - every other user, so an Admin can
+          // wire up the reporting hierarchy from here (arbitrary depth: any
+          // user can be set as any other user's head, per the hierarchy
+          // spec). The server still rejects self-reporting and any edit
+          // that would create a cycle - this is just a convenience list.
+          function reportsToOptions(u){
+            var opts = '<option value="">(none - top of hierarchy)</option>';
+            opts += users.filter(function(o){ return o.id !== u.id; }).map(function(o){
+              return '<option value="' + o.id + '"' + (o.id === u.reports_to ? ' selected' : '') + '>' + esc(o.email) + ' (' + esc(roleLabel(o.role)) + ')</option>';
+            }).join('');
+            return opts;
+          }
           var rows = users.map(function(u){
             var isSelf = u.id === session.user.id;
             return '<tr><td>' + esc(u.email) + (u.disabled ? ' <span class="oc-badge oc-badge-bad">disabled</span>' : '') + '</td><td>' +
-              '<select class="oc-role-select" data-id="' + u.id + '" aria-label="Role for ' + esc(u.email) + '">' +
-                roles.map(function(r){ return '<option value="' + esc(r.name) + '"' + (r.name===u.role?' selected':'') + '>' + esc(r.name) + '</option>'; }).join('') +
-              '</select></td><td><button class="oc-save-role" data-id="' + u.id + '">Save</button></td>' +
-              '<td><button class="oc-toggle-status" data-id="' + u.id + '" data-disabled="' + !!u.disabled + '"' + (isSelf ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button></td>' +
-              '<td><button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button></td></tr>';
+              (canAdminUsers ?
+                '<select class="oc-role-select" data-id="' + u.id + '" aria-label="Role for ' + esc(u.email) + '">' +
+                  roles.map(function(r){ return '<option value="' + esc(r.name) + '"' + (r.name===u.role?' selected':'') + '>' + esc(roleLabel(r.name)) + '</option>'; }).join('') +
+                '</select>'
+                : esc(roleLabel(u.role))) +
+              '</td><td>' +
+              (canAdminUsers && !isSelf ?
+                '<select class="oc-reportsto-select" data-id="' + u.id + '" aria-label="Reports to for ' + esc(u.email) + '">' + reportsToOptions(u) + '</select>'
+                : (u.reports_to ? esc((users.filter(function(o){return o.id===u.reports_to;})[0] || {}).email || u.reports_to) : '&mdash;')) +
+              '</td>' +
+              (canAdminUsers ? '<td><button class="oc-save-role" data-id="' + u.id + '">Save</button></td>' : '<td></td>') +
+              '<td>' + (canAdminUsers ? '<button class="oc-toggle-status" data-id="' + u.id + '" data-disabled="' + !!u.disabled + '"' + (isSelf ? ' disabled title="You cannot disable your own account"' : '') + '>' + (u.disabled ? 'Enable' : 'Disable') + '</button>' : (u.disabled ? '<span class="oc-badge oc-badge-bad">disabled</span>' : '')) + '</td>' +
+              '<td>' + (canAdminUsers ? '<button class="oc-reset-pw" data-id="' + u.id + '" data-email="' + esc(u.email) + '">Reset Password</button>' : '') + '</td></tr>';
           }).join('');
           el.innerHTML =
-            '<table><tr><th>Email</th><th>Role</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
+            '<table><tr><th>Email</th><th>Role</th><th>Reports To</th><th></th><th></th><th></th></tr>' + rows + '</table>' +
             '<form id="oc-create-user">' +
               '<label class="oc-full">Create User</label>' +
               '<input name="email" type="email" placeholder="email" required aria-label="Email">' +
               '<input name="password" type="password" placeholder="password (min 12 chars)" required minlength="12" aria-label="Password">' +
               '<select name="role" class="oc-full" aria-label="Role">' + roleOptions + '</select>' +
+              '<select name="reports_to" class="oc-full" aria-label="Reports to">' +
+                '<option value="">Reports to (none - top of hierarchy)</option>' +
+                users.map(function(o){ return '<option value="' + o.id + '">Reports to: ' + esc(o.email) + ' (' + esc(roleLabel(o.role)) + ')</option>'; }).join('') +
+              '</select>' +
               '<button class="oc-submit" type="submit">Create</button>' +
               '<div class="oc-msg oc-full" aria-live="polite" id="oc-user-msg"></div>' +
             '</form>';
           el.querySelectorAll('.oc-save-role').forEach(function(btn){
             btn.addEventListener('click', async function(){
               var sel = el.querySelector('.oc-role-select[data-id="' + btn.dataset.id + '"]');
+              var reportsSel = el.querySelector('.oc-reportsto-select[data-id="' + btn.dataset.id + '"]');
               try {
                 await api(session, '/users/' + btn.dataset.id + '/role', { method: 'PATCH', body: { role: sel.value } });
+                if (reportsSel) {
+                  await api(session, '/users/' + btn.dataset.id + '/reports-to', { method: 'PATCH', body: { reports_to: reportsSel.value || null } });
+                }
                 btn.textContent = 'Saved';
-                setTimeout(function(){ btn.textContent = 'Save'; }, 1500);
+                setTimeout(function(){ btn.textContent = 'Save'; loadUsers(); }, 800);
               } catch(e){ alert(e.message); }
             });
           });
           el.querySelectorAll('.oc-toggle-status').forEach(function(btn){
             btn.addEventListener('click', async function(){
               var nextDisabled = btn.dataset.disabled !== 'true';
-              if (nextDisabled && !confirm('Disable this user? They will be unable to log in until re-enabled.')) return;
+              if (nextDisabled && !confirm('Disable this user? They and every user reporting to them (directly or indirectly) will be unable to log in until re-enabled.')) return;
               try {
                 await api(session, '/users/' + btn.dataset.id + '/status', { method: 'PATCH', body: { disabled: nextDisabled } });
                 loadUsers();
@@ -1223,7 +1270,7 @@
             ev.preventDefault();
             var msg = document.getElementById('oc-user-msg');
             var fd = new FormData(ev.target);
-            var payload = { email: fd.get('email'), password: fd.get('password'), role: fd.get('role') };
+            var payload = { email: fd.get('email'), password: fd.get('password'), role: fd.get('role'), reports_to: fd.get('reports_to') || null };
             try {
               await api(session, '/users', { method: 'POST', body: payload });
               msg.className = 'oc-msg oc-ok'; msg.textContent = 'User created.';

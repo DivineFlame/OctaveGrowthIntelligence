@@ -107,6 +107,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [activeTab, setActiveTab] = useState('home');
+  // Social Media (CONTENT_CREATOR) only has the Studio tab (see Nav.jsx's
+  // ROLE_TAB_ALLOWLIST) - land there directly instead of on a Home tab
+  // they'd immediately have to navigate away from.
+  useEffect(() => {
+    if (session && session.user && session.user.role === 'CONTENT_CREATOR') setActiveTab('studio');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [company, setCompany] = useState(null);
   const [products, setProducts] = useState([]);
   const [selectedProductId, setSelectedProductId] = useState(null);
@@ -235,6 +242,7 @@ export default function App() {
               products={products}
               selectedProductId={selectedProductId}
               onSelectProduct={setSelectedProductId}
+              role={role}
             />
 
             {activeTab === 'home' ? (

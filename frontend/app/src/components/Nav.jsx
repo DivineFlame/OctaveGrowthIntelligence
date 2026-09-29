@@ -8,16 +8,26 @@ const TABS = [
   { key: 'leads', label: 'Leads', icon: Users },
 ];
 
+// Social Media (the CONTENT_CREATOR role) only does content work per the
+// hierarchy spec ("Social Media - Studio") - every other role keeps the
+// full tab set. This is UI-only convenience; the API's own role checks on
+// each endpoint are what actually enforce access.
+const ROLE_TAB_ALLOWLIST = {
+  CONTENT_CREATOR: ['studio'],
+};
+
 // The "top nav bar" the product spec asks for: Home/Inbox/Studio/Leads
 // tabs, plus - for the three product-scoped tabs - a product picker right
 // next to them, since Inbox/Studio/Leads all need to know which product's
 // channels/content/leads they're looking at. Home has no product picker;
 // it's the company-wide dashboard.
-export default function Nav({ active, onChange, products, selectedProductId, onSelectProduct }) {
+export default function Nav({ active, onChange, products, selectedProductId, onSelectProduct, role }) {
+  const allowedKeys = ROLE_TAB_ALLOWLIST[role];
+  const tabs = allowedKeys ? TABS.filter((t) => allowedKeys.includes(t.key)) : TABS;
   return (
     <div className="mb-5 flex flex-wrap items-center gap-3 border-b border-black/5 pb-3 dark:border-white/[0.08]">
       <nav className="flex items-center gap-1">
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = active === tab.key;
           return (

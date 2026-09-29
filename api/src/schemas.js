@@ -11,7 +11,24 @@ const schemas = {
   createUser: z.object({
     email: z.string().trim().toLowerCase().email().max(255),
     password: z.string().min(12).max(200),
-    role: z.string().trim().min(1).max(50)
+    role: z.string().trim().min(1).max(50),
+    // Who this user reports to - drives both the reporting hierarchy and
+    // (see hierarchy.js) their inherited product/service access. Optional/
+    // nullable: a brand new user can be created at the top of the chain
+    // (no reporting head yet) and assigned one afterward via PATCH
+    // /users/:userId/reports-to.
+    reports_to: z.string().uuid().optional().nullable()
+  }),
+  updateReportsTo: z.object({
+    reports_to: z.string().uuid().nullable()
+  }),
+  // Bulk "Assign to" action in the Inbox (Manager/Admin only) - the only
+  // way a lead becomes visible to one of the Manager's reports, per the
+  // spec's bulk-only design (reuses the same multi-select UI as
+  // bulk-delete rather than a per-lead picker).
+  bulkAssignLeads: z.object({
+    ids: z.array(z.string().uuid()).min(1).max(100),
+    assigned_to: z.string().uuid()
   }),
   createProduct: z.object({
     name: z.string().trim().min(1).max(200),

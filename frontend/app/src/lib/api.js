@@ -167,4 +167,17 @@ export const api = {
   // for any other role and treat it as "not available", not an error to
   // surface loudly.
   integrations: () => apiCall('/integrations'),
+
+  // The caller's own reporting chain (direct + indirect reports) - safe
+  // for any role to call, always empty for someone with no reports. Backs
+  // the Inbox/Leads "Assign to" picker (see MessagesPanel.jsx) so a
+  // Manager can pick one of their own people without needing the
+  // full-company GET /users, which they don't have access to.
+  myReports: () => apiCall('/users/my-reports'),
+
+  // Bulk-assigns selected Inbox/Leads rows to one of the caller's reports
+  // (see server.js's POST /leads/bulk-assign) - the only lead-assignment
+  // action the spec calls for ("bulk assign only", no per-lead dropdown).
+  bulkAssignLeads: (ids, assignedTo) =>
+    apiCall('/leads/bulk-assign', { method: 'POST', body: { ids, assigned_to: assignedTo } }),
 };

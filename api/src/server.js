@@ -26,6 +26,7 @@ const schemas = require('./schemas');
 const cryptoSecrets = require('./crypto-secrets');
 const { processLeadCsvRecords } = require('./csv-leads');
 const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
+const hierarchy = require('./hierarchy');
 const { createLimiters } = require('./rate-limiters');
 const { detectLanguage, extractGstin } = require('./lead-enrichment');
 const metrics = require('./metrics');
@@ -864,19 +865,50 @@ app.get('/roles', authMiddleware, async (req, res) => {
 });
 
 // Roles allowed to create/manage users, kept in sync with roles.can_manage_users
-const USER_MANAGER_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+// Split from the app's original single "manager roles" constant once the
+// reporting-hierarchy feature needed the distinction the spec actually
+// draws: creating a user account is HR's job ("HR - User Creation"),
+// while changing someone's role/reports-to, blocking/unblocking them, and
+// resetting their password stays Admin-only ("Assignment of users
+// reporting will be taken care by the Admin" / "Admin can block/unblock
+// any user"). A Manager (DEPT_ADMIN) is deliberately in neither - they
+// manage the product(s) assigned to them and the leads within it, not
+// company accounts (see LEAD_MANAGER_ROLES below for that side of it).
+const USER_ACCOUNT_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN'];
+const USER_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN'];
+// Preserves what the original constant used to grant for lead-management
+// routes specifically (export/delete/bulk-assign) - a Manager still needs
+// this for the leads within their own product(s); DEPT_ADMIN was never
+// meant to lose that, only the unrelated user-account permissions above.
+const LEAD_MANAGER_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
 
 // Users - List (single company - every user in the system)
-app.get('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.get('/users', authMiddleware, rbacMiddleware(USER_ACCOUNT_ROLES), async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users ORDER BY created_at DESC');
+    const { rows } = await pool.query('SELECT id, email, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at FROM users ORDER BY created_at DESC');
+    res.json(rows);
+  } catch(e){ serverError(res, e); }
+});
+
+// A Manager (DEPT_ADMIN) isn't in USER_ACCOUNT_ROLES - GET /users (the
+// full company roster) is intentionally out of reach for them - but they
+// still need *some* way to pick which of their own reports a lead goes to
+// in the Inbox's bulk-assign action. This route only ever returns the
+// caller's own descendant chain (via hierarchy.getDescendantUserIds), so
+// it's safe for any authenticated user to call: it can't be used to see
+// anyone else's team, and it's simply empty for a user with no reports.
+app.get('/users/my-reports', authMiddleware, async (req, res) => {
+  try {
+    const ids = await hierarchy.getDescendantUserIds(pool, req.user.id);
+    if (!ids.length) return res.json([]);
+    const { rows } = await pool.query('SELECT id, email, role FROM users WHERE id = ANY($1::uuid[]) ORDER BY email', [ids]);
     res.json(rows);
   } catch(e){ serverError(res, e); }
 });
 
 // Users - Create, role drives permissions (single source of truth: roles table)
-app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(schemas.createUser), async (req, res) => {
-  const { email, password, role } = req.body;
+app.post('/users', authMiddleware, rbacMiddleware(USER_ACCOUNT_ROLES), validate(schemas.createUser), async (req, res) => {
+  const { email, password, role, reports_to } = req.body;
   if (!email || !password || !role) return res.status(400).json({ error: 'email, password and role are required' });
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
   try {
@@ -887,14 +919,22 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
       await auditLog(req.user.id, 'RBAC_BLOCKED', 'user', null, req, 'BLOCKED', { attempted: 'create SUPER_ADMIN user', role: req.user.role });
       return res.status(403).json({ error: 'Only a Super Admin can grant the Super Admin role' });
     }
+    // reports_to is a brand-new user's - a fresh id can never already be an
+    // ancestor of itself, so there's no cycle to check here (only on
+    // PATCH /users/:userId/reports-to, where the target user already has
+    // its own place in an existing chain). Still has to actually exist.
+    if (reports_to) {
+      const headRow = await pool.query('SELECT id FROM users WHERE id=$1', [reports_to]);
+      if (!headRow.rows.length) return res.status(400).json({ error: 'reports_to user not found' });
+    }
     const password_hash = await bcrypt.hash(password, 12);
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
-      [email, password_hash, r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
+      `INSERT INTO users (email, password_hash, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id, email, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [email, password_hash, r.name, reports_to || null, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content]
     );
-    await auditLog(req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name });
+    await auditLog(req.user.id, 'CREATE_USER', 'user', rows[0].id, req, 'SUCCESS', { email, role: r.name, reports_to: reports_to || null });
     res.json(rows[0]);
   } catch(e){
     if (e.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
@@ -902,8 +942,36 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(
   }
 });
 
+// Users - Set/change who this user reports to (Admin only - "Assignment of
+// users reporting will be taken care by the Admin"). This is also what
+// drives the user's inherited product/service access (see hierarchy.js) -
+// changing it takes effect immediately, live, on their very next request.
+app.patch('/users/:userId/reports-to', authMiddleware, rbacMiddleware(USER_ADMIN_ROLES), validate(schemas.updateReportsTo), async (req, res) => {
+  const { userId } = req.params;
+  const { reports_to } = req.body;
+  if (reports_to === userId) return res.status(400).json({ error: 'A user cannot report to themselves' });
+  try {
+    const target = await pool.query('SELECT id FROM users WHERE id=$1', [userId]);
+    if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
+    if (reports_to) {
+      const head = await pool.query('SELECT id FROM users WHERE id=$1', [reports_to]);
+      if (!head.rows.length) return res.status(400).json({ error: 'reports_to user not found' });
+      if (await hierarchy.wouldCreateCycle(pool, userId, reports_to)) {
+        return res.status(400).json({ error: 'That would create a reporting loop - the chosen reporting head already reports (directly or indirectly) to this user' });
+      }
+    }
+    const { rows } = await pool.query(
+      `UPDATE users SET reports_to=$1 WHERE id=$2
+       RETURNING id, email, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [reports_to, userId]
+    );
+    await auditLog(req.user.id, 'CHANGE_REPORTS_TO', 'user', userId, req, 'SUCCESS', { reports_to });
+    res.json(rows[0]);
+  } catch(e){ serverError(res, e); }
+});
+
 // Users - Change an existing user's role
-app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_ADMIN_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { role } = req.body;
   if (!role) return res.status(400).json({ error: 'role is required' });
@@ -918,7 +986,7 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
     const { rows } = await pool.query(
       `UPDATE users SET role=$1, max_history_days=$2, can_view_revenue=$3, can_view_integrations=$4, can_approve_content=$5
        WHERE id=$6
-       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+       RETURNING id, email, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
       [r.name, r.max_history_days, r.can_view_revenue, r.can_view_integrations, r.can_approve_content, userId]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
@@ -930,28 +998,44 @@ app.patch('/users/:userId/role', authMiddleware, rbacMiddleware(USER_MANAGER_ROL
 // Users - Enable/disable an account. A manager can't disable their own
 // account (would lock the company with a single admin out with no
 // recovery path).
-app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+// Blocking cascades down the whole reporting chain immediately - "all sub
+// users under will be blocked immediately" - since every descendant's
+// access to anything depends on the chain above them anyway, leaving them
+// merely "not disabled but effectively orphaned" would be confusing and
+// isn't what was asked for. Unblocking does NOT cascade back on: an Admin
+// re-enables each affected user individually once whatever caused the
+// top-level block is resolved, rather than a single unblock silently
+// reviving an entire branch that might include someone who should stay
+// disabled for an unrelated reason.
+app.patch('/users/:userId/status', authMiddleware, rbacMiddleware(USER_ADMIN_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { disabled } = req.body;
   if (typeof disabled !== 'boolean') return res.status(400).json({ error: 'disabled (boolean) is required' });
   if (userId === req.user.id) return res.status(400).json({ error: 'You cannot disable your own account' });
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      `UPDATE users SET disabled=$1 WHERE id=$2
-       RETURNING id, email, role, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
-      [disabled, userId]
+    await client.query('BEGIN');
+    const idsToUpdate = [userId];
+    if (disabled) idsToUpdate.push(...(await hierarchy.getDescendantUserIds(client, userId)));
+    const { rows } = await client.query(
+      `UPDATE users SET disabled=$1 WHERE id = ANY($2::uuid[])
+       RETURNING id, email, role, reports_to, max_history_days, can_view_revenue, can_view_integrations, can_approve_content, two_fa_enabled, disabled, created_at`,
+      [disabled, idsToUpdate]
     );
-    if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    await auditLog(req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS');
-    res.json(rows[0]);
-  } catch(e){ serverError(res, e); }
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'User not found' }); }
+    await client.query('COMMIT');
+    const primary = rows.find((r) => r.id === userId);
+    const cascaded = rows.filter((r) => r.id !== userId).map((r) => r.id);
+    await auditLog(req.user.id, disabled ? 'DISABLE_USER' : 'ENABLE_USER', 'user', userId, req, 'SUCCESS', cascaded.length ? { cascaded_to: cascaded } : undefined);
+    res.json(primary);
+  } catch(e){ await client.query('ROLLBACK'); serverError(res, e); } finally { client.release(); }
 });
 
 // Users - Admin-driven password reset. There is no email infrastructure in
 // this system for a self-service "forgot password" flow, so an Admin sets a
 // new password directly on the user's behalf; the user should be told to
 // change it again after logging in.
-app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_ADMIN_ROLES), async (req, res) => {
   const { userId } = req.params;
   const { new_password } = req.body;
   if (!new_password || new_password.length < 12) return res.status(400).json({ error: 'new_password must be at least 12 characters' });
@@ -977,7 +1061,13 @@ app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_MA
 // a "Premium" tier here - removed for now (see README.md "Hardening
 // notes"); every company runs the same feature set today.
 
-const PRODUCT_ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+// Product/service CREATION and product-ADMIN-ship stay Admin-driven
+// (never inherited) - only a true company-wide Admin creates a new
+// product or assigns someone as *that product's own* ADMIN member (POST
+// /products/:id/members). What DOES flow through the reporting hierarchy
+// is plain view/use access to a product already assigned to someone
+// upstream - see hasProductAccess() below, backed by
+// hierarchy.resolveEffectiveProductIds().
 const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
 
 async function getProductMembership(productId, userId) {
@@ -985,17 +1075,31 @@ async function getProductMembership(productId, userId) {
   return rows.length ? rows[0].role : null;
 }
 // A company-wide Admin role can administer any product; a product's own
-// ADMIN member can administer just that one product.
+// ADMIN member (a Manager an Admin explicitly assigned) can administer
+// just that one product.
 async function canAdminProduct(req, productId) {
-  if (PRODUCT_ADMIN_ROLES.includes(req.user.role)) return true;
+  if (hierarchy.ADMIN_ROLES.includes(req.user.role)) return true;
   return (await getProductMembership(productId, req.user.id)) === 'ADMIN';
 }
 
-// Products - Create (Admin only). Pre-creates all 7 channel rows as
-// 'not_configured', in the same transaction, so a product's full channel
-// set exists from the moment it's created rather than materializing rows
-// lazily the first time each one is individually configured.
-app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
+// View/use access to a product - unlike canAdminProduct above, this flows
+// through the reporting chain: HR/Social Media/anyone else reporting
+// (directly or transitively) to a Manager automatically gets whatever
+// product(s) that Manager has, live, with no separate per-user assignment
+// step (see hierarchy.js and the spec it implements). True for a
+// company-wide Admin, for a direct product_members row, or for anyone
+// whose resolved effective product set includes this product.
+async function hasProductAccess(req, productId) {
+  const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
+  return effective === null || effective.includes(productId);
+}
+
+// Products - Create (Admin only - not inherited, not delegated to a
+// Manager). Pre-creates all 7 channel rows as 'not_configured', in the
+// same transaction, so a product's full channel set exists from the
+// moment it's created rather than materializing rows lazily the first
+// time each one is individually configured.
+app.post('/products', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   const client = await pool.connect();
@@ -1028,9 +1132,15 @@ app.post('/products', authMiddleware, rbacMiddleware(PRODUCT_ADMIN_ROLES), valid
 // can see all" - see README.md "Hardening notes").
 app.get('/products', authMiddleware, async (req, res) => {
   try {
-    const { rows } = PRODUCT_ADMIN_ROLES.includes(req.user.role)
-      ? await pool.query('SELECT * FROM products ORDER BY created_at DESC')
-      : await pool.query('SELECT p.* FROM products p JOIN product_members pm ON pm.product_id=p.id WHERE pm.user_id=$1 ORDER BY p.created_at DESC', [req.user.id]);
+    const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
+    let rows;
+    if (effective === null) {
+      ({ rows } = await pool.query('SELECT * FROM products ORDER BY created_at DESC'));
+    } else if (effective.length) {
+      ({ rows } = await pool.query('SELECT * FROM products WHERE id = ANY($1::uuid[]) ORDER BY created_at DESC', [effective]));
+    } else {
+      rows = [];
+    }
     res.json(rows);
   } catch(e){ serverError(res, e); }
 });
@@ -1039,10 +1149,10 @@ app.get('/products/:id', authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM products WHERE id=$1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
+    const isAdmin = hierarchy.ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await hasProductAccess(req, req.params.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const membershipRole = await getProductMembership(req.params.id, req.user.id);
-    if (!isAdmin && !membershipRole) return res.status(403).json({ error: 'Not a member of this product' });
-    res.json(Object.assign({}, rows[0], { your_role: isAdmin ? 'ADMIN' : membershipRole }));
+    res.json(Object.assign({}, rows[0], { your_role: isAdmin ? 'ADMIN' : (membershipRole || 'MEMBER') }));
   } catch(e){ serverError(res, e); }
 });
 
@@ -1051,8 +1161,8 @@ app.get('/products/:id/members', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
-    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = hierarchy.ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await hasProductAccess(req, req.params.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query(
       `SELECT pm.id, pm.role, pm.created_at, u.id as user_id, u.email, u.role as company_role
        FROM product_members pm JOIN users u ON u.id=pm.user_id WHERE pm.product_id=$1 ORDER BY pm.created_at`,
@@ -1070,8 +1180,8 @@ app.get('/products/:id/content', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
-    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = hierarchy.ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await hasProductAccess(req, req.params.id))) return res.status(403).json({ error: 'Not a member of this product' });
 
     const assets = await pool.query(
       `SELECT id, file_name, file_size, mime_type, virus_scan_status, created_at
@@ -1196,8 +1306,8 @@ app.get('/products/:id/channels', authMiddleware, async (req, res) => {
   try {
     const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
     if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
-    const isAdmin = PRODUCT_ADMIN_ROLES.includes(req.user.role);
-    if (!isAdmin && !(await getProductMembership(req.params.id, req.user.id))) return res.status(403).json({ error: 'Not a member of this product' });
+    const isAdmin = hierarchy.ADMIN_ROLES.includes(req.user.role);
+    if (!isAdmin && !(await hasProductAccess(req, req.params.id))) return res.status(403).json({ error: 'Not a member of this product' });
     const { rows } = await pool.query('SELECT channel, status, config, updated_at FROM product_channels WHERE product_id=$1', [req.params.id]);
     // Secret fields (access tokens, SMTP passwords, ...) are encrypted at
     // rest but were never masked in the API response before - the frontend
@@ -1276,6 +1386,21 @@ app.post('/products/:id/channels', authMiddleware, validate(schemas.configureCha
 // CSV imports, or any row from before SARVAM_API_KEY was set) stays
 // visible rather than being hidden by a filter that never actually ran on
 // it.
+//
+// Product scoping was previously not enforced at all here (?product_id=
+// was applied as a raw filter with no check the caller could actually see
+// that product, and omitting it returned every lead in the entire
+// system) - fixed as part of the reporting-hierarchy feature: a
+// company-wide Admin still sees everything, everyone else is restricted
+// to their effective product set (hierarchy.resolveEffectiveProductIds),
+// which already covers "sees only my own product_members rows" as the
+// base case.
+//
+// Row-level visibility, per the spec: a Manager (or Admin) sees every
+// lead in a product they can access; anyone else - HR, Social Media, or
+// any other report - only ever sees leads specifically assigned to them
+// (see POST /leads/bulk-assign). assigned_to is otherwise invisible to
+// them, by design - an unassigned lead simply isn't in their result set.
 app.get('/leads', authMiddleware, async (req, res) => {
   try {
     const days = req.user.max_history_days;
@@ -1285,16 +1410,30 @@ app.get('/leads', authMiddleware, async (req, res) => {
       params.push(days);
       conditions.push(`created_at >= NOW() - ($${params.length} || ' days')::interval`);
     }
+
+    const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
     if (req.query.product_id) {
+      if (effective !== null && !effective.includes(req.query.product_id)) {
+        return res.status(403).json({ error: 'Not a member of this product' });
+      }
       params.push(req.query.product_id);
       conditions.push(`product_id = $${params.length}`);
+    } else if (effective !== null) {
+      if (!effective.length) return res.json([]);
+      params.push(effective);
+      conditions.push(`product_id = ANY($${params.length}::uuid[])`);
     }
+
     if (req.query.channel) {
       params.push(req.query.channel);
       conditions.push(`source_channel = $${params.length}`);
     }
     if (req.query.inquiry_only === 'true') {
       conditions.push(`is_inquiry IS DISTINCT FROM false`);
+    }
+    if (!LEAD_MANAGER_ROLES.includes(req.user.role)) {
+      params.push(req.user.id);
+      conditions.push(`assigned_to = $${params.length}`);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const { rows } = await pool.query(`SELECT * FROM leads ${where} ORDER BY created_at DESC LIMIT 200`, params);
@@ -1303,12 +1442,62 @@ app.get('/leads', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
+// True if the caller can see/act on this specific lead: a company-wide
+// Admin always can; anyone else needs the lead's product to be in their
+// effective product set (a lead with no product_id at all - e.g. a CSV
+// import never assigned to one - is Admin-only, same fail-closed default
+// as everywhere else here), and, within an accessible product, either
+// Manager-level visibility (sees every lead there) or the lead being
+// assigned specifically to them.
+async function canAccessLead(req, lead) {
+  if (hierarchy.ADMIN_ROLES.includes(req.user.role)) return true;
+  if (!lead.product_id) return false;
+  const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
+  if (effective !== null && !effective.includes(lead.product_id)) return false;
+  if (LEAD_MANAGER_ROLES.includes(req.user.role)) return true;
+  return lead.assigned_to === req.user.id;
+}
+
+// Leads - Bulk assign to one of the caller's own reports (Manager/Admin
+// only) - the only way a lead becomes visible to a non-Manager user, per
+// the spec's bulk-only design (reuses the Inbox's existing multi-select
+// UI, same as bulk-delete, rather than a per-lead picker).
+app.post('/leads/bulk-assign', authMiddleware, rbacMiddleware(LEAD_MANAGER_ROLES), validate(schemas.bulkAssignLeads), async (req, res) => {
+  const { ids, assigned_to } = req.body;
+  try {
+    const { rows: leads } = await pool.query('SELECT id, product_id FROM leads WHERE id = ANY($1::uuid[])', [ids]);
+    if (!leads.length) return res.status(404).json({ error: 'No matching leads found' });
+
+    const targetUser = await pool.query('SELECT id FROM users WHERE id=$1', [assigned_to]);
+    if (!targetUser.rows.length) return res.status(400).json({ error: 'Target user not found' });
+
+    if (!hierarchy.ADMIN_ROLES.includes(req.user.role)) {
+      // Every selected lead must be in a product this caller can actually
+      // manage - otherwise a Manager for product A could hand out leads
+      // that actually belong to product B.
+      const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
+      const outOfScope = leads.filter((l) => !l.product_id || !(effective || []).includes(l.product_id));
+      if (outOfScope.length) return res.status(403).json({ error: `${outOfScope.length} of the selected lead(s) are outside your assigned product(s)` });
+
+      // The target must actually be one of the caller's own reports
+      // (direct or transitive) - a Manager can only hand leads to people
+      // under them, never to an arbitrary company user.
+      const myReports = await hierarchy.getDescendantUserIds(pool, req.user.id);
+      if (!myReports.includes(assigned_to)) return res.status(403).json({ error: 'You can only assign leads to your own reports' });
+    }
+
+    await pool.query('UPDATE leads SET assigned_to=$1 WHERE id = ANY($2::uuid[])', [assigned_to, leads.map((l) => l.id)]);
+    await auditLog(req.user.id, 'BULK_ASSIGN_LEADS', 'lead', null, req, 'SUCCESS', { count: leads.length, assigned_to });
+    res.json({ assigned: leads.length });
+  } catch(e){ serverError(res, e); }
+});
+
 // Leads - data subject export/erasure. Leads are external individuals
 // (prospects/contacts) with no login of their own - if one of them emails
 // asking "what do you have on me" or "delete my data", a manager handles it
 // on their behalf through these two routes rather than the lead being able
 // to self-serve like a `users` row can via GET/POST /me/*.
-app.get('/leads/:id/export', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.get('/leads/:id/export', authMiddleware, rbacMiddleware(LEAD_MANAGER_ROLES), async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Lead not found' });
@@ -1327,7 +1516,7 @@ app.get('/leads/:id/export', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES),
 // aggregate fields (source_channel/status/value_inr) legitimately kept for
 // reporting once the personal identifiers are gone. pii_erased_at is the
 // durable record of when this happened.
-app.delete('/leads/:id', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), async (req, res) => {
+app.delete('/leads/:id', authMiddleware, rbacMiddleware(LEAD_MANAGER_ROLES), async (req, res) => {
   try {
     const { rows } = await pool.query(
       `UPDATE leads SET contact_name=NULL, phone=NULL, email=NULL, company_name=NULL, pii_erased_at=NOW()
@@ -1365,7 +1554,7 @@ app.delete('/leads/:id', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), asy
 // Only leads with agent_runs against them are refused by the FK either
 // way (surfaced as a per-id failure below, not a whole-request 500), so
 // a mixed selection still deletes everything it safely can.
-app.post('/leads/delete-selected', authMiddleware, rbacMiddleware(USER_MANAGER_ROLES), validate(schemas.deleteSelectedLeads), async (req, res) => {
+app.post('/leads/delete-selected', authMiddleware, rbacMiddleware(LEAD_MANAGER_ROLES), validate(schemas.deleteSelectedLeads), async (req, res) => {
   try {
     const ids = req.body.ids;
     const { rows: leads } = await pool.query(
@@ -1441,8 +1630,9 @@ app.post('/leads/delete-selected', authMiddleware, rbacMiddleware(USER_MANAGER_R
 // and send_status/send_error/external_id record what really happened.
 app.get('/leads/:id/messages', authMiddleware, async (req, res) => {
   try {
-    const lead = await pool.query('SELECT id FROM leads WHERE id=$1', [req.params.id]);
+    const lead = await pool.query('SELECT id, product_id, assigned_to FROM leads WHERE id=$1', [req.params.id]);
     if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    if (!(await canAccessLead(req, lead.rows[0]))) return res.status(403).json({ error: 'Not authorized to view this lead' });
     const { rows } = await pool.query(
       `SELECT lm.id, lm.direction, lm.channel, lm.body, lm.sent_by, u.email AS sent_by_email,
               lm.send_status, lm.send_error, lm.external_id, lm.attachments, lm.created_at
@@ -1475,11 +1665,12 @@ app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attach
 
   try {
     const leadRows = await pool.query(
-      'SELECT id, product_id, source_channel, email, phone, company_name, source_message_id, source_subject FROM leads WHERE id=$1',
+      'SELECT id, product_id, assigned_to, source_channel, email, phone, company_name, source_message_id, source_subject FROM leads WHERE id=$1',
       [req.params.id]
     );
     if (!leadRows.rows.length) { cleanupUploads(); return res.status(404).json({ error: 'Lead not found' }); }
     const lead = leadRows.rows[0];
+    if (!(await canAccessLead(req, lead))) { cleanupUploads(); return res.status(403).json({ error: 'Not authorized to reply to this lead' }); }
     const channel = requestedChannel || lead.source_channel;
 
     // Virus-scan every attachment before anything else - same fail-closed

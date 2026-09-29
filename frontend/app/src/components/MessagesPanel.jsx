@@ -700,6 +700,16 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [deleting, setDeleting] = useState(false);
   const [deleteErr, setDeleteErr] = useState('');
+  // Bulk "assign to" - reuses the same checkbox selection as bulk-delete
+  // above, per the hierarchy spec's "bulk assign only" decision (no
+  // per-lead assignment dropdown). `reports` is the caller's own
+  // reporting chain (empty for anyone with no reports, e.g. most roles) -
+  // the picker simply doesn't render when there's nothing to assign to.
+  const [reports, setReports] = useState([]);
+  const [assignTarget, setAssignTarget] = useState('');
+  const [assigning, setAssigning] = useState(false);
+  const [assignErr, setAssignErr] = useState('');
+  const [assignMsg, setAssignMsg] = useState('');
 
   const toggleSelect = (id, checked) => {
     setSelectedIds((prev) => {
@@ -745,6 +755,45 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
   };
 
   useEffect(() => {
+    let cancelled = false;
+    api
+      .myReports()
+      .then((rows) => {
+        if (!cancelled) setReports(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setReports([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const assignSelected = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length || !assignTarget) return;
+    setAssigning(true);
+    setAssignErr('');
+    setAssignMsg('');
+    try {
+      // POST /leads/bulk-assign is all-or-nothing (it throws before
+      // touching any row if one selected lead is out of scope or the
+      // target isn't one of the caller's reports) and its response is
+      // just { assigned: <count> } - so on success every id we sent is
+      // now assigned, there's nothing per-id to reconcile against.
+      await api.bulkAssignLeads(ids, assignTarget);
+      const assignedSet = new Set(ids);
+      setLeads((prev) => prev.map((l) => (assignedSet.has(l.id) ? Object.assign({}, l, { assigned_to: assignTarget }) : l)));
+      setSelectedIds(new Set());
+      setAssignMsg(`Assigned ${assignedSet.size} to ${(reports.find((r) => r.id === assignTarget) || {}).email || 'user'}.`);
+    } catch (e) {
+      setAssignErr(e instanceof ApiError ? e.message : 'Assign failed');
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  useEffect(() => {
     if (!productId) {
       setLeads([]);
       setLoading(false);
@@ -771,6 +820,8 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
 
   useEffect(() => {
     setSelectedIds(new Set());
+    setAssignErr('');
+    setAssignMsg('');
   }, [productId, activeChannel, inquiryOnly]);
 
   if (!productId) {
@@ -795,18 +846,47 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
               {subtitle ? <p className="text-[11px] text-zinc-500 dark:text-white/50">{subtitle}</p> : null}
             </div>
             {selectedIds.size > 0 ? (
-              <button
-                type="button"
-                onClick={deleteSelected}
-                disabled={deleting}
-                className="flex shrink-0 items-center gap-1 rounded-full border border-red-500/30 px-2.5 py-1 text-[11px] font-medium text-red-500 hover:bg-red-500/10 disabled:opacity-50"
-              >
-                <Trash2 className="h-3 w-3" />
-                {deleting ? 'Deleting…' : `Delete (${selectedIds.size})`}
-              </button>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                {reports.length > 0 ? (
+                  <>
+                    <select
+                      value={assignTarget}
+                      onChange={(e) => setAssignTarget(e.target.value)}
+                      aria-label="Assign selected to"
+                      className="rounded-full border border-black/10 bg-transparent px-2 py-1 text-[11px] text-zinc-700 outline-none focus:border-brand dark:border-white/15 dark:text-white/80"
+                    >
+                      <option value="">Assign to…</option>
+                      {reports.map((u) => (
+                        <option key={u.id} value={u.id} style={{ color: '#111827', backgroundColor: '#ffffff' }}>
+                          {u.email}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={assignSelected}
+                      disabled={assigning || !assignTarget}
+                      className="rounded-full border border-brand/30 px-2.5 py-1 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50"
+                    >
+                      {assigning ? 'Assigning…' : `Assign (${selectedIds.size})`}
+                    </button>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={deleteSelected}
+                  disabled={deleting}
+                  className="flex items-center gap-1 rounded-full border border-red-500/30 px-2.5 py-1 text-[11px] font-medium text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  {deleting ? 'Deleting…' : `Delete (${selectedIds.size})`}
+                </button>
+              </div>
             ) : null}
           </div>
           {deleteErr ? <p className="mb-2 px-1 text-[11px] text-red-500">{deleteErr}</p> : null}
+          {assignErr ? <p className="mb-2 px-1 text-[11px] text-red-500">{assignErr}</p> : null}
+          {assignMsg ? <p className="mb-2 px-1 text-[11px] text-emerald-600 dark:text-emerald-400">{assignMsg}</p> : null}
           {loading ? (
             <p className="px-1 text-[12px] text-zinc-500 dark:text-white/50">Loading…</p>
           ) : err ? (

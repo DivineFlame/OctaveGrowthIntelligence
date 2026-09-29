@@ -111,24 +111,66 @@ entirely: there is exactly one `company` row, created once by
 `POST /auth/signup`/`bootstrap-admin.sql`, and no `tenant_id` anywhere in
 the schema or API any more).
 
-Once signed in, a user with `SUPER_ADMIN`, `IT_ADMIN`, or `DEPT_ADMIN` sees an
-**Admin** button (top-right):
-- **SUPER_ADMIN / IT_ADMIN / DEPT_ADMIN** create users and assign roles
-  under the Users tab (`GET`/`POST /users`). Available roles come from the
-  `roles` table (`HR_ADMIN`, `SALES_LEAD`, `CONTENT_CREATOR`, `APPROVER`,
-  `DEPT_ADMIN`, `IT_ADMIN`, `SUPER_ADMIN`) — a user's permission flags
-  (history window, revenue/integrations visibility, approval rights) are
-  derived from that role, not set ad hoc per user.
-- Every admin role sees and manages every user and every product company-
-  wide (`PRODUCT_ADMIN_ROLES` in the code - renamed from
-  `PRODUCT_TENANT_ADMIN_ROLES` when multi-tenancy was removed). A product
-  can additionally be assigned to specific non-admin users via
-  `product_members` - see "Products/Services" below.
+Once signed in, a user with `SUPER_ADMIN`, `IT_ADMIN`, or `HR_ADMIN` sees an
+**Admin** button (top-right) - this is `USER_ACCOUNT_ROLES` in the code.
+Available roles come from the `roles` table (`HR_ADMIN`, `SALES_LEAD`,
+`CONTENT_CREATOR`, `APPROVER`, `DEPT_ADMIN`, `IT_ADMIN`, `SUPER_ADMIN`) —
+a user's permission flags (history window, revenue/integrations
+visibility, approval rights) are derived from that role, not set ad hoc
+per user. The three roles the user-hierarchy feature is named around map
+onto existing role values rather than adding new ones: **Manager** =
+`DEPT_ADMIN`, **HR** = `HR_ADMIN`, **Social Media** = `CONTENT_CREATOR`.
+
+Only `SUPER_ADMIN`/`IT_ADMIN` (`USER_ADMIN_ROLES`) can actually change a
+user's role, disabled status, reporting head, or reset their password -
+`HR_ADMIN` can see the Users tab and create new users (its one stated
+permission: "User Creation") but not edit an existing one. Only
+`SUPER_ADMIN`/`IT_ADMIN` (`hierarchy.ADMIN_ROLES`) implicitly manage every
+product/user company-wide and can create new products; a `DEPT_ADMIN`
+Manager instead manages whichever specific product(s) they're a member of
+via `product_members` - see "Products/Services" and "User hierarchy"
+below.
 
 Access tokens expire after 15 minutes; the frontend transparently exchanges
 the 7-day refresh token for a new one via `POST /auth/refresh`, so a session
 stays usable without re-entering a password until the refresh token itself
-expires.
+expires (this is also why a cascading block, below, doesn't need to
+forcibly revoke an already-issued access token - it's blocked from
+refreshing within 15 minutes either way).
+
+## User hierarchy
+
+Every user optionally has a `reports_to` (another user, arbitrary depth,
+cycle-checked) — set by an Admin (`PATCH /users/:userId/reports-to`), never
+by the user themselves. This chain drives two things:
+
+- **Cascading block.** Disabling a user (`PATCH /users/:userId/status`
+  with `disabled: true`) immediately disables every user who reports to
+  them, directly or indirectly, in one transaction. Re-enabling does
+  **not** cascade back on - an Admin re-enables each affected user
+  individually once whatever caused the block is resolved.
+- **Live-mirrored product access.** A user's effective product/service
+  access is never copied or set separately - it's resolved at request
+  time by walking up their `reports_to` chain until hitting either an
+  Admin (implicit access to everything) or the nearest ancestor with
+  explicit `product_members` rows, and using exactly that set
+  (`hierarchy.resolveEffectiveProductIds`, `api/src/hierarchy.js`).
+  Changing a Manager's products immediately changes every report's access,
+  with no extra step. Fails closed (empty access) on anything ambiguous -
+  ​a missing user, a cycle, or a chain deeper than 50 - rather than
+  granting anything.
+
+Inbox visibility follows the same idea: a Manager/Admin (`DEPT_ADMIN`/
+`IT_ADMIN`/`SUPER_ADMIN`, `LEAD_MANAGER_ROLES` in the code) sees every
+lead in their product(s); everyone else only sees leads bulk-assigned to
+them (`assigned_to` on the `leads` row). Assignment is bulk-only - the
+Inbox's existing bulk-select checkboxes plus an "Assign to" action
+(`POST /leads/bulk-assign`), restricted to the caller's own reports (a
+Manager can't hand a lead to someone outside their team, checked via
+`hierarchy.getDescendantUserIds`) - there's no per-lead assignment
+dropdown. `GET /users/my-reports` returns just the caller's own descendant
+chain (used to populate that picker), since a Manager isn't in
+`USER_ACCOUNT_ROLES` and can't call the full-company `GET /users`.
 
 ## Products/Services
 
@@ -137,10 +179,11 @@ this (same `docker exec ... psql` pattern as the other migrations).
 
 Full hierarchy - company-wide (single company, no tenant scoping):
 
-- **Any Admin role** (`SUPER_ADMIN`/`IT_ADMIN`/`DEPT_ADMIN`, collectively
-  `PRODUCT_ADMIN_ROLES` in the code) creates **Products/Services**
-  (`POST /products`) and assigns any user as that product's Admin
-  (`POST /products/:id/members` with `role: "ADMIN"`).
+- **Only `SUPER_ADMIN`/`IT_ADMIN`** (`hierarchy.ADMIN_ROLES` in the code)
+  creates **Products/Services** (`POST /products`) and assigns any user as
+  that product's Admin (`POST /products/:id/members` with `role:
+  "ADMIN"`). A `DEPT_ADMIN` Manager no longer creates products (see "User
+  hierarchy" above) - they manage the ones they're already a member of.
 - **Product/Service Admin** configures that product's social channels
   (`POST /products/:id/channels` - config storage only right now, see note
   below) and adds `MEMBER` users to run them (`POST /products/:id/members`
@@ -1792,3 +1835,58 @@ code changes were needed.
     added (this is a one-line data-shape fix in the poller's synthetic
     request object, not new logic; the existing fake-store tests already
     exercise `ingestInboundLead()`'s call shape).
+
+- **User hierarchy, live-mirrored product access, and lead assignment (2026-09-29)** -
+  Added the feature documented in "User hierarchy" above: `users.reports_to`
+  (arbitrary depth, cycle-checked), cascading block, and
+  `hierarchy.resolveEffectiveProductIds` for live-mirrored product access
+  (`api/src/hierarchy.js`, 13 unit tests).
+  - The previous single `USER_MANAGER_ROLES`/`PRODUCT_ADMIN_ROLES`
+    constants referenced above (2026-09 entries) no longer exist - they
+    were split into `USER_ACCOUNT_ROLES` (view/create users),
+    `USER_ADMIN_ROLES` (edit role/status/reports-to/reset password),
+    `LEAD_MANAGER_ROLES` (full Inbox visibility + lead admin actions), and
+    `hierarchy.ADMIN_ROLES` (true company admins - implicit access to
+    everything, only they create new products). A `DEPT_ADMIN` Manager
+    keeps `LEAD_MANAGER_ROLES` rights but lost `USER_ADMIN_ROLES`/product-
+    creation rights - they manage their own product(s) and reports, not
+    the company's user accounts.
+  - **Found and fixed two pre-existing access-control gaps while rewiring
+    product/lead access through the new resolver** (neither related to
+    this feature's own new code - both existed before it): `GET /leads`
+    applied `?product_id=` with no membership check at all, and omitting
+    it returned every lead in the system to any authenticated user; `GET
+    /leads/:id/messages` and `POST /leads/:id/reply` had no per-lead
+    access control whatsoever - any authenticated user could read or
+    reply to any lead by UUID. Both now go through the same
+    effective-product/assignment check (`canAccessLead()`) as the rest of
+    this feature.
+  - A lead with `product_id IS NULL` (CSV upload lets you skip picking a
+    product) is treated as having no product boundary to enforce, rather
+    than being made invisible to non-Admins outright - the first version
+    of the `GET /leads` rewrite above did the latter, which would have
+    been a real regression (such leads were visible to every authenticated
+    user before this pass, not just Admins).
+  - Added a guard neither `PATCH /users/:userId/reports-to` nor
+    `POST /users` had at first: an Admin (`hierarchy.ADMIN_ROLES`) cannot
+    be given a `reports_to`. Without it, an Admin who reports to someone
+    could be cascade-disabled (and locked out) if that someone is later
+    blocked - Admins are the top of the hierarchy by design and never
+    report to anyone.
+  - Added `GET /users/my-reports` (not in the original plan) - a
+    `DEPT_ADMIN` Manager isn't in `USER_ACCOUNT_ROLES` and can't call the
+    full-company `GET /users`, but still needs a list of their own reports
+    to populate the bulk-assign picker. Returns only the caller's own
+    descendant chain, so it's safe for any authenticated user to call.
+  - New integration coverage in `test/integration/routes.integration.js`:
+    a report live-mirroring their Manager's product against a real
+    database, reports-to cycle/admin-lock rejection, cascading block
+    actually preventing a real login, and the full bulk-assign ->
+    visibility -> per-lead-access chain (Manager assigns, report can then
+    see/reply, an unrelated outsider is 403'd throughout).
+  - Frontend: `frontend/overlay.html`'s Users admin tab gained a "Reports
+    To" column/picker and role labels (Manager/HR/Social Media);
+    `frontend/app/src/components/Nav.jsx` restricts Social Media
+    (`CONTENT_CREATOR`) to the Studio tab; `MessagesPanel.jsx` added the
+    bulk "Assign to" control next to the existing bulk-delete button.
+  - Full unit suite passes (148/148); `npm run build` succeeds.

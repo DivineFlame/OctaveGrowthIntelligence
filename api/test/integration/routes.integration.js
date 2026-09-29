@@ -412,4 +412,138 @@ function runSuite() {
     assert.equal(messages.length, 1);
     assert.equal(messages[0].direction, 'inbound');
   });
+
+  // ---- User hierarchy: reporting chain, live-mirrored product access,
+  // cascading block, and bulk lead assignment (api/src/hierarchy.js) -
+  // exactly the class of claim a mocked pool can't really prove ("a report
+  // with no product_members of their own sees their Manager's products",
+  // "disabling a Manager really disables their report's ability to log
+  // in") - against a real database, like the Products/members section
+  // above did for the plain admin/member case.
+  let hProductId, managerId, tokenManager, reportId, tokenReport, outsiderId, tokenOutsider;
+  const MANAGER_EMAIL = 'hmanager@integration-test.invalid';
+  const MANAGER_PASSWORD = 'a-manager-long-test-password-1';
+  const REPORT_EMAIL = 'hreport@integration-test.invalid';
+  const REPORT_PASSWORD = 'a-report-long-test-password-1';
+  const OUTSIDER_EMAIL = 'houtsider@integration-test.invalid';
+  const OUTSIDER_PASSWORD = 'an-outsider-long-test-password-1';
+
+  test('hierarchy setup: a product, a Manager (DEPT_ADMIN) assigned to it, a report of theirs, and an unrelated outsider', async () => {
+    const product = await call('/products', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { name: 'Hierarchy Test Product' } });
+    assert.equal(product.status, 200, JSON.stringify(product.data));
+    hProductId = product.data.id;
+
+    const manager = await call('/users', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { email: MANAGER_EMAIL, password: MANAGER_PASSWORD, role: 'DEPT_ADMIN' } });
+    assert.equal(manager.status, 200, JSON.stringify(manager.data));
+    managerId = manager.data.id;
+
+    const assign = await call(`/products/${hProductId}/members`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { user_id: managerId, role: 'MEMBER' } });
+    assert.equal(assign.status, 200, JSON.stringify(assign.data));
+
+    const report = await call('/users', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { email: REPORT_EMAIL, password: REPORT_PASSWORD, role: 'SALES_LEAD', reports_to: managerId } });
+    assert.equal(report.status, 200, JSON.stringify(report.data));
+    reportId = report.data.id;
+    assert.equal(report.data.reports_to, managerId);
+
+    const outsider = await call('/users', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { email: OUTSIDER_EMAIL, password: OUTSIDER_PASSWORD, role: 'SALES_LEAD' } });
+    assert.equal(outsider.status, 200, JSON.stringify(outsider.data));
+    outsiderId = outsider.data.id;
+
+    tokenManager = (await call('/auth/login', { method: 'POST', ipTag: 60, body: { email: MANAGER_EMAIL, password: MANAGER_PASSWORD } })).data.token;
+    tokenReport = (await call('/auth/login', { method: 'POST', ipTag: 61, body: { email: REPORT_EMAIL, password: REPORT_PASSWORD } })).data.token;
+    tokenOutsider = (await call('/auth/login', { method: 'POST', ipTag: 62, body: { email: OUTSIDER_EMAIL, password: OUTSIDER_PASSWORD } })).data.token;
+    assert.ok(tokenManager && tokenReport && tokenOutsider, 'all three should be able to log in before the cascading-block test below disables two of them');
+  });
+
+  test("GET /products: a report with no product_members of their own live-mirrors their Manager's products, not the outsider's", async () => {
+    const reportView = await call('/products', { headers: { Authorization: `Bearer ${tokenReport}` } });
+    assert.equal(reportView.status, 200, JSON.stringify(reportView.data));
+    assert.deepEqual(reportView.data.map(p => p.id), [hProductId]);
+
+    const outsiderView = await call('/products', { headers: { Authorization: `Bearer ${tokenOutsider}` } });
+    assert.equal(outsiderView.status, 200);
+    assert.deepEqual(outsiderView.data, [], 'the outsider reports to nobody and has no product_members of their own');
+  });
+
+  test('PATCH /users/:id/reports-to: rejects a cycle (the Manager cannot be made to report to their own report)', async () => {
+    const { status, data } = await call(`/users/${managerId}/reports-to`, { method: 'PATCH', headers: { Authorization: `Bearer ${tokenA}` }, body: { reports_to: reportId } });
+    assert.equal(status, 400, JSON.stringify(data));
+    assert.match(data.error, /loop/);
+  });
+
+  test('PATCH /users/:id/reports-to: an Admin (top of the hierarchy) cannot be given a reporting head', async () => {
+    const { status, data } = await call(`/users/${userAId}/reports-to`, { method: 'PATCH', headers: { Authorization: `Bearer ${tokenA}` }, body: { reports_to: managerId } });
+    assert.equal(status, 400, JSON.stringify(data));
+    assert.match(data.error, /top of the reporting hierarchy/);
+  });
+
+  test('GET /users/my-reports: the Manager sees their one report; the report themselves sees nobody', async () => {
+    const managerView = await call('/users/my-reports', { headers: { Authorization: `Bearer ${tokenManager}` } });
+    assert.equal(managerView.status, 200, JSON.stringify(managerView.data));
+    assert.deepEqual(managerView.data.map(u => u.id), [reportId]);
+
+    const reportView = await call('/users/my-reports', { headers: { Authorization: `Bearer ${tokenReport}` } });
+    assert.equal(reportView.status, 200);
+    assert.deepEqual(reportView.data, []);
+  });
+
+  let hLeadId;
+  test('seed a lead on the hierarchy product (arrange, not act)', async () => {
+    const { rows } = await db.query(
+      `INSERT INTO leads (contact_name, email, source_channel, product_id) VALUES ('Hierarchy Lead','hlead@example.com','whatsapp',$1) RETURNING id`,
+      [hProductId]
+    );
+    hLeadId = rows[0].id;
+  });
+
+  test("GET /leads: the Manager sees the whole product's inbox; the not-yet-assigned report does not", async () => {
+    const managerView = await call('/leads', { headers: { Authorization: `Bearer ${tokenManager}` } });
+    assert.equal(managerView.status, 200, JSON.stringify(managerView.data));
+    assert.ok(managerView.data.some(l => l.id === hLeadId));
+
+    const reportView = await call('/leads', { headers: { Authorization: `Bearer ${tokenReport}` } });
+    assert.equal(reportView.data.some(l => l.id === hLeadId), false, 'not bulk-assigned to them yet');
+  });
+
+  test('POST /leads/bulk-assign: the Manager can only hand a lead to their own report, not to an outsider', async () => {
+    const { status, data } = await call('/leads/bulk-assign', { method: 'POST', headers: { Authorization: `Bearer ${tokenManager}` }, body: { ids: [hLeadId], assigned_to: outsiderId } });
+    assert.equal(status, 403, JSON.stringify(data));
+  });
+
+  test("POST /leads/bulk-assign: assigns the lead to the Manager's report", async () => {
+    const { status, data } = await call('/leads/bulk-assign', { method: 'POST', headers: { Authorization: `Bearer ${tokenManager}` }, body: { ids: [hLeadId], assigned_to: reportId } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.equal(data.assigned, 1);
+  });
+
+  test('GET /leads: the report now sees the lead assigned to them; the outsider still cannot see it at all', async () => {
+    const reportView = await call('/leads', { headers: { Authorization: `Bearer ${tokenReport}` } });
+    assert.ok(reportView.data.some(l => l.id === hLeadId));
+
+    const outsiderView = await call('/leads', { headers: { Authorization: `Bearer ${tokenOutsider}` } });
+    assert.equal(outsiderView.data.some(l => l.id === hLeadId), false);
+  });
+
+  test('GET /leads/:id/messages and POST /leads/:id/reply: the assigned report can access the lead; the outsider is forbidden from both', async () => {
+    const outsiderMessages = await call(`/leads/${hLeadId}/messages`, { headers: { Authorization: `Bearer ${tokenOutsider}` } });
+    assert.equal(outsiderMessages.status, 403, JSON.stringify(outsiderMessages.data));
+
+    const outsiderReply = await call(`/leads/${hLeadId}/reply`, { method: 'POST', headers: { Authorization: `Bearer ${tokenOutsider}` }, body: { body: 'should not be allowed' } });
+    assert.equal(outsiderReply.status, 403, JSON.stringify(outsiderReply.data));
+
+    const reportMessages = await call(`/leads/${hLeadId}/messages`, { headers: { Authorization: `Bearer ${tokenReport}` } });
+    assert.equal(reportMessages.status, 200, JSON.stringify(reportMessages.data));
+  });
+
+  test('PATCH /users/:id/status: disabling the Manager cascades to disable their report immediately, in one real transaction', async () => {
+    const { status, data } = await call(`/users/${managerId}/status`, { method: 'PATCH', headers: { Authorization: `Bearer ${tokenA}` }, body: { disabled: true } });
+    assert.equal(status, 200, JSON.stringify(data));
+
+    const { rows } = await db.query('SELECT id, disabled FROM users WHERE id = ANY($1::uuid[])', [[managerId, reportId]]);
+    assert.equal(rows.length, 2);
+    for (const row of rows) assert.equal(row.disabled, true, `${row.id} should be cascaded-disabled`);
+
+    const loginAttempt = await call('/auth/login', { method: 'POST', ipTag: 63, body: { email: REPORT_EMAIL, password: REPORT_PASSWORD } });
+    assert.equal(loginAttempt.status, 401, 'the cascaded-disabled report must not be able to log in any more');
+  });
 }

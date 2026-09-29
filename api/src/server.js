@@ -924,6 +924,9 @@ app.post('/users', authMiddleware, rbacMiddleware(USER_ACCOUNT_ROLES), validate(
     // PATCH /users/:userId/reports-to, where the target user already has
     // its own place in an existing chain). Still has to actually exist.
     if (reports_to) {
+      if (hierarchy.ADMIN_ROLES.includes(r.name)) {
+        return res.status(400).json({ error: 'Admins are the top of the reporting hierarchy and cannot be given a reporting head' });
+      }
       const headRow = await pool.query('SELECT id FROM users WHERE id=$1', [reports_to]);
       if (!headRow.rows.length) return res.status(400).json({ error: 'reports_to user not found' });
     }
@@ -951,9 +954,12 @@ app.patch('/users/:userId/reports-to', authMiddleware, rbacMiddleware(USER_ADMIN
   const { reports_to } = req.body;
   if (reports_to === userId) return res.status(400).json({ error: 'A user cannot report to themselves' });
   try {
-    const target = await pool.query('SELECT id FROM users WHERE id=$1', [userId]);
+    const target = await pool.query('SELECT id, role FROM users WHERE id=$1', [userId]);
     if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
     if (reports_to) {
+      if (hierarchy.ADMIN_ROLES.includes(target.rows[0].role)) {
+        return res.status(400).json({ error: 'Admins are the top of the reporting hierarchy and cannot be given a reporting head' });
+      }
       const head = await pool.query('SELECT id FROM users WHERE id=$1', [reports_to]);
       if (!head.rows.length) return res.status(400).json({ error: 'reports_to user not found' });
       if (await hierarchy.wouldCreateCycle(pool, userId, reports_to)) {
@@ -1419,9 +1425,8 @@ app.get('/leads', authMiddleware, async (req, res) => {
       params.push(req.query.product_id);
       conditions.push(`product_id = $${params.length}`);
     } else if (effective !== null) {
-      if (!effective.length) return res.json([]);
       params.push(effective);
-      conditions.push(`product_id = ANY($${params.length}::uuid[])`);
+      conditions.push(`(product_id = ANY($${params.length}::uuid[]) OR product_id IS NULL)`);
     }
 
     if (req.query.channel) {
@@ -1444,16 +1449,21 @@ app.get('/leads', authMiddleware, async (req, res) => {
 
 // True if the caller can see/act on this specific lead: a company-wide
 // Admin always can; anyone else needs the lead's product to be in their
-// effective product set (a lead with no product_id at all - e.g. a CSV
-// import never assigned to one - is Admin-only, same fail-closed default
-// as everywhere else here), and, within an accessible product, either
-// Manager-level visibility (sees every lead there) or the lead being
-// assigned specifically to them.
+// effective product set WHEN the lead has one (a lead with no product_id
+// at all - e.g. a CSV import where no product was picked - has no
+// product boundary to check, so it's treated like an in-scope lead); and,
+// once past that, either Manager-level visibility (sees every lead there)
+// or the lead being assigned specifically to them.
 async function canAccessLead(req, lead) {
   if (hierarchy.ADMIN_ROLES.includes(req.user.role)) return true;
-  if (!lead.product_id) return false;
-  const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
-  if (effective !== null && !effective.includes(lead.product_id)) return false;
+  if (lead.product_id) {
+    const effective = await hierarchy.resolveEffectiveProductIds(pool, req.user.id);
+    if (effective !== null && !effective.includes(lead.product_id)) return false;
+  }
+  // A lead with no product_id (e.g. a CSV upload where no product was
+  // picked) has no product boundary to enforce - same reasoning as
+  // GET /leads above. It falls straight through to the Manager/assigned-to
+  // check below, exactly like an in-scope lead would.
   if (LEAD_MANAGER_ROLES.includes(req.user.role)) return true;
   return lead.assigned_to === req.user.id;
 }

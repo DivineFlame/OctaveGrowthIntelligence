@@ -8,7 +8,7 @@
 // shipped with.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { userClaims, hasRoleOrFlag, canGrantRole } = require('../src/rbac');
+const { userClaims, hasRoleOrFlag, canGrantRole, ELEVATED_ROLES } = require('../src/rbac');
 
 test('userClaims shapes only the expected fields and coerces booleans', () => {
   const claims = userClaims({
@@ -51,10 +51,9 @@ test('hasRoleOrFlag allows a role outside the list when its per-role flag is set
 });
 
 test('canGrantRole blocks a non-Super-Admin from granting the Super Admin role', () => {
-  // Regression test for the privilege-escalation fix this closed - even
-  // with multi-tenancy removed, IT_ADMIN and DEPT_ADMIN share
-  // USER_MANAGER_ROLES with SUPER_ADMIN (so they can manage users at all),
-  // and without this check either could still mint themselves or an
+  // Regression test for the original privilege-escalation fix this
+  // closed - even with multi-tenancy removed, IT_ADMIN could still call
+  // POST /users, and without this check could mint themselves or an
   // accomplice the company's single top role.
   assert.equal(canGrantRole('IT_ADMIN', 'SUPER_ADMIN'), false);
   assert.equal(canGrantRole('DEPT_ADMIN', 'SUPER_ADMIN'), false);
@@ -65,13 +64,31 @@ test('canGrantRole allows a Super Admin to grant the Super Admin role', () => {
   assert.equal(canGrantRole('SUPER_ADMIN', 'SUPER_ADMIN'), true);
 });
 
-test('canGrantRole allows granting any non-Super-Admin role regardless of caller', () => {
-  // IT_ADMIN already has the same permission flags as SUPER_ADMIN in the
-  // roles table, so IT_ADMIN granting IT_ADMIN (or any other role) doesn't
-  // cross a privilege boundary the way minting a SUPER_ADMIN does - only
-  // the SUPER_ADMIN role itself is gated.
-  for (const role of ['IT_ADMIN', 'DEPT_ADMIN', 'APPROVER', 'CONTENT_CREATOR', 'HR_ADMIN', 'SALES_LEAD']) {
+test('ELEVATED_ROLES pins the exact set canGrantRole treats as elevated (keep in sync with server.js\'s USER_ADMIN_ROLES + DEPT_ADMIN)', () => {
+  assert.deepEqual([...ELEVATED_ROLES].sort(), ['DEPT_ADMIN', 'IT_ADMIN', 'SUPER_ADMIN']);
+});
+
+test('canGrantRole: only SUPER_ADMIN/IT_ADMIN can grant an elevated role (SUPER_ADMIN/IT_ADMIN/DEPT_ADMIN)', () => {
+  // Regression test for the gap the user-hierarchy feature would
+  // otherwise open: HR_ADMIN was added to POST /users' allowed callers
+  // (USER_ACCOUNT_ROLES) so HR can do its one stated job ("User
+  // Creation") - but HR_ADMIN must not be able to mint a brand-new
+  // IT_ADMIN or DEPT_ADMIN ("Manager") account just because it can call
+  // the route at all.
+  for (const elevated of ELEVATED_ROLES) {
+    assert.equal(canGrantRole('SUPER_ADMIN', elevated), true, `SUPER_ADMIN should be able to grant ${elevated}`);
+    // SUPER_ADMIN itself stays gated by the separate, stricter rule above
+    // (only a Super Admin can grant Super Admin) - IT_ADMIN can grant the
+    // other two elevated roles (IT_ADMIN, DEPT_ADMIN) but not that one.
+    assert.equal(canGrantRole('IT_ADMIN', elevated), elevated !== 'SUPER_ADMIN', `IT_ADMIN granting ${elevated}`);
+    assert.equal(canGrantRole('HR_ADMIN', elevated), false, `HR_ADMIN must not be able to grant ${elevated}`);
+    assert.equal(canGrantRole('DEPT_ADMIN', elevated), false, `DEPT_ADMIN must not be able to grant ${elevated}`);
+  }
+});
+
+test('canGrantRole allows granting any non-elevated role regardless of caller', () => {
+  for (const role of ['APPROVER', 'CONTENT_CREATOR', 'HR_ADMIN', 'SALES_LEAD']) {
     assert.equal(canGrantRole('IT_ADMIN', role), true, `IT_ADMIN should be able to grant ${role}`);
-    assert.equal(canGrantRole('DEPT_ADMIN', role), true, `DEPT_ADMIN should be able to grant ${role}`);
+    assert.equal(canGrantRole('HR_ADMIN', role), true, `HR_ADMIN should be able to grant ${role}`);
   }
 });

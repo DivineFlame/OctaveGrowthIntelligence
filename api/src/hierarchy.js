@@ -8,9 +8,13 @@
 // api/src/db.js directly, so tests can pass a fake in-memory one instead
 // of needing a real Postgres connection.
 //
-// Kept in sync with server.js's own PRODUCT_ADMIN_ROLES: these are the
-// roles that bypass the reporting chain entirely and see every product
-// unconditionally, same as today.
+// The company-wide Admins: the only roles that bypass the reporting
+// chain entirely and see/manage every product unconditionally. server.js
+// imports this directly (as hierarchy.ADMIN_ROLES) rather than keeping
+// its own copy, so there's exactly one source of truth for "who's an
+// Admin" across product access, lead access, and user/reports-to admin
+// rights (USER_ADMIN_ROLES there is this set plus DEPT_ADMIN, since a
+// Manager keeps lead-management rights but not these).
 const ADMIN_ROLES = ['SUPER_ADMIN', 'IT_ADMIN'];
 
 // Guards against a corrupted or (despite wouldCreateCycle being enforced

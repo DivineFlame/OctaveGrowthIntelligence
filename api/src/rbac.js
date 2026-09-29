@@ -33,19 +33,37 @@ function hasRoleOrFlag(userRole, allowedRoles, flagValue) {
   return allowedRoles.includes(userRole) || !!flagValue;
 }
 
+// "Elevated" roles - the two company-wide Admins (SUPER_ADMIN/IT_ADMIN)
+// plus DEPT_ADMIN (Manager, who gets real authority over whichever
+// product(s) they're a member of via product_members). Mirrors
+// USER_ADMIN_ROLES + DEPT_ADMIN in server.js - kept as a plain array here
+// rather than imported, to avoid a require cycle between rbac.js and
+// server.js; if that set changes there, update this one too (rbac.test.js
+// pins the exact set so a drift shows up as a failing test).
+const ELEVATED_ROLES = ['SUPER_ADMIN', 'IT_ADMIN', 'DEPT_ADMIN'];
+
 // True if `callerRole` is allowed to grant `targetRoleName` to someone
-// (via POST /users or PATCH /users/:userId/role). Only a Super Admin can
-// grant the Super Admin role - kept as a safety rule even after removing
-// multi-tenancy (see README "Hardening notes" - this originally closed a
-// cross-tenant privilege-escalation bug; with one company left, the same
-// check still stops IT_ADMIN/DEPT_ADMIN from minting themselves or an
-// accomplice the top role). Every other role transition (including
-// IT_ADMIN/DEPT_ADMIN granting each other's roles) is left to the
-// caller's existing USER_MANAGER_ROLES check, since the roles table
-// already gives IT_ADMIN the same permission flags as SUPER_ADMIN.
+// (via POST /users or PATCH /users/:userId/role). Two rules:
+//  1. Only a Super Admin can grant the Super Admin role - kept as a
+//     safety rule even after removing multi-tenancy (see README
+//     "Hardening notes" - this originally closed a cross-tenant
+//     privilege-escalation bug; with one company left, the same check
+//     still stops IT_ADMIN from minting themselves or an accomplice the
+//     top role).
+//  2. Only SUPER_ADMIN/IT_ADMIN can grant any ELEVATED_ROLES value at all
+//     (including DEPT_ADMIN/"Manager"). This closes a gap the
+//     user-hierarchy feature would otherwise open: HR_ADMIN was added to
+//     POST /users' allowed callers so HR can do its one stated job ("User
+//     Creation"), but HR_ADMIN is a much lower-privileged role than the
+//     old USER_MANAGER_ROLES set that used to gate this route - without
+//     this check, HR could mint a brand-new IT_ADMIN or DEPT_ADMIN
+//     account outright. Granting any *non*-elevated role (HR_ADMIN,
+//     SALES_LEAD, CONTENT_CREATOR, APPROVER) is unrestricted by caller,
+//     same as before.
 function canGrantRole(callerRole, targetRoleName) {
   if (targetRoleName === 'SUPER_ADMIN' && callerRole !== 'SUPER_ADMIN') return false;
+  if (ELEVATED_ROLES.includes(targetRoleName) && !['SUPER_ADMIN', 'IT_ADMIN'].includes(callerRole)) return false;
   return true;
 }
 
-module.exports = { userClaims, hasRoleOrFlag, canGrantRole };
+module.exports = { userClaims, hasRoleOrFlag, canGrantRole, ELEVATED_ROLES };

@@ -118,7 +118,7 @@ const CHANNEL_ICONS = {
   linkedin: Linkedin,
   youtube: Youtube,
   email: Mail,
-  quora: Globe,
+  web_form: FileText,
 };
 
 function ChannelList({ channels, active, onSelect }) {

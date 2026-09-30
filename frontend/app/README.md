@@ -82,5 +82,7 @@ Every screen in this app calls the real API (`GET /products`,
 `POST /content/variants/:id/approve`, `GET /leads`, `GET /integrations`) -
 there is no mock/demo data. The per-channel spec chips are driven by
 whatever `GET /channels/spec` actually returns (including `implemented:
-false` for channels that don't publish yet, e.g. YouTube/Quora - see the
-root README's "Hardening notes"), not hardcoded flavor text.
+false` for a channel that will never publish, e.g. Website Web Form, which
+is inbound-only by design and deliberately excluded from the content
+picker's own channel list even though it's in the spec - see the root
+README's "Branding"/"Hardening notes"), not hardcoded flavor text.

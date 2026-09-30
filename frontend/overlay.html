@@ -340,9 +340,10 @@
           '<div class="oc-card">' +
             brandImgTag('oc-logo', 'Company logo', '/octave-logo.png', null) +
             '<h1>' + (isSignup ? 'Create Admin Account' : 'Sign In') + '</h1>' +
-            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and your company' : 'Sign in to your company') + '</p>' +
+            '<p class="oc-sub">' + (isSignup ? 'One-time setup — this creates the first account and sets up your company' : 'Sign in to your company') + '</p>' +
             '<form id="oc-auth-form">' +
               (isSignup ? '<label for="oc-company">Company Name</label><input id="oc-company" placeholder="Your company" required>' : '') +
+              (isSignup ? '<label for="oc-company-logo">Company Logo (optional)</label><input id="oc-company-logo" type="file" accept="image/png,image/jpeg,image/webp">' : '') +
               '<label for="oc-email">Email</label>' +
               '<input id="oc-email" type="email" required>' +
               '<label for="oc-password">Password</label>' +
@@ -396,6 +397,24 @@
               throw new Error((authData && authData.error) || (isSignup ? 'Signup failed' : 'Login failed'));
             }
             var session = { apiBase: apiBase, token: authData.token, refresh: authData.refresh, user: authData.user, company: null };
+            // Company setup happens right here at first-user creation, not
+            // as a separate later trip to Admin > Company: signup already
+            // collects the company name above, and if an Admin also picked
+            // a logo file, upload it now using the session token signup
+            // just issued, before the app ever renders. A failed upload
+            // doesn't block account creation either way - the account and
+            // company row already exist by this point, and the logo can
+            // always be added later from Admin > Company.
+            var logoInput = isSignup ? document.getElementById('oc-company-logo') : null;
+            if (logoInput && logoInput.files && logoInput.files[0]) {
+              try {
+                var logoForm = new FormData();
+                logoForm.append('logo', logoInput.files[0]);
+                await fetch(apiBase.replace(/\/$/,'') + '/company/logo', {
+                  method: 'POST', headers: { Authorization: 'Bearer ' + authData.token }, body: logoForm
+                });
+              } catch(logoErr) { /* non-fatal - account/company already exist; add the logo later from Admin > Company */ }
+            }
             var companyRes = await fetch(apiBase.replace(/\/$/,'') + '/company', { headers: { Authorization: 'Bearer ' + authData.token } });
             if (companyRes.ok) session.company = await companyRes.json();
             saveSession(session);
@@ -656,7 +675,7 @@
       }
 
       function renderStep3(){
-        var channels = ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'];
+        var channels = ['whatsapp','facebook','instagram','linkedin','youtube','web_form','email'];
         wrap.innerHTML =
           '<div class="oc-panel">' +
             steps(2) +
@@ -1071,7 +1090,7 @@
         // separately-built widget this tab now supersedes) with the actual
         // API surface (POST /content/upload, POST /content/:assetId/transform,
         // POST /content/variants/:variantId/approve, GET /products/:id/content).
-        var CONTENT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+        var CONTENT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'email']; // web_form is inbound-only (see api/src/channels.js) - nothing to generate a content variant for
         var canApproveContent = ['SUPER_ADMIN', 'APPROVER', 'DEPT_ADMIN', 'IT_ADMIN'].indexOf(session.user.role) !== -1 || !!session.user.can_approve_content;
 
         function fmtBytes(n){

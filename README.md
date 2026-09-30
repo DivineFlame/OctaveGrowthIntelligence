@@ -48,8 +48,9 @@ Fixed: docker-compose builds from ./api, ./hermes, ./paperclip locally, no exter
 
 > **Channel publishing is now real**, for Email, WhatsApp Business,
 > Facebook, Instagram, and LinkedIn (see `api/src/channels.js`) - YouTube
-> and Quora remain documented placeholders (YouTube needs a meaningfully
-> different upload protocol; Quora has no public posting API at all).
+> remains a documented placeholder (it needs a meaningfully different
+> upload protocol) and Website Web Form is permanently inbound-only (see
+> "Channels" below) - neither is a gap to eventually fill for publishing.
 > Configure credentials per-channel from Products > Channels in the
 > frontend (fields are channel-specific - WhatsApp needs a phone number ID
 > + access token, Email needs SMTP details, etc; secrets are encrypted at
@@ -194,7 +195,7 @@ Full hierarchy - company-wide (single company, no tenant scoping):
   below) and adds `MEMBER` users to run them (`POST /products/:id/members`
   with `role: "MEMBER"`) — any Admin role can do all of this too, for any
   product company-wide. Every product gets all 7 channels
-  (`whatsapp, facebook, instagram, linkedin, youtube, quora, email`)
+  (`whatsapp, facebook, instagram, linkedin, youtube, web_form, email`)
   pre-created as `not_configured` the moment it's created (`POST /products`
   does this in the same transaction as the product insert) — they're
   independent from every other product's channel rows (`UNIQUE(product_id,
@@ -319,7 +320,7 @@ POST /webhooks/<webhook_secret>/<channel>
 ```
 
 `<channel>` is one of `whatsapp, facebook, instagram, linkedin, youtube,
-quora, email`. The secret is embedded in the path rather than a header
+web_form, email`. The secret is embedded in the path rather than a header
 because most of these platforms' webhook config UIs only accept a plain
 callback URL. A request with a wrong or missing secret gets `401`; an
 unknown channel gets `404`.
@@ -340,6 +341,41 @@ plus Sarvam AI inquiry classification if `SARVAM_API_KEY` is set (see
 synchronously in the request itself (nothing is queued to Hermes for this
 any more - see "Hardening notes" on why the old `webhook:incoming`/
 `lead_intake` auto-run-agent path was removed).
+
+### Website Web Form channel (`web_form`)
+
+Replaces the old permanent "Quora" placeholder channel (Quora had no
+public API to ever build against; a website contact form is a real,
+useful inbound channel instead - see `postgres/migrate-web-form-channel.sql`
+for existing databases). Unlike every other channel above, `web_form` is
+meant to be POSTed to directly from a visitor's own browser - a plain
+`<form method="POST" action="...">` on your own website, no JavaScript or
+server-to-server integration required - and it's inbound-only: there is no
+publishing API for a web form, so `api/src/channels.js` marks it
+`implemented: false` and it's deliberately excluded from Studio's content
+pipeline (`schemas.transformContent`'s channel enum, and the content
+picker's own channel list in both frontends) even though it's a normal,
+configurable member of `PRODUCT_CHANNELS`.
+
+Configure it per-product from Products > Channels like any other channel -
+both fields are optional:
+
+- **Thank-you page URL** (`redirect_url`) - a plain, no-JavaScript `<form>`
+  submit navigates the visitor's browser to whatever this route returns;
+  set this so they land on a real page instead of raw JSON. The redirect
+  is a `303` (not `302`), so refreshing the thank-you page never re-submits
+  the form.
+- **Allowed website origin** (`allowed_origin`) - when set, a submission
+  whose `Origin`/`Referer` host doesn't match is rejected with `403`, so
+  the webhook URL embedded in your site's HTML can't be trivially copied
+  and reused to spam leads in from an unrelated site.
+
+Point the form's fields at the same flat body every other channel's
+webhook already accepts: `company`, `name`, `phone`, `email`, `message`,
+and (to route it to a specific product) `product_id` - either
+`application/x-www-form-urlencoded`/`multipart/form-data` (a real HTML
+form) or JSON (a JS-driven one) works, on both the main app and the
+separate webhook server (`WEBHOOK_PORT`).
 
 ## Virus scanning (ClamAV)
 
@@ -404,9 +440,19 @@ separate from the customer's company branding covered next.
 ### Company Settings (logo + name)
 
 Since this app is single-tenant (exactly one `company` row), branding is a
-company-wide setting rather than a per-user preference. An Admin
-(`SUPER_ADMIN`/`IT_ADMIN`, `hierarchy.ADMIN_ROLES`) can rename the company
-and upload/remove its logo from a **Company** tab in the Admin panel:
+company-wide setting rather than a per-user preference. Company setup
+happens at first-user creation: the signup screen (`POST /auth/signup`)
+already collected the company name before this feature existed, and now
+also offers an optional logo file - if one is picked, the freshly-created
+Admin's own new session token uploads it via `POST /company/logo`
+immediately after signup succeeds, before the app ever renders, so a fresh
+install can be fully branded in the same one-time setup step instead of a
+separate trip to Admin > Company afterward. That upload is best-effort
+and never blocks account creation - the account and company row already
+exist by the time it runs, and a logo skipped at signup (or a failed
+upload) can always be added later. An Admin (`SUPER_ADMIN`/`IT_ADMIN`,
+`hierarchy.ADMIN_ROLES`) can also rename the company and upload/remove its
+logo at any time afterward from a **Company** tab in the Admin panel:
 
 - `PATCH /company` — updates `company.name` (Admin-only).
 - `POST /company/logo` — uploads a new logo (Admin-only, `multer`
@@ -1984,3 +2030,37 @@ code changes were needed.
   using a real tiny PNG upload, plus a member-403 check on the upload
   route.
 - Full unit suite passes (150/150); `npm run build` succeeds.
+
+
+## Website Web Form channel, and Company Setup moved to first-user creation
+
+- **Removed the permanent "Quora" placeholder channel and replaced it with
+  a real one: Website Web Form.** Quora was evaluated once already (see
+  the entry above) and confirmed to have no public posting API at all -
+  it could never do anything beyond sit in `product_channels` as a
+  perpetually-`not_configured` row. A website contact form is a real,
+  useful inbound lead source that fits the exact same "channel" slot, so
+  it replaces Quora everywhere: `api/src/channels.js` (`CHANNEL_SPECS`),
+  `PRODUCT_CHANNELS`/`INTEGRATION_CHANNELS` (`server.js`), both frontends'
+  channel lists/icon maps, and `paperclip/transformer.py`'s `SPECS`.
+  `postgres/migrate-web-form-channel.sql` cleans up existing databases
+  (drops `quora` `product_channels` rows, backfills `web_form` ones) -
+  historical `content_variants` rows with `channel='quora'` are left alone
+  as an immutable log of what was actually generated in the past.
+- **Website Web Form is inbound-only by design**, unlike every other
+  channel - see "Website Web Form channel" above for the full route/config
+  breakdown (redirect_url/allowed_origin, the flat body it accepts, why
+  it's deliberately excluded from Studio's content-publish pickers even
+  though it's a normal `PRODUCT_CHANNELS` member).
+- **Company setup (name + logo) now happens at first-user creation**
+  instead of requiring a separate post-login trip to Admin > Company - see
+  "Company Settings" above. The signup screen already collected the
+  company name; it now also offers an optional logo upload, sent
+  immediately after signup succeeds using the session token signup itself
+  just issued.
+- Extended `api/test/channels.test.js` for `web_form` (validation is a
+  no-op with no config, accepts its optional fields, `publishToChannel`
+  still refuses it exactly like it refused `quora`) and added a test
+  pinning that `web_form` is structurally excluded from
+  `schemas.transformContent`'s channel enum.
+- Full unit suite passes (152/152); `npm run build` succeeds.

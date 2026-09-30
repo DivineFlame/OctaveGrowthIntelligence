@@ -25,7 +25,7 @@ const CHANNEL_ICONS = {
   linkedin: Linkedin,
   youtube: Youtube,
   email: Mail,
-  quora: Globe,
+  web_form: FileText,
 };
 
 function fileIcon(mimeType) {
@@ -44,7 +44,12 @@ function formatBytes(n) {
 }
 
 function ChannelPicker({ spec, selected, onToggle }) {
-  const channels = Object.entries(spec || {});
+  // web_form is inbound-only (a website contact form has nothing to
+  // "publish" to) - it's a real, configurable channel elsewhere (Products
+  // > Channels, the Inbox), but there's nothing for this content-publish
+  // picker to offer for it, so it's excluded here rather than shown as a
+  // permanently-disabled "soon" tile that could never make sense to turn on.
+  const channels = Object.entries(spec || {}).filter(([key]) => key !== 'web_form');
   if (!channels.length) return null;
   return (
     <div className="flex flex-wrap gap-2">

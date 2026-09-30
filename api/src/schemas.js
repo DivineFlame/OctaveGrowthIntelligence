@@ -56,7 +56,7 @@ const schemas = {
   // route (POST /internal/content-variants/:variantId/publish) can never
   // find the matching product_channels row for it.
   transformContent: z.object({
-    channels: z.array(z.enum(['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'])).min(1).max(7).optional()
+    channels: z.array(z.enum(['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'email'])).min(1).max(6).optional() // web_form is inbound-only (see api/src/channels.js) - nothing to generate a content variant for, so it's deliberately not a valid transform target
   }),
   replyToLead: z.object({
     body: z.string().trim().min(1).max(5000),

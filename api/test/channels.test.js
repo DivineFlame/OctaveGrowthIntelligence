@@ -32,14 +32,21 @@ test('validateChannelConfig rejects an unknown channel', () => {
   assert.throws(() => validateChannelConfig('carrier_pigeon', {}), /Unknown channel: carrier_pigeon/);
 });
 
-test('validateChannelConfig is a no-op for quora (permanently unimplemented)', () => {
-  // Configuring an unimplemented channel is allowed to save a row - it's
-  // only publishToChannel that refuses to actually send anything - so
-  // validation must not throw here even with an empty config. youtube
-  // used to be included in this test before it was implemented; now that
-  // it has real required fields, an empty config correctly throws (see
-  // the next test) just like any other implemented channel.
-  assert.doesNotThrow(() => validateChannelConfig('quora', {}));
+test('validateChannelConfig is a no-op for web_form (inbound-only, no publish path)', () => {
+  // Configuring an unimplemented (for publishing) channel is allowed to
+  // save a row - it's only publishToChannel that refuses to actually send
+  // anything - so validation must not throw here even with an empty
+  // config. web_form's fields (redirect_url/allowed_origin) are both
+  // optional, so an empty config is valid too - there's nothing "required"
+  // about setting up a website form. youtube used to be included in this
+  // test before it was implemented; now that it has real required fields,
+  // an empty config correctly throws (see the next test) just like any
+  // other implemented channel.
+  assert.doesNotThrow(() => validateChannelConfig('web_form', {}));
+});
+
+test('validateChannelConfig accepts web_form with its optional redirect_url/allowed_origin fields set', () => {
+  assert.doesNotThrow(() => validateChannelConfig('web_form', { redirect_url: 'https://example.com/thanks', allowed_origin: 'https://example.com' }));
 });
 
 test('validateChannelConfig treats youtube like any other implemented channel - empty config is rejected', () => {
@@ -136,11 +143,11 @@ test('publishToChannel refuses an unimplemented channel with a clear error, neve
   // This is the exact bug class this codebase's README documents fixing
   // elsewhere (Paperclip's old /transform endpoint used to fabricate a
   // fake success response) - this test pins the honest-failure behavior
-  // for quora (permanently unimplemented - Quora has no posting API) so
-  // it can't quietly regress into a fake success. youtube used to be
-  // pinned here too before it was implemented - see the youtube-specific
-  // tests below instead.
-  return assert.rejects(() => publishToChannel('quora', { config: {} }), /not implemented yet/);
+  // for web_form (inbound-only by design - there is no API to publish
+  // content to a website contact form) so it can't quietly regress into a
+  // fake success. youtube used to be pinned here too before it was
+  // implemented - see the youtube-specific tests below instead.
+  return assert.rejects(() => publishToChannel('web_form', { config: {} }), /not implemented yet/);
 });
 
 // --- WhatsApp via Vobiz --------------------------------------------------
@@ -496,17 +503,33 @@ test('CHANNEL_SPECS keys match the channel vocabulary the rest of the app assume
   // disconnected vocabularies (e.g. 'instagram-feed' vs 'instagram'), so a
   // generated variant's channel could never match a product_channels row
   // and publishing would silently never find its config. This pins the
-  // canonical channel list (also hardcoded as PRODUCT_CHANNELS and the
-  // transformContent zod schema in server.js, and SPECS in
-  // paperclip/transformer.py - see the comments there for why it can't
-  // just import this list directly) so a future change to one without the
-  // others fails a test instead of failing silently in production.
-  const expected = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+  // canonical channel list (also hardcoded as PRODUCT_CHANNELS in
+  // server.js) so a future change to one without the other fails a test
+  // instead of failing silently in production. Deliberately NOT the same
+  // set as the transformContent zod schema/Paperclip SPECS any more -
+  // web_form is a real, configurable channel (PRODUCT_CHANNELS/
+  // CHANNEL_SPECS) but is inbound-only, so it's excluded from both of
+  // those content-publish-only lists - see the next test.
+  const expected = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'web_form', 'email'];
   assert.deepEqual(
     Object.keys(CHANNEL_SPECS).sort(),
     [...expected].sort(),
-    'CHANNEL_SPECS must define exactly the channels PRODUCT_CHANNELS/transformContent/Paperclip SPECS also assume'
+    'CHANNEL_SPECS must define exactly the channels PRODUCT_CHANNELS also assumes'
   );
+});
+
+test('CHANNEL_SPECS.web_form is deliberately excluded from content-publish targets (inbound-only channel)', () => {
+  // web_form belongs in CHANNEL_SPECS/PRODUCT_CHANNELS (it's a real,
+  // configurable channel with its own fields) but must never be one of the
+  // channels a content upload can be transformed/published to - there is
+  // no "publish an image to a website contact form" operation. This is
+  // enforced structurally by api/src/schemas.js's transformContent schema
+  // simply not listing it, not by anything in channels.js itself - this
+  // test exists so an accidental future addition of web_form back into
+  // that schema doesn't slip by unnoticed.
+  const schemas = require('../src/schemas');
+  const parsed = schemas.transformContent.safeParse({ channels: ['web_form'] });
+  assert.equal(parsed.success, false, 'transformContent must reject web_form as a publish target');
 });
 
 test('every implemented channel spec\'s secret fields are a subset of its declared fields', () => {

@@ -4,19 +4,23 @@ import os, uuid
 
 app = FastAPI(title="Paperclip Transformer", version="4.1.0")
 
-# Keyed by the same channel names api/src/server.js's PRODUCT_CHANNELS uses
-# (and validates content_variants.channel against) - so a variant's channel
-# always has a spec here. One canonical target size per channel for now
-# (not the full multi-crop set some channels can technically take, e.g.
-# Instagram feed + portrait + reels) - a real, working single resize per
-# channel rather than a bigger multi-output job this pass doesn't cover.
+# Keyed by the same channel names api/src/schemas.js's transformContent
+# schema accepts (a strict subset of api/src/server.js's PRODUCT_CHANNELS -
+# see the comment there) - so a variant's channel always has a spec here.
+# web_form is intentionally absent: it's a real, configurable channel
+# (api/src/channels.js), but it's inbound-only - a website contact form has
+# nothing to resize an image for - so no content variant is ever generated
+# for it and it never reaches this service. One canonical target size per
+# channel for now (not the full multi-crop set some channels can technically
+# take, e.g. Instagram feed + portrait + reels) - a real, working single
+# resize per channel rather than a bigger multi-output job this pass
+# doesn't cover.
 SPECS = {
     "whatsapp": {"width": 1080, "height": 1080},
     "facebook": {"width": 1200, "height": 628},
     "instagram": {"width": 1080, "height": 1080},
     "linkedin": {"width": 1200, "height": 627},
     "youtube": {"width": 1280, "height": 720},
-    "quora": {"width": 1200, "height": 675},
     "email": {"width": 1200, "height": 600},
 }
 

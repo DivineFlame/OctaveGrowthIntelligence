@@ -24,9 +24,17 @@
 //     access token - see publishYouTube() and CHANNEL_SPECS.youtube.help),
 //     obtained once via Google's OAuth consent flow for the channel-owning
 //     account, outside this app.
-//   - quora: NOT implemented, and can't be - as of this writing, Quora has
-//     no public API for posting content at all. This channel stays a
-//     manual/placeholder entry permanently, not a gap to eventually fill.
+//   - web_form: inbound-only by design - there is nothing to "publish" to
+//     a website contact form, so it stays implemented: false here exactly
+//     like quora used to (Studio's content pipeline correctly shows it as
+//     not-yet-implemented for publishing). Its real value is on the
+//     inbound side: the generic webhook handler in server.js already
+//     accepts a flat POST body (company/name/phone/email/message) for any
+//     channel in INTEGRATION_CHANNELS, so wiring a plain HTML <form> on a
+//     customer's own website straight at that URL turns every submission
+//     into a lead - no JS, no publishing API, required. Its config fields
+//     below (redirect_url/allowed_origin) exist purely to make that real
+//     website-embedded form usable, not to gate any outbound publish path.
 
 const fs = require('fs');
 
@@ -120,11 +128,14 @@ const CHANNEL_SPECS = {
     ],
     help: 'Uses the YouTube Data API v3 resumable upload protocol. Create an OAuth 2.0 Client ID in Google Cloud Console (Desktop app type is simplest) with the YouTube Data API v3 enabled, then run Google\'s OAuth consent flow once (with offline access) for the channel-owning Google account to get a refresh_token - store that here, not a short-lived access token, since access tokens expire in about an hour and this app refreshes one automatically on every publish. Only accepts video files; publishing a non-video asset to this channel fails with a clear error before any API call is made.'
   },
-  quora: {
-    label: 'Quora',
+  web_form: {
+    label: 'Website Web Form',
     implemented: false,
-    fields: [],
-    help: 'Cannot be implemented - Quora has no public API for posting content. This channel is permanently manual/placeholder.'
+    fields: [
+      { key: 'redirect_url', label: 'Thank-you page URL (redirect visitors here after they submit - leave blank to return JSON instead, e.g. for a JS-driven form)', required: false },
+      { key: 'allowed_origin', label: "Allowed website origin (optional - restricts submissions to this site, e.g. https://www.example.com)", required: false }
+    ],
+    help: 'Point your website\'s contact/inquiry form at this channel\'s webhook URL (Admin > Webhooks) with fields named company, name, phone, email, and message - Content-Type can be either JSON or a plain HTML form POST (application/x-www-form-urlencoded/multipart), both are accepted. Each submission becomes a new lead in the Inbox, enriched and classified exactly like any other channel. Set a thank-you page URL above so a plain, no-JavaScript <form> redirects visitors somewhere sensible instead of showing them the raw JSON response; set an allowed origin to reject submissions that did not come from your site. This channel is inbound-only - there is no publishing API for a web form, so Studio\'s content pipeline correctly shows it as not implemented.'
   }
 };
 

@@ -37,6 +37,7 @@ const MIGRATIONS_IN_ORDER = [
   'migrate-lead-email-threading.sql',
   'migrate-user-hierarchy.sql',
   'migrate-company-logo.sql',
+  'migrate-web-form-channel.sql',
   // Collapses multi-tenancy down to a single company (see README.md
   // "Hardening notes" and this file's own header comment) - runs last
   // since it depends on every table/column every earlier migration

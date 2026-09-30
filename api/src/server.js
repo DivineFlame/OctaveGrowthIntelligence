@@ -1195,7 +1195,7 @@ app.post('/users/:userId/reset-password', authMiddleware, rbacMiddleware(USER_AD
 // is plain view/use access to a product already assigned to someone
 // upstream - see hasProductAccess() below, backed by
 // hierarchy.resolveEffectiveProductIds().
-const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+const PRODUCT_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'web_form', 'email'];
 
 async function getProductMembership(productId, userId) {
   const { rows } = await pool.query('SELECT role FROM product_members WHERE product_id=$1 AND user_id=$2', [productId, userId]);
@@ -2060,7 +2060,7 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
 // Content - Transform via Paperclip (YouTube, IG, etc.)
 app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transformContent), async (req, res) => {
   const { assetId } = req.params;
-  const { channels } = req.body; // ['whatsapp','facebook','instagram','linkedin','youtube','quora','email'] - must match PRODUCT_CHANNELS
+  const { channels } = req.body; // ['whatsapp','facebook','instagram','linkedin','youtube','email'] - web_form is inbound-only (see schemas.transformContent), so it's deliberately excluded here even though it's a member of PRODUCT_CHANNELS
   try {
     const asset = await pool.query('SELECT * FROM content_assets WHERE id=$1', [assetId]);
     if (!asset.rows.length) return res.status(404).json({ error: 'Asset not found' });
@@ -2077,7 +2077,6 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
       'instagram': '1080x1080 feed / 1080x1350 portrait / 1080x1920 reels',
       'linkedin': '1200x627 doc 1080x1350 text<=3000',
       'youtube': '1920x1080 thumbnail 1280x720 title<=100',
-      'quora': 'text answer, optional 1200x675 image',
       'email': 'responsive HTML, hero 1200x600'
     };
 
@@ -2240,7 +2239,7 @@ app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN', 'IT_ADMIN'
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
 // Status/keys are read from this app's actual environment config — nothing here is simulated.
 // A channel with no <CHANNEL>_API_KEY env var set is honestly reported as not_configured.
-const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'quora', 'email'];
+const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'web_form', 'email'];
 
 app.get('/integrations', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   const channels = INTEGRATION_CHANNELS.map(name => {
@@ -2447,10 +2446,45 @@ async function handleInboundWebhook(req, res) {
     const message = sanitizeCSVValue(req.body.message || req.body.note || req.body.text || '');
     const productId = req.body.product_id || null;
 
+    // Website Web Form is the one channel meant to be POSTed to directly
+    // from a visitor's own browser (a plain HTML <form>), not
+    // server-to-server like every other webhook here - so, when this
+    // product has a web_form channel configured (product_channels), two
+    // extra, purely additive behaviors kick in:
+    //   - allowed_origin: reject (403) a submission whose Origin/Referer
+    //     host doesn't match, so the public form URL can't be trivially
+    //     reused to spam leads in from an unrelated site.
+    //   - redirect_url: a plain (no-JS) <form> submit navigates the
+    //     visitor's browser to this route's response - redirect them to a
+    //     real thank-you page instead of dumping raw JSON in their browser.
+    // Both are optional and additive - a web_form submission with neither
+    // configured behaves exactly like any other channel's webhook.
+    let webFormConfig = null;
+    if (channel === 'web_form' && productId) {
+      const wf = await pool.query(`SELECT config FROM product_channels WHERE product_id=$1 AND channel='web_form' LIMIT 1`, [productId]);
+      if (wf.rows.length) webFormConfig = wf.rows[0].config || {};
+    }
+    if (webFormConfig && webFormConfig.allowed_origin) {
+      const originHeader = req.headers.origin || req.headers.referer || '';
+      let originHost = '';
+      try { originHost = new URL(originHeader).host; } catch (e) { /* missing/unparseable - treated as not matching below */ }
+      let allowedHost = webFormConfig.allowed_origin;
+      try { allowedHost = new URL(webFormConfig.allowed_origin).host; } catch (e) { /* config saved without a scheme - compare as given */ }
+      if (!originHost || originHost !== allowedHost) {
+        return res.status(403).json({ error: 'Submission origin not allowed for this form' });
+      }
+    }
+
     const { leadId, isDuplicate, isInquiry } = await ingestInboundLead(
       { channel, companyName: company_name, contactName: contact_name, phone, email, message, productId, valueInr: value_inr },
       req
     );
+
+    if (webFormConfig && webFormConfig.redirect_url) {
+      // 303 (not 302) so the visitor's browser follows up with a GET,
+      // never re-POSTing the form body if they later refresh that page.
+      return res.redirect(303, webFormConfig.redirect_url);
+    }
 
     res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate, is_inquiry: isInquiry });
   } catch(e){ serverError(res, e); }
@@ -2550,6 +2584,14 @@ if (EMAIL_POLL_INTERVAL_MINUTES > 0) {
 const webhookApp = express();
 webhookApp.set('trust proxy', 1);
 webhookApp.use(express.json());
+// Also accept a plain HTML <form method="POST"> submit (application/x-www
+// -form-urlencoded, or multipart/form-data without a file field) - the
+// Website Web Form channel is meant to be pointed at directly from a
+// customer's own site with no JavaScript at all, and that's what a bare
+// <form> sends; the main app (see express.urlencoded() above) already
+// accepts this, so the separate webhook server needs the same to behave
+// identically regardless of which of the two a given deployment exposes.
+webhookApp.use(express.urlencoded({ extended: true }));
 webhookApp.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 const webhookServer = webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));

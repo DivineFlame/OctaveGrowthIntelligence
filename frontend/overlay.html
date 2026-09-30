@@ -118,6 +118,11 @@
     #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:var(--oc-border-1);color:var(--oc-text)}
     #oc-products .oc-upload-row{display:flex;gap:8px;align-items:center;margin-bottom:16px}
     #oc-products .oc-upload-row input[type=file]{flex:1;font-size:12px;padding:8px 10px;border-radius:8px;border:1px dashed var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text)}
+    #oc-products .oc-webform-embed{border:1px solid var(--oc-border-1);border-radius:10px;padding:12px 14px;margin-bottom:16px;background:var(--oc-card-bg-subtle)}
+    #oc-products .oc-webform-label{font-size:12px;color:var(--oc-dim-6);margin:0 0 8px}
+    #oc-products .oc-webform-url{display:block;font-size:11px;word-break:break-all;background:var(--oc-input-bg);border:1px solid var(--oc-border-12);border-radius:6px;padding:8px 10px;margin-bottom:10px}
+    #oc-products .oc-row{display:flex;gap:8px}
+    #oc-products .oc-secondary{padding:8px 14px;border-radius:999px;border:1px solid var(--oc-border-12);background:transparent;color:var(--oc-dim-7);font-weight:500;font-size:12px;cursor:pointer;font-family:inherit}
     #oc-products .oc-asset-card{border:1px solid var(--oc-border-08);border-radius:12px;padding:14px;margin-bottom:10px}
     #oc-products .oc-asset-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
     #oc-products .oc-asset-name{font-size:13px;font-weight:600}
@@ -1072,8 +1077,41 @@
               return '<tr><td>' + label + '</td><td>' + st + '</td></tr>';
             }).join('');
 
+            // Website Web Form is dedicated to this one product (its own
+            // form_token, not the shared company webhook secret every
+            // other channel above uses) - and it works from the moment
+            // the product exists, with no required fields - so, unlike
+            // every other channel, its embed URL/snippet is surfaced
+            // directly here rather than hidden behind "Configure a
+            // Channel" (which still works for editing its optional
+            // redirect_url/allowed_origin fields).
+            var webForm = configured['web_form'];
+            var webFormBlock = '';
+            if (webForm && webForm.config && webForm.config.form_token) {
+              var formUrl = session.apiBase.replace(/\/$/,'') + '/forms/' + webForm.config.form_token;
+              var snippet =
+                '<form method="POST" action="' + formUrl + '">\n' +
+                '  <input name="name" placeholder="Your name">\n' +
+                '  <input name="email" type="email" placeholder="Email">\n' +
+                '  <input name="phone" placeholder="Phone">\n' +
+                '  <textarea name="message" placeholder="How can we help?"></textarea>\n' +
+                '  <button type="submit">Send</button>\n' +
+                '</form>';
+              webFormBlock =
+                '<div class="oc-webform-embed">' +
+                  '<p class="oc-webform-label">This product\'s dedicated Website Web Form URL - leads submitted here are scoped to this product only:</p>' +
+                  '<code class="oc-webform-url">' + esc(formUrl) + '</code>' +
+                  '<div class="oc-row">' +
+                    '<button class="oc-secondary" id="oc-webform-copy" type="button">Copy embed code</button>' +
+                    '<button class="oc-secondary" id="oc-webform-rotate" type="button">Rotate token</button>' +
+                  '</div>' +
+                  '<div class="oc-msg" id="oc-webform-msg" style="display:none"></div>' +
+                '</div>';
+            }
+
             el.innerHTML =
               '<table><tr><th>Channel</th><th>Status</th></tr>' + rows + '</table>' +
+              webFormBlock +
               '<button class="oc-submit" id="oc-open-channel-wizard" type="button">Configure a Channel</button>';
 
             document.getElementById('oc-open-channel-wizard').addEventListener('click', function(){
@@ -1082,6 +1120,41 @@
                 loadChannels();
               });
             });
+
+            if (webForm && webForm.config && webForm.config.form_token) {
+              var wfMsg = document.getElementById('oc-webform-msg');
+              document.getElementById('oc-webform-copy').addEventListener('click', async function(){
+                var formUrl = session.apiBase.replace(/\/$/,'') + '/forms/' + webForm.config.form_token;
+                var snippetToCopy =
+                  '<form method="POST" action="' + formUrl + '">\n' +
+                  '  <input name="name" placeholder="Your name">\n' +
+                  '  <input name="email" type="email" placeholder="Email">\n' +
+                  '  <input name="phone" placeholder="Phone">\n' +
+                  '  <textarea name="message" placeholder="How can we help?"></textarea>\n' +
+                  '  <button type="submit">Send</button>\n' +
+                  '</form>';
+                try {
+                  await navigator.clipboard.writeText(snippetToCopy);
+                  wfMsg.className = 'oc-msg oc-ok';
+                  wfMsg.textContent = 'Embed code copied - paste it into your website.';
+                } catch(e){
+                  wfMsg.className = 'oc-msg oc-bad';
+                  wfMsg.textContent = 'Could not copy automatically - select the URL above and copy it manually.';
+                }
+                wfMsg.style.display = 'block';
+              });
+              document.getElementById('oc-webform-rotate').addEventListener('click', async function(){
+                if (!confirm('Reissue this product\'s Web Form URL? The current one will stop accepting submissions immediately.')) return;
+                try {
+                  await api(session, '/products/' + productId + '/channels/web_form/rotate-token', { method: 'POST', body: {} });
+                  loadChannels();
+                } catch(e){
+                  wfMsg.className = 'oc-msg oc-bad';
+                  wfMsg.textContent = e.message;
+                  wfMsg.style.display = 'block';
+                }
+              });
+            }
           } catch(e){ el.innerHTML = '<div class="oc-msg oc-bad">' + esc(e.message) + '</div>'; }
         }
 

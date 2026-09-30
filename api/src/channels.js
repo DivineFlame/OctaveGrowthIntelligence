@@ -28,13 +28,18 @@
 //     a website contact form, so it stays implemented: false here exactly
 //     like quora used to (Studio's content pipeline correctly shows it as
 //     not-yet-implemented for publishing). Its real value is on the
-//     inbound side: the generic webhook handler in server.js already
-//     accepts a flat POST body (company/name/phone/email/message) for any
-//     channel in INTEGRATION_CHANNELS, so wiring a plain HTML <form> on a
-//     customer's own website straight at that URL turns every submission
-//     into a lead - no JS, no publishing API, required. Its config fields
-//     below (redirect_url/allowed_origin) exist purely to make that real
-//     website-embedded form usable, not to gate any outbound publish path.
+//     inbound side, and it's the one channel that's dedicated per product
+//     rather than shared company-wide: every product gets its own random
+//     form_token (product_channels.config, generated at product creation -
+//     see POST /products in server.js) and its own public URL,
+//     POST /forms/:token, completely separate from every other channel's
+//     shared /webhooks/:webhookSecret/:channel path. Wiring a plain HTML
+//     <form> on a customer's own website straight at that URL turns every
+//     submission into a lead scoped to exactly that product - no JS, no
+//     publishing API, and no hidden product_id field to remember, required.
+//     The fields below (redirect_url/allowed_origin) exist purely to make
+//     that real website-embedded form usable, not to gate any outbound
+//     publish path.
 
 const fs = require('fs');
 
@@ -135,7 +140,7 @@ const CHANNEL_SPECS = {
       { key: 'redirect_url', label: 'Thank-you page URL (redirect visitors here after they submit - leave blank to return JSON instead, e.g. for a JS-driven form)', required: false },
       { key: 'allowed_origin', label: "Allowed website origin (optional - restricts submissions to this site, e.g. https://www.example.com)", required: false }
     ],
-    help: 'Point your website\'s contact/inquiry form at this channel\'s webhook URL (Admin > Webhooks) with fields named company, name, phone, email, and message - Content-Type can be either JSON or a plain HTML form POST (application/x-www-form-urlencoded/multipart), both are accepted. Each submission becomes a new lead in the Inbox, enriched and classified exactly like any other channel. Set a thank-you page URL above so a plain, no-JavaScript <form> redirects visitors somewhere sensible instead of showing them the raw JSON response; set an allowed origin to reject submissions that did not come from your site. This channel is inbound-only - there is no publishing API for a web form, so Studio\'s content pipeline correctly shows it as not implemented.'
+    help: 'Every product has its own dedicated Website Web Form URL (Products > Channels > Website Web Form > Copy embed code) - copy the ready-made <form> snippet straight into your site\'s HTML, or point your own form at that same URL with fields named company, name, phone, email, and message. Content-Type can be either JSON or a plain HTML form POST (application/x-www-form-urlencoded/multipart), both are accepted. Each submission becomes a new lead in the Inbox for this product, enriched and classified exactly like any other channel. Set a thank-you page URL above so a plain, no-JavaScript <form> redirects visitors somewhere sensible instead of showing them the raw JSON response; set an allowed origin to reject submissions that did not come from your site. If this product\'s URL ever leaks somewhere it shouldn\'t, rotate it from the same panel - that only affects this one product\'s form, nothing else. This channel is inbound-only - there is no publishing API for a web form, so Studio\'s content pipeline correctly shows it as not implemented.'
   }
 };
 

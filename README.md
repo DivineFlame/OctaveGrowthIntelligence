@@ -196,11 +196,14 @@ Full hierarchy - company-wide (single company, no tenant scoping):
   with `role: "MEMBER"`) — any Admin role can do all of this too, for any
   product company-wide. Every product gets all 7 channels
   (`whatsapp, facebook, instagram, linkedin, youtube, web_form, email`)
-  pre-created as `not_configured` the moment it's created (`POST /products`
-  does this in the same transaction as the product insert) — they're
-  independent from every other product's channel rows (`UNIQUE(product_id,
-  channel)`), so configuring one product's WhatsApp settings never touches
-  another's.
+  pre-created the moment it's created (`POST /products` does this in the
+  same transaction as the product insert) — they're independent from
+  every other product's channel rows (`UNIQUE(product_id, channel)`), so
+  configuring one product's WhatsApp settings never touches another's.
+  Six of the seven start `not_configured`; `web_form` starts `configured`
+  right away, since it needs no credentials and its dedicated form URL
+  already works the instant it exists (see "Website Web Form channel"
+  below).
 
 Permission model: every product-scoped write (members/channels) accepts
 either a company-wide Admin role or that specific product's own `ADMIN`
@@ -342,23 +345,42 @@ synchronously in the request itself (nothing is queued to Hermes for this
 any more - see "Hardening notes" on why the old `webhook:incoming`/
 `lead_intake` auto-run-agent path was removed).
 
-### Website Web Form channel (`web_form`)
+### Website Web Form channel (`web_form`) - dedicated per product
 
 Replaces the old permanent "Quora" placeholder channel (Quora had no
 public API to ever build against; a website contact form is a real,
 useful inbound channel instead - see `postgres/migrate-web-form-channel.sql`
-for existing databases). Unlike every other channel above, `web_form` is
-meant to be POSTed to directly from a visitor's own browser - a plain
-`<form method="POST" action="...">` on your own website, no JavaScript or
-server-to-server integration required - and it's inbound-only: there is no
-publishing API for a web form, so `api/src/channels.js` marks it
-`implemented: false` and it's deliberately excluded from Studio's content
-pipeline (`schemas.transformContent`'s channel enum, and the content
-picker's own channel list in both frontends) even though it's a normal,
-configurable member of `PRODUCT_CHANNELS`.
+for existing databases). It's inbound-only: there is no publishing API for
+a web form, so `api/src/channels.js` marks it `implemented: false` and
+it's deliberately excluded from Studio's content pipeline
+(`schemas.transformContent`'s channel enum, and the content picker's own
+channel list in both frontends) even though it's a normal, configurable
+member of `PRODUCT_CHANNELS`.
 
-Configure it per-product from Products > Channels like any other channel -
-both fields are optional:
+Unlike every other channel, this one is **dedicated per product, not
+shared company-wide**. Every product gets its own random, unguessable
+`form_token` the moment it's created (`product_channels.config`, backfilled
+for pre-existing products by the migration above) and its own public URL:
+
+```
+POST /forms/<form_token>
+```
+
+That URL alone identifies exactly one product - there's no hidden
+`product_id` field for a site owner to remember to include, and no
+company-wide secret to accidentally leak by copying a `<form>`'s `action`
+out of your page source (every other channel's inbound webhook shares one
+`company.webhook_secret`; a web form's `form_token` only ever grants
+access to that one product's own leads). Get the ready-to-paste URL and
+`<form>` snippet from **Products > Channels > Website Web Form > Copy
+embed code** - it starts working the moment the product is created
+(`status: 'configured'` from the outset, since neither of its fields
+below is required), no separate setup step needed before it's live. If a
+token ever leaks somewhere it shouldn't, reissue it from the same panel
+(`POST /products/:id/channels/web_form/rotate-token`) - only that one
+product's form is affected, nothing else.
+
+Both of its config fields are optional:
 
 - **Thank-you page URL** (`redirect_url`) - a plain, no-JavaScript `<form>`
   submit navigates the visitor's browser to whatever this route returns;
@@ -367,15 +389,15 @@ both fields are optional:
   the form.
 - **Allowed website origin** (`allowed_origin`) - when set, a submission
   whose `Origin`/`Referer` host doesn't match is rejected with `403`, so
-  the webhook URL embedded in your site's HTML can't be trivially copied
-  and reused to spam leads in from an unrelated site.
+  the URL embedded in your site's HTML can't be trivially copied and
+  reused to spam leads in from an unrelated site.
 
 Point the form's fields at the same flat body every other channel's
-webhook already accepts: `company`, `name`, `phone`, `email`, `message`,
-and (to route it to a specific product) `product_id` - either
-`application/x-www-form-urlencoded`/`multipart/form-data` (a real HTML
-form) or JSON (a JS-driven one) works, on both the main app and the
-separate webhook server (`WEBHOOK_PORT`).
+webhook already accepts - `company`, `name`, `phone`, `email`, `message`
+- no `product_id` needed, since the URL itself already says which
+product. Either `application/x-www-form-urlencoded`/`multipart/form-data`
+(a real HTML form) or JSON (a JS-driven one) works, on both the main app
+and the separate webhook server (`WEBHOOK_PORT`).
 
 ## Virus scanning (ClamAV)
 
@@ -2063,4 +2085,42 @@ code changes were needed.
   still refuses it exactly like it refused `quora`) and added a test
   pinning that `web_form` is structurally excluded from
   `schemas.transformContent`'s channel enum.
+- Full unit suite passes (152/152); `npm run build` succeeds.
+
+
+## Website Web Form made dedicated per product, not shared company-wide
+
+Follow-up to the entry above, in response to feedback that each product
+should have its own independent, reliable Web Form rather than all of
+them sharing one company-wide URL disambiguated only by an easy-to-forget
+`product_id` field:
+
+- **Every product now gets its own `form_token` and its own URL**
+  (`POST /forms/<form_token>`, generated at product creation - see
+  `POST /products` - and backfilled for existing products by
+  `postgres/migrate-web-form-channel.sql`), completely separate from the
+  shared `webhook_secret` path every other channel uses
+  (`/webhooks/<webhook_secret>/<channel>`). `web_form` was removed from
+  `INTEGRATION_CHANNELS` (that shared, company-wide list) entirely - it
+  never reaches `handleInboundWebhook` any more, only its own dedicated
+  `handleWebFormSubmission`.
+- **This is strictly more reliable, not just more convenient**: a
+  submission can no longer land against the wrong product (or no product
+  at all) because a site owner's form was missing a hidden field - the
+  URL itself is the only thing that determines which product a lead is
+  scoped to.
+- **It also closes a real credential-scoping gap**: the old design meant
+  copying a web form's `action` URL out of a page's HTML source also
+  exposed the same secret every other channel's inbound webhook trusts
+  company-wide. A leaked `form_token` now only ever grants access to that
+  one product's own leads, and can be reissued
+  (`POST /products/:id/channels/web_form/rotate-token`) without touching
+  any other product's form or any other channel at all.
+- **`web_form` now starts `configured` from the moment a product is
+  created**, not `not_configured` - it has no required fields and its URL
+  already works with a bare `form_token`, so the Admin UI no longer tells
+  the admin to "configure" something that's already live. Extracted the
+  shared flat-body-parsing and allowed-origin-checking logic
+  (`parseFlatLeadFields`/`originAllowed` in `server.js`) so the generic
+  webhook handler and the new dedicated one can't drift apart.
 - Full unit suite passes (152/152); `npm run build` succeeds.

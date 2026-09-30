@@ -1225,7 +1225,11 @@ async function hasProductAccess(req, productId) {
 // Manager). Pre-creates all 7 channel rows as 'not_configured', in the
 // same transaction, so a product's full channel set exists from the
 // moment it's created rather than materializing rows lazily the first
-// time each one is individually configured.
+// time each one is individually configured. web_form additionally gets a
+// random, unguessable form_token in its config right away (not just once
+// someone fills in its optional fields) - every product's Website Web
+// Form URL works out of the box, the same way every other channel's row
+// exists from creation even before it's "configured".
 app.post('/products', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), validate(schemas.createProduct), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -1238,9 +1242,19 @@ app.post('/products', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), val
     );
     const product = rows[0];
     for (const channel of PRODUCT_CHANNELS) {
+      // web_form has no required fields (both of its config fields are
+      // optional - see CHANNEL_SPECS.web_form) and its dedicated
+      // form_token-based URL works the moment it exists, unlike every
+      // other channel here which needs real credentials before it can do
+      // anything - so it starts life already 'configured', not
+      // 'not_configured', and the Admin UI can show its embed URL right
+      // away instead of telling the admin to "configure" something that
+      // already works.
+      const isWebForm = channel === 'web_form';
+      const initialConfig = isWebForm ? { form_token: crypto.randomBytes(16).toString('hex') } : {};
       await client.query(
-        `INSERT INTO product_channels (product_id, channel, status) VALUES ($1,$2,'not_configured') ON CONFLICT (product_id, channel) DO NOTHING`,
-        [product.id, channel]
+        `INSERT INTO product_channels (product_id, channel, status, config) VALUES ($1,$2,$3,$4) ON CONFLICT (product_id, channel) DO NOTHING`,
+        [product.id, channel, isWebForm ? 'configured' : 'not_configured', JSON.stringify(initialConfig)]
       );
     }
     await client.query('COMMIT');
@@ -1489,6 +1503,31 @@ app.post('/products/:id/channels', authMiddleware, validate(schemas.configureCha
     );
     await auditLog(req.user.id, 'CONFIGURE_PRODUCT_CHANNEL', 'product', req.params.id, req, 'SUCCESS', { channel });
     res.json(Object.assign({}, rows[0], { config: channelsLib.maskChannelSecrets(channel, rows[0].config) }));
+  } catch(e){ serverError(res, e); }
+});
+
+// Website Web Form - reissue this one product's form_token (invalidates
+// its current embed URL immediately; every other product's form and
+// every other channel are unaffected, unlike rotating the shared
+// company-wide webhook secret). Same authorization as configuring any
+// other channel on this product.
+app.post('/products/:id/channels/web_form/rotate-token', authMiddleware, async (req, res) => {
+  try {
+    const prod = await pool.query('SELECT id FROM products WHERE id=$1', [req.params.id]);
+    if (!prod.rows.length) return res.status(404).json({ error: 'Product not found' });
+    if (!(await canAdminProduct(req, req.params.id))) return res.status(403).json({ error: "Only an Admin or this product's Admin can rotate this form's token" });
+
+    const existingRow = await pool.query('SELECT config FROM product_channels WHERE product_id=$1 AND channel=$2', [req.params.id, 'web_form']);
+    const existingConfig = existingRow.rows.length ? (existingRow.rows[0].config || {}) : {};
+    const newConfig = Object.assign({}, existingConfig, { form_token: crypto.randomBytes(16).toString('hex') });
+
+    const { rows } = await pool.query(
+      `INSERT INTO product_channels (product_id, channel, config, status, updated_at) VALUES ($1,'web_form',$2,'configured',NOW())
+       ON CONFLICT (product_id, channel) DO UPDATE SET config=EXCLUDED.config, updated_at=NOW() RETURNING *`,
+      [req.params.id, JSON.stringify(newConfig)]
+    );
+    await auditLog(req.user.id, 'ROTATE_WEB_FORM_TOKEN', 'product', req.params.id, req, 'SUCCESS', {});
+    res.json(rows[0]);
   } catch(e){ serverError(res, e); }
 });
 
@@ -2239,7 +2278,7 @@ app.get('/audit-logs', authMiddleware, rbacMiddleware(['SUPER_ADMIN', 'IT_ADMIN'
 // Integrations - Secure, masked, 2FA required, Super Admin+IT only
 // Status/keys are read from this app's actual environment config — nothing here is simulated.
 // A channel with no <CHANNEL>_API_KEY env var set is honestly reported as not_configured.
-const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'web_form', 'email'];
+const INTEGRATION_CHANNELS = ['whatsapp', 'facebook', 'instagram', 'linkedin', 'youtube', 'email']; // web_form is NOT here - it has its own dedicated per-product /forms/:token route below, not the shared company-secret-gated /webhooks/:webhookSecret/:channel path
 
 app.get('/integrations', authMiddleware, rbacMiddleware(['SUPER_ADMIN','IT_ADMIN']), async (req, res) => {
   const channels = INTEGRATION_CHANNELS.map(name => {
@@ -2422,6 +2461,36 @@ async function handleWhatsAppInboundWebhook(req, res) {
   res.json({ received: true, ingested, skipped_already: skippedAlready, skipped_unmatched: skippedUnmatched });
 }
 
+// Shared by handleInboundWebhook below and the dedicated per-product
+// Website Web Form route further down - extracts the same flat
+// company/name/phone/email/message fields regardless of which route the
+// submission came in on, and regardless of whether the body was JSON or a
+// plain HTML form POST (application/x-www-form-urlencoded/multipart).
+function parseFlatLeadFields(req) {
+  return {
+    companyName: sanitizeCSVValue(req.body.company || req.body.company_name || 'Unknown'),
+    contactName: sanitizeCSVValue(req.body.name || req.body.full_name || 'Lead'),
+    phone: sanitizeCSVValue(req.body.phone || ''),
+    email: sanitizeCSVValue(req.body.email || ''),
+    message: sanitizeCSVValue(req.body.message || req.body.note || req.body.text || ''),
+    valueInr: Number(req.body.value) || 0
+  };
+}
+
+// Also shared with the Website Web Form route - true if the request's
+// Origin/Referer host matches the configured allowed_origin (or if no
+// allowed_origin is configured at all, in which case every origin is
+// allowed - this check is opt-in, not on by default).
+function originAllowed(req, allowedOrigin) {
+  if (!allowedOrigin) return true;
+  const originHeader = req.headers.origin || req.headers.referer || '';
+  let originHost = '';
+  try { originHost = new URL(originHeader).host; } catch (e) { /* missing/unparseable - treated as not matching below */ }
+  let allowedHost = allowedOrigin;
+  try { allowedHost = new URL(allowedOrigin).host; } catch (e) { /* config saved without a scheme - compare as given */ }
+  return !!originHost && originHost === allowedHost;
+}
+
 async function handleInboundWebhook(req, res) {
   const { webhookSecret, channel } = req.params;
   if (!INTEGRATION_CHANNELS.includes(channel)) return res.status(404).json({ error: 'Unknown channel' });
@@ -2438,59 +2507,64 @@ async function handleInboundWebhook(req, res) {
       return await handleWhatsAppInboundWebhook(req, res);
     }
 
-    const company_name = sanitizeCSVValue(req.body.company || req.body.company_name || 'Unknown');
-    const contact_name = sanitizeCSVValue(req.body.name || req.body.full_name || 'Lead');
-    const phone = sanitizeCSVValue(req.body.phone || '');
-    const email = sanitizeCSVValue(req.body.email || '');
-    const value_inr = Number(req.body.value) || 0;
-    const message = sanitizeCSVValue(req.body.message || req.body.note || req.body.text || '');
+    const { companyName, contactName, phone, email, message, valueInr } = parseFlatLeadFields(req);
     const productId = req.body.product_id || null;
 
-    // Website Web Form is the one channel meant to be POSTed to directly
-    // from a visitor's own browser (a plain HTML <form>), not
-    // server-to-server like every other webhook here - so, when this
-    // product has a web_form channel configured (product_channels), two
-    // extra, purely additive behaviors kick in:
-    //   - allowed_origin: reject (403) a submission whose Origin/Referer
-    //     host doesn't match, so the public form URL can't be trivially
-    //     reused to spam leads in from an unrelated site.
-    //   - redirect_url: a plain (no-JS) <form> submit navigates the
-    //     visitor's browser to this route's response - redirect them to a
-    //     real thank-you page instead of dumping raw JSON in their browser.
-    // Both are optional and additive - a web_form submission with neither
-    // configured behaves exactly like any other channel's webhook.
-    let webFormConfig = null;
-    if (channel === 'web_form' && productId) {
-      const wf = await pool.query(`SELECT config FROM product_channels WHERE product_id=$1 AND channel='web_form' LIMIT 1`, [productId]);
-      if (wf.rows.length) webFormConfig = wf.rows[0].config || {};
-    }
-    if (webFormConfig && webFormConfig.allowed_origin) {
-      const originHeader = req.headers.origin || req.headers.referer || '';
-      let originHost = '';
-      try { originHost = new URL(originHeader).host; } catch (e) { /* missing/unparseable - treated as not matching below */ }
-      let allowedHost = webFormConfig.allowed_origin;
-      try { allowedHost = new URL(webFormConfig.allowed_origin).host; } catch (e) { /* config saved without a scheme - compare as given */ }
-      if (!originHost || originHost !== allowedHost) {
-        return res.status(403).json({ error: 'Submission origin not allowed for this form' });
-      }
-    }
-
     const { leadId, isDuplicate, isInquiry } = await ingestInboundLead(
-      { channel, companyName: company_name, contactName: contact_name, phone, email, message, productId, valueInr: value_inr },
+      { channel, companyName, contactName, phone, email, message, productId, valueInr },
       req
     );
-
-    if (webFormConfig && webFormConfig.redirect_url) {
-      // 303 (not 302) so the visitor's browser follows up with a GET,
-      // never re-POSTing the form body if they later refresh that page.
-      return res.redirect(303, webFormConfig.redirect_url);
-    }
 
     res.json({ received: true, channel, lead_id: leadId, is_duplicate: isDuplicate, is_inquiry: isInquiry });
   } catch(e){ serverError(res, e); }
 }
 
 app.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
+
+// Website Web Form - every product gets its own dedicated, unguessable
+// URL (product_channels.config.form_token, generated when the product is
+// created - see POST /products - and backfilled for pre-existing products
+// by migrate-web-form-channel.sql), NOT the shared company-wide
+// webhook_secret path every other channel above uses. This is deliberate:
+// a web form is the one "webhook" meant to be pasted straight into a
+// customer's own public website HTML, so it needs a URL that identifies
+// exactly one product on its own - no hidden product_id field for the
+// site owner to remember to include, and no risk that copying the form's
+// action URL out of the page source also hands out the company-wide
+// webhook secret (which doubles as the credential for every other
+// channel's inbound webhook too). Rotate a leaked token per-product via
+// POST /products/:id/channels/web_form/rotate-token, without touching any
+// other product's form or any other channel at all.
+async function handleWebFormSubmission(req, res) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT product_id, config FROM product_channels WHERE channel='web_form' AND config->>'form_token' = $1 LIMIT 1`,
+      [req.params.token]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Unknown form' });
+    const { product_id: productId, config } = rows[0];
+
+    if (!originAllowed(req, (config || {}).allowed_origin)) {
+      return res.status(403).json({ error: 'Submission origin not allowed for this form' });
+    }
+
+    const { companyName, contactName, phone, email, message } = parseFlatLeadFields(req);
+    const { leadId, isDuplicate, isInquiry } = await ingestInboundLead(
+      { channel: 'web_form', companyName, contactName, phone, email, message, productId },
+      req
+    );
+
+    if (config && config.redirect_url) {
+      // 303 (not 302) so the visitor's browser follows up with a GET,
+      // never re-POSTing the form body if they later refresh that page.
+      return res.redirect(303, config.redirect_url);
+    }
+
+    res.json({ received: true, channel: 'web_form', lead_id: leadId, is_duplicate: isDuplicate, is_inquiry: isInquiry });
+  } catch(e){ serverError(res, e); }
+}
+
+app.post('/forms/:token', webhookLimiter, handleWebFormSubmission);
 
 // Hermes Agents status - Premium multiagent
 // Reports real rows only. An empty list is an honest "no agents registered yet",
@@ -2593,6 +2667,7 @@ webhookApp.use(express.json());
 // identically regardless of which of the two a given deployment exposes.
 webhookApp.use(express.urlencoded({ extended: true }));
 webhookApp.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
+webhookApp.post('/forms/:token', webhookLimiter, handleWebFormSubmission);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 const webhookServer = webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));
 

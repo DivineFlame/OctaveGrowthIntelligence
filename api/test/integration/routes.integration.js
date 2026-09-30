@@ -608,4 +608,97 @@ function runSuite() {
     const fetchRes = await fetch(`${BASE}/company/logo`);
     assert.equal(fetchRes.status, 404);
   });
+
+  // Website Web Form: dedicated per-product form_token/URL, against a
+  // real database - not the shared company webhook_secret path (that's
+  // covered by the webhook tests above/below). productId/tokenMember are
+  // the ones set up earlier in this suite (POST /products, POST /users).
+  let webFormToken;
+
+  test('POST /products already gave this product a web_form channel row, configured, with its own form_token', async () => {
+    const { status, data } = await call(`/products/${productId}/channels`, { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(status, 200, JSON.stringify(data));
+    const webForm = data.find(c => c.channel === 'web_form');
+    assert.ok(webForm, 'web_form channel row must exist from product creation');
+    assert.equal(webForm.status, 'configured', 'web_form has no required fields, so it starts configured, not not_configured');
+    assert.ok(webForm.config && typeof webForm.config.form_token === 'string' && webForm.config.form_token.length > 0);
+    webFormToken = webForm.config.form_token;
+  });
+
+  test('POST /forms/:token: a real submission becomes a lead scoped to exactly this product, no product_id field needed', async () => {
+    const res = await fetch(`${BASE}/forms/${webFormToken}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Web Form Visitor', email: 'visitor@integration-test.invalid', message: 'Interested in your product' })
+    });
+    const data = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(data));
+    assert.equal(data.channel, 'web_form');
+
+    const { rows } = await db.query('SELECT product_id, source_channel, email FROM leads WHERE id=$1', [data.lead_id]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].product_id, productId, 'the lead must be scoped to the product that owns this form_token, with no product_id field in the request');
+    assert.equal(rows[0].source_channel, 'web_form');
+    assert.equal(rows[0].email, 'visitor@integration-test.invalid');
+  });
+
+  test('POST /forms/:token: an unknown token 404s rather than guessing a product', async () => {
+    const res = await fetch(`${BASE}/forms/not-a-real-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x' }) });
+    assert.equal(res.status, 404);
+  });
+
+  test('POST /forms/:token: a plain HTML form submit (urlencoded, no JS) is accepted and can redirect to a configured thank-you page', async () => {
+    const configureRes = await call(`/products/${productId}/channels`, {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { channel: 'web_form', config: { redirect_url: 'https://example.com/thanks' } }
+    });
+    assert.equal(configureRes.status, 200, JSON.stringify(configureRes.data));
+
+    const params = new URLSearchParams({ name: 'Plain Form Visitor', phone: '+919876543210', message: 'Call me back' });
+    const res = await fetch(`${BASE}/forms/${webFormToken}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+      redirect: 'manual'
+    });
+    assert.equal(res.status, 303, 'a configured redirect_url must 303 a plain form submit rather than returning JSON');
+    assert.equal(res.headers.get('location'), 'https://example.com/thanks');
+  });
+
+  test('POST /forms/:token: an allowed_origin rejects a submission from a different site', async () => {
+    const configureRes = await call(`/products/${productId}/channels`, {
+      method: 'POST', headers: { Authorization: `Bearer ${tokenA}` },
+      body: { channel: 'web_form', config: { redirect_url: '', allowed_origin: 'https://allowed.example.com' } }
+    });
+    assert.equal(configureRes.status, 200, JSON.stringify(configureRes.data));
+
+    const res = await fetch(`${BASE}/forms/${webFormToken}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://not-allowed.example.com' },
+      body: JSON.stringify({ name: 'Should be blocked' })
+    });
+    assert.equal(res.status, 403, JSON.stringify(await res.json().catch(() => ({}))));
+  });
+
+  test('POST /products/:id/channels/web_form/rotate-token: a regular member cannot rotate it', async () => {
+    const { status, data } = await call(`/products/${productId}/channels/web_form/rotate-token`, { method: 'POST', headers: { Authorization: `Bearer ${tokenMember}` }, body: {} });
+    assert.equal(status, 403, JSON.stringify(data));
+  });
+
+  test('POST /products/:id/channels/web_form/rotate-token: an Admin reissues the token - the old one 404s, the new one still creates leads for this product', async () => {
+    const { status, data } = await call(`/products/${productId}/channels/web_form/rotate-token`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: {} });
+    assert.equal(status, 200, JSON.stringify(data));
+    const newToken = data.config.form_token;
+    assert.ok(newToken && newToken !== webFormToken, 'rotating must actually change the token');
+
+    const oldRes = await fetch(`${BASE}/forms/${webFormToken}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x' }) });
+    assert.equal(oldRes.status, 404, 'the old token must stop working immediately after rotation');
+
+    const newRes = await fetch(`${BASE}/forms/${newToken}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'After Rotation' }) });
+    const newData = await newRes.json();
+    assert.equal(newRes.status, 200, JSON.stringify(newData));
+
+    const { rows } = await db.query('SELECT product_id FROM leads WHERE id=$1', [newData.lead_id]);
+    assert.equal(rows[0].product_id, productId, 'the rotated token must still be scoped to the same product');
+  });
 }

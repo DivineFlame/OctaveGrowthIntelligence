@@ -80,3 +80,10 @@ test('replyToLead requires a non-empty body and caps its length', () => {
   assert.ok(schemas.replyToLead.safeParse({ body: 'Thanks for reaching out, when works for a call?' }).success);
   assert.equal(schemas.replyToLead.safeParse({ body: 'x'.repeat(5001) }).success, false);
 });
+
+test('deleteProduct requires a non-empty confirm_name (the route itself checks it matches the real product name)', () => {
+  assert.equal(schemas.deleteProduct.safeParse({}).success, false);
+  assert.equal(schemas.deleteProduct.safeParse({ confirm_name: '' }).success, false);
+  assert.equal(schemas.deleteProduct.safeParse({ confirm_name: '   ' }).success, false);
+  assert.ok(schemas.deleteProduct.safeParse({ confirm_name: 'Diwali Campaign' }).success);
+});

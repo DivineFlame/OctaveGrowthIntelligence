@@ -210,6 +210,55 @@ either a company-wide Admin role or that specific product's own `ADMIN`
 member (`canAdminProduct()`) - a Product Admin manages their own product
 without needing a company-wide role.
 
+### Deleting a Product/Service
+
+`DELETE /products/:id` - **company-wide Admin only** (`hierarchy.ADMIN_ROLES`,
+the same gate as creating one - deliberately *not* extended to that
+product's own `ADMIN` member the way channel/member config is, since this
+removes every lead the whole product ever received, not just that
+member's own configuration). This is a real, irreversible, cascading
+delete, not an archive/soft-delete - there is no way to get a deleted
+product or its data back.
+
+Requires `confirm_name` in the request body to exactly match the
+product's current name (`schemas.deleteProduct`) - a deliberate "type the
+name to confirm" step, the same pattern other tools use before deleting a
+whole project/repo, before something this destructive runs. The frontend
+prompt is just the friendly half of that check; the server independently
+re-validates it, so it can't be bypassed by calling the API directly.
+
+What actually gets deleted, and why it needed real route logic rather than
+relying on the schema's existing `ON DELETE` behavior alone:
+
+- **Cascades automatically either way** (`ON DELETE CASCADE` in
+  `postgres/init-secure.sql`): `product_members`, `product_channels`
+  (including that product's own dedicated Website Web Form token/URL -
+  see "Website Web Form channel" below, which stops working immediately),
+  `product_agents`, `agent_runs`.
+- **Explicitly, irreversibly deleted by this route** - `leads` (and their
+  `lead_messages`, which cascade from the lead) and `content_assets` (and
+  their `content_variants`/`approvals`, which cascade from the asset),
+  including the real files on disk backing every content asset/variant.
+  Both `leads.product_id` and `content_assets.product_id` are `ON DELETE
+  SET NULL` by design everywhere *else* in this app (a lead or an
+  uploaded asset is meant to outlive the product it came from in every
+  other flow) - left at that default here, deleting a product would
+  silently orphan every lead and file it ever had instead of actually
+  removing them, which isn't what "delete this product and its data"
+  means. `agent_runs.lead_id` has no `ON DELETE` clause at all (a lead
+  with an agent run against it can't be hard-deleted while that row
+  exists - see `POST /leads/delete-selected`'s own comment on this same
+  constraint), so this product's `agent_runs` are deleted first,
+  explicitly, before touching its leads.
+- File cleanup (`fs.unlink`) happens best-effort, after the database
+  transaction commits - a failed unlink leaves an orphaned file on disk
+  (logged, not fatal), never a partially-deleted product.
+
+Audit-logged as `DELETE_PRODUCT` with the counts of leads and content
+assets removed; the same counts come back in the response so the Admin
+panel can show what just happened (e.g. "Deleted \"Diwali Campaign\" - 214
+lead(s) and 12 content asset(s) removed with it").
+
 **What this does NOT do yet, on purpose:**
 - **No real social-media posting.** `product_channels.config` is just
   storage; there's no OAuth flow or platform API integration behind any
@@ -244,7 +293,10 @@ this whole feature area has more moving parts than a single safe edit.
   without a company-wide role has to type a user's ID directly, since
   `GET /users` is gated to company-wide admin roles and a Product Admin
   usually isn't one) and **Channels** (per-channel status + a config note -
-  no real platform config UI yet, matching the backend).
+  no real platform config UI yet, matching the backend). A company-wide
+  Admin also sees a **Delete Product** button on this screen (see
+  "Deleting a Product/Service" above) that prompts for the product's exact
+  name before calling `DELETE /products/:id`.
 
 ### Onboarding wizard
 
@@ -2124,3 +2176,35 @@ them sharing one company-wide URL disambiguated only by an easy-to-forget
   (`parseFlatLeadFields`/`originAllowed` in `server.js`) so the generic
   webhook handler and the new dedicated one can't drift apart.
 - Full unit suite passes (152/152); `npm run build` succeeds.
+
+
+## Deleting a Product/Service, with all of its data
+
+There was previously no way to remove a Product/Service at all once
+created, even a test one made by mistake - it would sit forever with its
+7 pre-created channel rows and accumulate leads/content indefinitely.
+
+- **`DELETE /products/:id`** - see "Deleting a Product/Service" above for
+  the full breakdown: company-wide-Admin-only, `confirm_name` must match
+  the product's exact current name, and it's a real cascading delete
+  (leads, content assets and their real files, channels including that
+  product's own Website Web Form token, members, agent runs) - not a
+  soft-delete/archive.
+- Deliberately more than "let the existing `ON DELETE` clauses handle
+  it": `leads.product_id`/`content_assets.product_id` are `ON DELETE SET
+  NULL` by design for every other flow in this app (a lead or an asset
+  outlives the product it came from everywhere else), so this route
+  explicitly deletes both instead, and handles the `agent_runs.lead_id`
+  FK (no `ON DELETE` clause) that would otherwise block hard-deleting a
+  lead with a run against it.
+- Added a **Delete Product** button to the Admin panel's product detail
+  screen (company-wide Admins only), which prompts for the product's name
+  before calling the route - the real safety boundary is server-side
+  (`confirm_name` re-checked against the database), the prompt is just
+  the friendly first half of it.
+- Added integration coverage against a real database: member vs Admin
+  authorization, the wrong-name rejection leaving everything untouched, a
+  full delete verifying every cascaded table plus the real file on disk
+  is actually gone (not just orphaned), and a repeat delete 404ing.
+  Extended `schemas.test.js` for the new `deleteProduct` schema.
+- Full unit suite passes (153/153); `npm run build` succeeds.

@@ -34,6 +34,15 @@ const schemas = {
     name: z.string().trim().min(1).max(200),
     description: z.string().trim().max(2000).optional().nullable()
   }),
+  // Deleting a Product/Service permanently removes its channels, members,
+  // uploaded content and leads too (see DELETE /products/:id) - requiring
+  // the caller to retype the product's exact current name is a
+  // deliberate extra confirmation step for something this destructive and
+  // irreversible, the same "type the name to confirm" pattern other tools
+  // use for deleting a whole project/repo, not just a single record.
+  deleteProduct: z.object({
+    confirm_name: z.string().trim().min(1).max(200)
+  }),
   addProductMember: z.object({
     user_id: z.string().uuid(),
     role: z.enum(['ADMIN', 'MEMBER']).optional()

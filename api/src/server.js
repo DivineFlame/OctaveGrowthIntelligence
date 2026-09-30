@@ -1297,6 +1297,85 @@ app.get('/products/:id', authMiddleware, async (req, res) => {
   } catch(e){ serverError(res, e); }
 });
 
+// Products - Delete (Admin only, same gate as creation - not extended to
+// a per-product Admin's own ADMIN membership, since this removes every
+// lead/asset the whole product ever had, not just this admin's own
+// channel configuration). Requires `confirm_name` to exactly match the
+// product's current name (see schemas.deleteProduct) - a deliberate
+// extra step before something this destructive and irreversible.
+//
+// product_members/product_channels/product_agents all cascade
+// automatically via their own ON DELETE CASCADE (see init-secure.sql), so
+// deleting the `products` row alone would already clean those up. leads
+// and content_assets are different: both have product_id as ON DELETE
+// SET NULL by design elsewhere in this app - a lead or an uploaded asset
+// is meant to outlive the product it came from in every *other* flow
+// (see e.g. GET /leads still finding a lead with no product at all) - so
+// leaving that default in place here would silently ORPHAN every lead and
+// file this product ever had instead of removing them, which isn't what
+// "delete this product and its data" means. This route explicitly,
+// irreversibly deletes both, plus the real files on disk backing every
+// content_assets/content_variants row (nothing else in this app deletes a
+// content_assets file today - this is the first place that logic exists).
+//
+// agent_runs.lead_id has no ON DELETE clause (see the /leads/delete-selected
+// comment above) - a lead with an agent_runs row against it can't be
+// hard-deleted while that row exists, so this product's agent_runs are
+// deleted first (by product_id - it would cascade automatically once the
+// products row itself is deleted further down anyway, but doing it first,
+// explicitly, guarantees the DELETE FROM leads below never hits that FK).
+app.delete('/products/:id', authMiddleware, rbacMiddleware(hierarchy.ADMIN_ROLES), validate(schemas.deleteProduct), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const prodRes = await client.query('SELECT * FROM products WHERE id=$1', [req.params.id]);
+    if (!prodRes.rows.length) { client.release(); return res.status(404).json({ error: 'Product not found' }); }
+    const product = prodRes.rows[0];
+
+    if (req.body.confirm_name !== product.name) {
+      client.release();
+      return res.status(400).json({ error: `Type this product's exact name ("${product.name}") to confirm deletion.` });
+    }
+
+    // Everything backed by a real file on disk, gathered before the
+    // transaction so a rollback never leaves this half-done - the actual
+    // fs.unlink calls only happen after COMMIT succeeds below.
+    const { rows: assets } = await client.query('SELECT id, s3_key FROM content_assets WHERE product_id=$1', [req.params.id]);
+    const assetIds = assets.map(a => a.id);
+    let variants = [];
+    if (assetIds.length) {
+      const variantRes = await client.query('SELECT id, s3_key FROM content_variants WHERE asset_id = ANY($1::uuid[])', [assetIds]);
+      variants = variantRes.rows;
+    }
+    const { rows: leadCountRows } = await client.query('SELECT COUNT(*)::int AS n FROM leads WHERE product_id=$1', [req.params.id]);
+    const leadCount = leadCountRows[0].n;
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM agent_runs WHERE product_id=$1', [req.params.id]);
+    await client.query('DELETE FROM leads WHERE product_id=$1', [req.params.id]); // lead_messages cascades via ON DELETE CASCADE
+    await client.query('DELETE FROM content_assets WHERE product_id=$1', [req.params.id]); // content_variants/approvals cascade via ON DELETE CASCADE
+    await client.query('DELETE FROM products WHERE id=$1', [req.params.id]); // product_members/product_channels/product_agents cascade via ON DELETE CASCADE
+    await client.query('COMMIT');
+
+    // Real files, best-effort, only after the transaction committed - a
+    // failed unlink here means an orphaned file on disk, not a
+    // data-integrity problem, so it's logged and swallowed rather than
+    // failing an already-committed delete.
+    for (const filePath of [...assets.map(a => a.s3_key), ...variants.map(v => v.s3_key)]) {
+      if (filePath) fs.unlink(filePath, (err) => { if (err && err.code !== 'ENOENT') console.warn(`[delete-product] could not remove file ${filePath}: ${err.message}`); });
+    }
+
+    await auditLog(req.user.id, 'DELETE_PRODUCT', 'product', req.params.id, req, 'SUCCESS', {
+      name: product.name, leads_deleted: leadCount, content_assets_deleted: assetIds.length
+    });
+    res.json({ deleted: true, id: req.params.id, name: product.name, leads_deleted: leadCount, content_assets_deleted: assetIds.length });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    serverError(res, e);
+  } finally {
+    client.release();
+  }
+});
+
 // Product members - list (Admin or any member of the product)
 app.get('/products/:id/members', authMiddleware, async (req, res) => {
   try {

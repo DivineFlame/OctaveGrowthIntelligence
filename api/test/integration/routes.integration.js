@@ -31,6 +31,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
+const fs = require('node:fs');
 const { Client } = require('pg');
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -700,5 +701,96 @@ function runSuite() {
 
     const { rows } = await db.query('SELECT product_id FROM leads WHERE id=$1', [newData.lead_id]);
     assert.equal(rows[0].product_id, productId, 'the rotated token must still be scoped to the same product');
+  });
+
+  // DELETE /products/:id: a real cascading delete against a real database
+  // - a fresh, disposable product of its own (not the shared productId
+  // above, which later assertions in this file don't depend on staying
+  // alive, but keeping this self-contained avoids any risk of that).
+  let doomedProductId, doomedAssetId, doomedLeadId;
+
+  test('POST /products (setup): create a disposable product with a member, a lead, and an uploaded content asset', async () => {
+    const product = await call('/products', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { name: 'Doomed Product' } });
+    assert.equal(product.status, 200, JSON.stringify(product.data));
+    doomedProductId = product.data.id;
+
+    const assign = await call(`/products/${doomedProductId}/members`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { user_id: memberId, role: 'MEMBER' } });
+    assert.equal(assign.status, 200, JSON.stringify(assign.data));
+
+    // A real lead row scoped to this product - inserted directly rather
+    // than through a channel/upload route, since all this test needs is
+    // a row that exists with this product_id before the delete, and is
+    // gone after it.
+    const leadInsert = await db.query(
+      `INSERT INTO leads (source_channel, company_name, contact_name, product_id, status) VALUES ('web_form','Doomed Co','Doomed Lead',$1,'NEW') RETURNING id`,
+      [doomedProductId]
+    );
+    doomedLeadId = leadInsert.rows[0].id;
+
+    const form = new FormData();
+    form.append('file', new Blob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' }), 'doomed.png');
+    form.append('product_id', doomedProductId);
+    const uploadRes = await fetch(`${BASE}/content/upload`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form });
+    const uploadData = await uploadRes.json();
+    assert.equal(uploadRes.status, 200, JSON.stringify(uploadData));
+    doomedAssetId = uploadData.asset.id;
+
+    const { rows: fileRows } = await db.query('SELECT s3_key FROM content_assets WHERE id=$1', [doomedAssetId]);
+    assert.ok(fs.existsSync(fileRows[0].s3_key), 'the uploaded file must really exist on disk before we assert it is gone after delete');
+  });
+
+  test('DELETE /products/:id: a regular member cannot delete a product', async () => {
+    const { status, data } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenMember}` }, body: { confirm_name: 'Doomed Product' } });
+    assert.equal(status, 403, JSON.stringify(data));
+  });
+
+  test('DELETE /products/:id: the Admin must retype the exact product name to confirm', async () => {
+    const { status, data } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` }, body: { confirm_name: 'the wrong name' } });
+    assert.equal(status, 400, JSON.stringify(data));
+
+    // Nothing was touched by the rejected attempt above.
+    const { rows } = await db.query('SELECT id FROM products WHERE id=$1', [doomedProductId]);
+    assert.equal(rows.length, 1);
+  });
+
+  test('DELETE /products/:id: with the correct name, the product and everything scoped to it is really gone', async () => {
+    const { rows: fileRowsBefore } = await db.query('SELECT s3_key FROM content_assets WHERE id=$1', [doomedAssetId]);
+    const filePath = fileRowsBefore[0].s3_key;
+
+    const { status, data } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` }, body: { confirm_name: 'Doomed Product' } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.equal(data.leads_deleted, 1);
+    assert.equal(data.content_assets_deleted, 1);
+
+    const { rows: productRows } = await db.query('SELECT id FROM products WHERE id=$1', [doomedProductId]);
+    assert.equal(productRows.length, 0, 'the product row itself must be gone');
+
+    const { rows: memberRows } = await db.query('SELECT id FROM product_members WHERE product_id=$1', [doomedProductId]);
+    assert.equal(memberRows.length, 0, 'product_members must cascade');
+
+    const { rows: channelRows } = await db.query('SELECT id FROM product_channels WHERE product_id=$1', [doomedProductId]);
+    assert.equal(channelRows.length, 0, 'product_channels (including its own dedicated web_form row/token) must cascade');
+
+    const { rows: leadRows } = await db.query('SELECT id FROM leads WHERE id=$1', [doomedLeadId]);
+    assert.equal(leadRows.length, 0, 'the lead must be really deleted, not just orphaned with product_id set to NULL');
+
+    const { rows: assetRows } = await db.query('SELECT id FROM content_assets WHERE id=$1', [doomedAssetId]);
+    assert.equal(assetRows.length, 0, 'the content asset row must be really deleted');
+
+    // File cleanup happens asynchronously (fs.unlink, fire-and-forget)
+    // right after the transaction commits - give it a moment before
+    // asserting the file is gone from disk.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(fs.existsSync(filePath), false, 'the real file backing the deleted content asset must be removed from disk too');
+
+    // The regular member who used to be on this product is untouched -
+    // only the product/its own data was deleted, not the user account.
+    const { rows: userRows } = await db.query('SELECT id FROM users WHERE id=$1', [memberId]);
+    assert.equal(userRows.length, 1);
+  });
+
+  test('DELETE /products/:id: an unknown product 404s', async () => {
+    const { status } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` }, body: { confirm_name: 'Doomed Product' } });
+    assert.equal(status, 404);
   });
 }

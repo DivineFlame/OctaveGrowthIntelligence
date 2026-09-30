@@ -116,6 +116,7 @@
     #oc-products .oc-msg.oc-bad{color:var(--oc-danger)}
     #oc-products .oc-back{background:none;border:none;color:var(--oc-brand);font-size:12px;font-weight:600;cursor:pointer;padding:0;margin-bottom:12px}
     #oc-products .oc-pbtn{border:none;border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;background:var(--oc-border-1);color:var(--oc-text)}
+    #oc-products .oc-pbtn.oc-danger{background:var(--oc-danger);color:#fff}
     #oc-products .oc-upload-row{display:flex;gap:8px;align-items:center;margin-bottom:16px}
     #oc-products .oc-upload-row input[type=file]{flex:1;font-size:12px;padding:8px 10px;border-radius:8px;border:1px dashed var(--oc-border-12);background:var(--oc-input-bg);color:var(--oc-text)}
     #oc-products .oc-webform-embed{border:1px solid var(--oc-border-1);border-radius:10px;padding:12px 14px;margin-bottom:16px;background:var(--oc-card-bg-subtle)}
@@ -803,7 +804,10 @@
         var body = document.getElementById('oc-products-body');
         body.innerHTML =
           '<button class="oc-back" id="oc-back-to-list">&larr; Back to Products</button>' +
-          '<h2 style="font-size:14px">' + esc(productName) + '</h2>' +
+          '<h2 style="font-size:14px">' + esc(productName) +
+            (isOrgAdmin ? ' <button class="oc-pbtn oc-danger" id="oc-delete-product" type="button" style="margin-left:8px">Delete Product</button>' : '') +
+          '</h2>' +
+          '<div id="oc-delete-product-msg" class="oc-msg oc-bad" style="display:none"></div>' +
           '<div class="oc-tabs">' +
             '<button class="oc-tab oc-active" data-tab="members">Members</button>' +
             '<button class="oc-tab" data-tab="channels">Channels</button>' +
@@ -814,6 +818,30 @@
           '<div id="oc-ptab-content" style="display:none"></div>';
 
         document.getElementById('oc-back-to-list').addEventListener('click', loadList);
+
+        // Irreversibly deletes this product and everything scoped to it -
+        // channels, members, uploaded content (and its real files on
+        // disk), and every one of its leads (see DELETE /products/:id's
+        // own comment in server.js for exactly what that includes and
+        // why). The server independently re-checks confirm_name against
+        // the real product name - this prompt is just the first, friendly
+        // half of that same check, not the actual safety boundary.
+        var deleteBtn = document.getElementById('oc-delete-product');
+        if (deleteBtn) deleteBtn.addEventListener('click', async function(){
+          var deleteMsg = document.getElementById('oc-delete-product-msg');
+          deleteMsg.style.display = 'none';
+          var typed = prompt('This permanently deletes "' + productName + '" and ALL of its data - channels, members, uploaded content, and every lead it ever received. This cannot be undone.\n\nType the product\'s exact name to confirm:');
+          if (typed === null) return; // cancelled
+          try {
+            var result = await api(session, '/products/' + productId, { method: 'DELETE', body: { confirm_name: typed } });
+            alert('Deleted "' + result.name + '" - ' + result.leads_deleted + ' lead(s) and ' + result.content_assets_deleted + ' content asset(s) removed with it.');
+            loadList();
+          } catch(e){
+            deleteMsg.textContent = e.message;
+            deleteMsg.style.display = 'block';
+          }
+        });
+
         body.querySelectorAll('.oc-tab').forEach(function(tab){
           tab.addEventListener('click', function(){
             body.querySelectorAll('.oc-tab').forEach(function(t){ t.classList.remove('oc-active'); });

@@ -146,6 +146,44 @@ export const api = {
   // PII-erasure DELETE /leads/:id. See server.js's comment on
   // POST /leads/delete-selected for why these are two different routes.
   deleteLeads: (ids) => apiCall('/leads/delete-selected', { method: 'POST', body: { ids } }),
+  // Bulk lead import from a spreadsheet (see api/src/excel-leads.js,
+  // POST /leads/upload-excel) - same response shape as a CSV import
+  // would give (rows_total/rows_valid/rows_duplicate/rows_invalid).
+  uploadLeadsExcel: (file, { productId } = {}) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (productId) form.append('product_id', productId);
+    return apiCall('/leads/upload-excel', { method: 'POST', body: form });
+  },
+  // Downloads the blank spreadsheet template (GET /leads/template.xlsx) -
+  // a Blob, not JSON, so this bypasses apiCall() and talks to the API
+  // directly (same auth-header pattern, just reading a binary body).
+  // Callers turn the Blob into a real file download (see
+  // MessagesPanel.jsx's "Download template" button).
+  downloadLeadsTemplate: async () => {
+    const session = loadSession();
+    if (!session || !session.token) throw new ApiError('Not signed in', 401);
+    const res = await fetch(`${session.apiBase.replace(/\/$/, '')}/leads/template.xlsx`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+    if (!res.ok) throw new ApiError('Could not download the template', res.status);
+    return res.blob();
+  },
+  // Automated lead discovery ("Find leads" panel) - searches for
+  // businesses matching a query/optional location and imports the
+  // results straight into Leads (see api/src/lead-generation.js, POST
+  // /leads/discover). Deliberately generic on this side too - nothing
+  // here names which service actually runs the search.
+  discoverLeads: ({ query, location, productId, maxResults } = {}) =>
+    apiCall('/leads/discover', {
+      method: 'POST',
+      body: Object.assign(
+        { query },
+        location ? { location } : {},
+        productId ? { product_id: productId } : {},
+        maxResults ? { max_results: maxResults } : {}
+      ),
+    }),
   // Approved WhatsApp templates for this product's channel (via Vobiz -
   // see channels.js's listWhatsAppTemplates) - backs the reply composer's
   // template picker for a WhatsApp lead, which never sends free text (see

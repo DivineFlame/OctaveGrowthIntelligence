@@ -30,6 +30,8 @@ const hierarchy = require('./hierarchy');
 const { createLimiters } = require('./rate-limiters');
 const { detectLanguage, extractGstin } = require('./lead-enrichment');
 const voiceAgent = require('./voice-agent');
+const excelLeads = require('./excel-leads');
+const leadGeneration = require('./lead-generation');
 const metrics = require('./metrics');
 const errorTracking = require('./error-tracking');
 require('dotenv').config({ path: '../.env.production' });
@@ -359,6 +361,22 @@ const upload = multer({
   }
 });
 const csvUpload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
+// Leads - Excel (.xlsx) bulk import (see excel-leads.js). Same size cap
+// and ClamAV-scan-then-parse flow as csvUpload above, restricted by MIME
+// type like logoUpload/upload - the client-reported type is just a fast
+// reject, excel-leads.js's own ExcelJS.load() is what actually validates
+// the file is a real workbook.
+const EXCEL_UPLOAD_MIME_TYPES = ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+const excelUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (!EXCEL_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error(`Unsupported file type: ${file.mimetype} - please upload an .xlsx file.`));
+    }
+    cb(null, true);
+  }
+});
 
 // Company logo (Company Settings, Admin-only - see PATCH /company and
 // POST/DELETE /company/logo below). Small and image-only, unlike the
@@ -2208,6 +2226,153 @@ app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('f
     res.json({ uploadId, rows_total: records.length, rows_valid: valid, rows_duplicate: dup, rows_invalid: invalid, message: 'CSV imported into Leads' });
   } catch(e){ serverError(res, e); }
 });
+
+// Leads - blank Excel template download (see excel-leads.js). Plain
+// authMiddleware only, same as upload-csv below - any signed-in user who
+// can reach the Leads screen can grab the template; the import route
+// itself is where real access control (and validation) happens.
+app.get('/leads/template.xlsx', authMiddleware, async (req, res) => {
+  try {
+    const buffer = await excelLeads.buildBlankTemplate();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=\"leads-template.xlsx\"');
+    res.send(Buffer.from(buffer));
+  } catch(e){ serverError(res, e); }
+});
+
+// Leads - Excel (.xlsx) Upload (same security posture and row cap as
+// POST /leads/upload-csv above: ClamAV scan, 5000-row cap, shared
+// sanitize/validate/dedup via processLeadCsvRecords - see excel-leads.js
+// and csv-leads.js). Kept as a separate route rather than branching
+// upload-csv on file extension so each has its own simple, specific
+// multer instance/MIME allowlist.
+app.post('/leads/upload-excel', authMiddleware, uploadLimiter, excelUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  try {
+    let scan;
+    try {
+      scan = await scanFile(req.file.path);
+    } catch (scanErr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(503).json({ error: scanErr.message });
+    }
+    if (scan.isInfected) {
+      fs.unlink(req.file.path, () => {});
+      await auditLog(req.user.id, 'VIRUS_DETECTED', 'csv_upload', null, req, 'BLOCKED', { file: req.file.originalname, viruses: scan.viruses });
+      return res.status(400).json({ error: 'File failed virus scan', viruses: scan.viruses });
+    }
+
+    let records;
+    try {
+      const buffer = fs.readFileSync(req.file.path);
+      records = await excelLeads.parseLeadsWorkbook(buffer);
+    } catch (parseErr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: parseErr.message });
+    }
+    if (records.length > 5000) { fs.unlink(req.file.path, () => {}); return res.status(400).json({ error: 'Max 5000 rows' }); }
+
+    // Same sanitize/validate/dedup pass CSV import uses - see
+    // csv-leads.js's processLeadCsvRecords comment.
+    const { toInsert, valid, dup, invalid } = processLeadCsvRecords(records);
+    const productId = req.body.product_id || null;
+
+    const uploadId = uuidv4();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('INSERT INTO csv_uploads (id, uploaded_by, file_name, file_size, rows_total, rows_valid, rows_duplicate, rows_invalid, virus_scan_status, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [uploadId, req.user.id, req.file.originalname, req.file.size, records.length, valid, dup, invalid, 'CLEAN', 'COMPLETED']);
+      for (const row of toInsert.slice(0, 5000)) {
+        const rawText = [row.company || row.company_name, row.contact_name || row.full_name || row.name, row.note].filter(Boolean).join(' ');
+        const gstinResult = extractGstin(rawText);
+        await client.query(
+          'INSERT INTO leads (company_name, contact_name, phone, email, source_channel, status, csv_upload_id, product_id, detected_language, gstin, gstin_valid) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+          [row.company || row.company_name || '', row.contact_name || row.full_name || row.name || '', row.phone || row.mobile || '', row.email || '', 'excel_upload', 'NEW', uploadId, productId, detectLanguage(rawText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await auditLog(req.user.id, 'IMPORT_EXCEL', 'csv_upload', uploadId, req, 'SUCCESS', { rows_total: records.length, valid, dup, invalid, file: req.file.originalname });
+
+    fs.unlink(req.file.path, () => {});
+    res.json({ uploadId, rows_total: records.length, rows_valid: valid, rows_duplicate: dup, rows_invalid: invalid, message: 'Spreadsheet imported into Leads' });
+  } catch(e){ serverError(res, e); }
+});
+
+// Leads - automated discovery ("Find leads" in the UI - see
+// MessagesPanel.jsx). Runs a search against whatever lead-discovery
+// provider is configured via environment variables only (see
+// lead-generation.js, README.md, .env.vps.example) - never named in this
+// route, its responses, or the UI. Manager/Admin-only: each search can
+// incur real cost on the configured provider and bulk-inserts leads, the
+// same reason POST /leads/bulk-assign is gated this way.
+app.post('/leads/discover', authMiddleware, rbacMiddleware(LEAD_MANAGER_ROLES), uploadLimiter, validate(schemas.discoverLeads), async (req, res) => {
+  try {
+    if (!leadGeneration.isConfigured()) {
+      return res.status(503).json({ error: 'Lead discovery is not set up yet. Ask an administrator to configure it.' });
+    }
+
+    const { query, location, product_id, max_results } = req.body;
+    const productId = product_id || null;
+
+    let discovered;
+    try {
+      discovered = await leadGeneration.findLeads({ query, location, maxResults: max_results });
+    } catch (findErr) {
+      await pool.query(
+        'INSERT INTO lead_discovery_runs (product_id, requested_by, query, location, status, error) VALUES ($1,$2,$3,$4,$5,$6)',
+        [productId, req.user.id, query, location || null, 'FAILED', findErr.message]
+      );
+      await auditLog(req.user.id, 'DISCOVER_LEADS', 'lead_discovery_run', null, req, 'FAILED', { query, location, error: findErr.message });
+      return res.status(502).json({ error: findErr.message });
+    }
+
+    // Same sanitize/validate/dedup pass CSV/Excel import uses - the
+    // discovered records already arrive in that [{snake_case: value}]
+    // shape (see lead-generation.js's mapResultToLead).
+    const { toInsert, valid, dup, invalid } = processLeadCsvRecords(discovered);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const row of toInsert) {
+        const rawText = [row.company_name, row.address, row.category].filter(Boolean).join(' ');
+        const gstinResult = extractGstin(rawText);
+        await client.query(
+          'INSERT INTO leads (company_name, contact_name, phone, email, source_channel, status, product_id, detected_language, gstin, gstin_valid) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+          [row.company_name || '', '', row.phone || '', row.email || '', 'lead_discovery', 'NEW', productId, detectLanguage(rawText), gstinResult ? gstinResult.gstin : null, gstinResult ? gstinResult.valid : null]
+        );
+      }
+      const runRows = await client.query(
+        'INSERT INTO lead_discovery_runs (product_id, requested_by, query, location, status, leads_found, leads_imported, leads_duplicate) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+        [productId, req.user.id, query, location || null, 'COMPLETED', discovered.length, valid, dup]
+      );
+      await client.query('COMMIT');
+
+      await auditLog(req.user.id, 'DISCOVER_LEADS', 'lead_discovery_run', runRows.rows[0].id, req, 'SUCCESS', { query, location, found: discovered.length, imported: valid, duplicate: dup, invalid });
+      res.json({
+        runId: runRows.rows[0].id,
+        leads_found: discovered.length,
+        leads_imported: valid,
+        leads_duplicate: dup,
+        leads_invalid: invalid,
+        message: valid ? `Found and imported ${valid} lead(s).` : 'No new leads found for that search.'
+      });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch(e){ serverError(res, e); }
+});
+
 
 // Content - Upload raw asset (100MB max, ClamAV scan, MIME check)
 app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req, res) => {

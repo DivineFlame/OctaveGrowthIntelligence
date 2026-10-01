@@ -82,6 +82,18 @@ const schemas = {
   // 100 so one request can't be used to walk the whole leads table.
   deleteSelectedLeads: z.object({
     ids: z.array(z.string().uuid()).min(1).max(100)
+  }),
+  // "Find leads" in the Leads screen (POST /leads/discover) - a plain
+  // search term plus an optional free-text location, run against
+  // whatever lead-discovery provider is configured via env vars (see
+  // lead-generation.js). max_results is capped independently again in
+  // lead-generation.js (HARD_MAX_RESULTS) - the limit here just keeps an
+  // obviously-bad request from reaching that module at all.
+  discoverLeads: z.object({
+    query: z.string().trim().min(1).max(200),
+    location: z.string().trim().max(200).optional(),
+    product_id: z.string().uuid().optional().nullable(),
+    max_results: z.number().int().min(1).max(100).optional()
   })
 };
 

@@ -43,7 +43,8 @@ const MIGRATIONS_IN_ORDER = [
   // since it depends on every table/column every earlier migration
   // created, and is itself idempotent (safe to run again on every boot).
   'migrate-remove-multitenancy.sql',
-  'migrate-voice-calls.sql'
+  'migrate-voice-calls.sql',
+  'migrate-lead-discovery.sql'
 ];
 
 async function main() {

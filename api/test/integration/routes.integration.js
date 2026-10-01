@@ -841,4 +841,72 @@ function runSuite() {
     const res = await fetch(`${BASE}/webhooks/voice/sarvam/whatever-secret`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attempt_id: 'att_x', status: 'completed' }) });
     assert.equal(res.status, 404);
   });
+
+  // GET /leads/template.xlsx, POST /leads/upload-excel, and POST
+  // /leads/discover - Excel bulk import (api/src/excel-leads.js) and
+  // automated lead discovery (api/src/lead-generation.js). Like the
+  // voice-agent block above, this test environment deliberately has no
+  // APIFY_* env vars set, so the actual third-party search call is
+  // covered by lead-generation.test.js's mocked-fetch unit tests instead
+  // - what's worth proving here against a real database is the route
+  // wiring: auth/role gating, the template download, a real upload
+  // actually landing rows in `leads`, and the "not configured" 503
+  // leaving no lead_discovery_runs row behind.
+  test('GET /leads/template.xlsx: downloads a real, parseable blank workbook', async () => {
+    const res = await fetch(`${BASE}/leads/template.xlsx`, { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer);
+    assert.deepEqual(wb.worksheets[0].getRow(1).values.slice(1), ['Company Name', 'Contact Name', 'Phone', 'Email', 'Value (INR)', 'Note']);
+  });
+
+  test('POST /leads/upload-excel: a filled-in workbook lands real rows in `leads`', async () => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Leads');
+    ws.addRow(['Company Name', 'Contact Name', 'Phone', 'Email']);
+    ws.addRow(['Excel Import Co', 'Priya N', '9123456780', 'priya@excelimport.invalid']);
+    const buffer = await wb.xlsx.writeBuffer();
+
+    const form = new FormData();
+    form.append('file', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'leads.xlsx');
+    const res = await fetch(`${BASE}/leads/upload-excel`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form });
+    const data = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(data));
+    assert.equal(data.rows_valid, 1);
+
+    const { rows } = await db.query(`SELECT * FROM leads WHERE email='priya@excelimport.invalid'`);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].company_name, 'Excel Import Co');
+    assert.equal(rows[0].source_channel, 'excel_upload');
+  });
+
+  test('POST /leads/upload-excel: rejects a file that isn\'t a real workbook with a 400', async () => {
+    const form = new FormData();
+    form.append('file', new Blob([Buffer.from('not an excel file')], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'bad.xlsx');
+    const res = await fetch(`${BASE}/leads/upload-excel`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: form });
+    assert.equal(res.status, 400);
+  });
+
+  test('POST /leads/discover: a regular member (not a Manager/Admin) is forbidden', async () => {
+    const { status } = await call('/leads/discover', { method: 'POST', headers: { Authorization: `Bearer ${tokenMember}` }, body: { query: 'dentists' } });
+    assert.equal(status, 403);
+  });
+
+  test('POST /leads/discover: 400 when the search term is missing', async () => {
+    const { status } = await call('/leads/discover', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: {} });
+    assert.equal(status, 400);
+  });
+
+  test('POST /leads/discover: 503 with no provider configured, and no lead_discovery_runs row is written', async () => {
+    const { status, data } = await call('/leads/discover', { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { query: 'dentists near Pune' } });
+    assert.equal(status, 503, JSON.stringify(data));
+    assert.match(data.error, /not set up/);
+
+    const { rows } = await db.query(`SELECT id FROM lead_discovery_runs WHERE query='dentists near Pune'`);
+    assert.equal(rows.length, 0, 'a rejected pre-flight check must never create a lead_discovery_runs row');
+  });
 }

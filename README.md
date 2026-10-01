@@ -548,6 +548,81 @@ and transcript URLs, and always keeps the full raw payload in
 so nothing Sarvam actually sends is ever silently lost even where a field
 name here turns out to need adjusting against a live account.
 
+## Importing leads: spreadsheet upload and automated discovery
+
+Two ways to get leads into Octave beyond the existing CSV upload and
+webhook-driven channels, both from the Leads screen's "Add leads" panel
+(`MessagesPanel.jsx`, only shown on Leads, not Inbox):
+
+**Spreadsheet import.** Download a blank template (`GET
+/leads/template.xlsx`), fill it in, and upload it back (`POST
+/leads/upload-excel`). `api/src/excel-leads.js` handles the Excel side -
+`buildBlankTemplate()` generates a workbook with the right headers
+(Company Name, Contact Name, Phone, Email, Value (INR), Note) and the
+Phone column pre-formatted as text (so Excel doesn't mangle a number with
+a leading `0` or `+`, or flip a long number into scientific notation),
+and `parseLeadsWorkbook()` reads a worksheet back into the exact same
+`[{header: value}, ...]` shape `csv-parse` already gives `POST
+/leads/upload-csv` - so the upload route runs the result through the
+very same `processLeadCsvRecords()` (`api/src/csv-leads.js`) CSV import
+already uses: one sanitize/validate/dedup path for both file formats, not
+two to keep in sync. Same security posture as the CSV route too - ClamAV
+scan before anything is parsed, a 5000-row cap, 10MB file size limit,
+MIME-type allowlist. [ExcelJS](https://github.com/exceljs/exceljs) was
+chosen over the more commonly-used `xlsx` (SheetJS) package specifically
+because, as of this writing, `xlsx`'s npm-published build carries two
+unpatched high-severity advisories (prototype pollution, ReDoS) with "no
+fix available" on npm - an unacceptable risk for a library parsing
+untrusted user-uploaded files. ExcelJS's own transitive advisories are
+moderate-severity and not reachable through how this app calls it (see
+`api/package.json`'s audit history).
+
+**Automated discovery ("Find leads").** Search for businesses matching a
+term (and an optional location) and import the matches straight into
+Leads (`POST /leads/discover`), Manager/Admin-only (`LEAD_MANAGER_ROLES`
+- the same gate `POST /leads/bulk-assign` uses) since each search can
+incur real cost on the configured provider and bulk-inserts leads.
+`api/src/lead-generation.js` runs the actual search against
+[Apify](https://apify.com)'s Google Maps Extractor actor by default - but
+exactly like the Voice Agent feature's `SARVAM_VOICE_*` variables, this
+is configured **entirely through environment variables**
+(`APIFY_API_TOKEN`, `APIFY_ACTOR_ID`, `APIFY_MAX_RESULTS`,
+`APIFY_LANGUAGE` - see `.env.vps.example`), with no database row and no
+admin UI for it. Leave `APIFY_API_TOKEN` unset and the panel's search
+simply returns a plain "not set up yet" `503` - nothing else changes.
+
+**The UI never names the provider.** The "Find leads" panel, its button
+copy, and every error message `POST /leads/discover` can return are
+deliberately generic - no mention of Apify or any specific actor appears
+anywhere in `MessagesPanel.jsx` or `api.js`. This README and
+`.env.vps.example` are the only places it's named, because configuring
+the feature requires knowing which service's API token to supply - that's
+operator documentation, not UI copy.
+
+Each search is recorded in `lead_discovery_runs`
+(`postgres/migrate-lead-discovery.sql` - run it once if your database
+predates this feature, same `node src/migrate.js` pattern as every other
+migration here) with the query, location, and counts
+found/imported/duplicate, or the error if the search itself failed - a
+rejected pre-flight check (not configured) never writes a row, matching
+the Voice Agent feature's same "don't record what never ran" rule for
+`voice_calls`. A discovered business becomes a lead with
+`source_channel = 'lead_discovery'`; its address/category feed into the
+same GSTIN/language detection every other lead import already runs
+(`api/src/lead-enrichment.js`) but aren't stored as separate columns -
+same as the CSV template's own "Note" column today.
+
+Unit tests: `excel-leads.test.js` (template generation, cell-value
+coercion for rich text/hyperlinks/formulas/dates, round-tripping a
+filled-in template, and rejecting a non-workbook or header-less file) and
+`lead-generation.test.js` (config detection, the actor input/URL builders,
+result-mapping, and the actual HTTP call via a mocked `fetch` - no real
+network calls in the test suite, same pattern `voice-agent.test.js`
+established). Integration coverage against a real database follows the
+same shape as the Voice Agent section above: role gating, the template
+download, a real upload landing rows in `leads`, and the "not configured"
+503 leaving no `lead_discovery_runs` row behind.
+
 ## Virus scanning (ClamAV)
 
 `POST /leads/upload-csv` and `POST /content/upload` scan every uploaded file
@@ -2355,4 +2430,58 @@ Voice Agent".
   suite; the Sarvam HTTP integration itself is unit-tested with a mocked
   `fetch` instead (see `voice-agent.test.js`).
 - Full unit suite passes (174/175, the one skip pre-existing and
+  unrelated - see "Testing"); `npm run build` succeeds.
+
+## Leads: spreadsheet import and automated discovery, via a generic "Add leads" panel
+
+The Leads screen could previously only grow through the existing CSV
+upload or inbound channel webhooks. This adds a blank-template-download +
+spreadsheet-upload flow, and a separate automated-discovery search, both
+behind a new "Add leads" toggle next to the Leads header
+(`MessagesPanel.jsx`) - see "Importing leads: spreadsheet upload and
+automated discovery" above for the full writeup.
+
+- New `api/src/excel-leads.js` (`buildBlankTemplate`/`parseLeadsWorkbook`,
+  built on [ExcelJS](https://github.com/exceljs/exceljs) rather than the
+  more common `xlsx`/SheetJS package - npm's published `xlsx` build
+  carries two unpatched high-severity advisories with "no fix available",
+  an unacceptable risk for a library parsing untrusted uploads). Returns
+  the exact same `[{header: value}, ...]` shape `csv-parse` already gives
+  CSV import, so `POST /leads/upload-excel` reuses
+  `processLeadCsvRecords()` (`csv-leads.js`) unchanged - one
+  sanitize/validate/dedup path for both file formats.
+- New `GET /leads/template.xlsx` and `POST /leads/upload-excel` routes,
+  mirroring `POST /leads/upload-csv`'s security posture exactly (ClamAV
+  scan, 10MB/5000-row caps, MIME-type allowlist via a dedicated
+  `excelUpload` multer instance).
+- New `api/src/lead-generation.js` - automated lead discovery against
+  [Apify](https://apify.com)'s Google Maps Extractor actor by default,
+  configured **entirely through environment variables**
+  (`APIFY_API_TOKEN`/`APIFY_ACTOR_ID`/`APIFY_MAX_RESULTS`/
+  `APIFY_LANGUAGE` - see `.env.vps.example`), same no-database-row,
+  no-admin-UI philosophy as the Voice Agent feature's `SARVAM_VOICE_*`.
+  Leave `APIFY_API_TOKEN` unset and `POST /leads/discover` simply returns
+  a generic "not set up yet" `503`.
+- The UI never names the provider - "Add leads" → "Find leads" is the
+  only user-facing label for this feature, and every string
+  `lead-generation.js`/`POST /leads/discover` can return is generic. Only
+  this README and `.env.vps.example` (operator-facing, not UI) name Apify.
+- New `lead_discovery_runs` table
+  (`postgres/migrate-lead-discovery.sql`) recording what each search
+  actually did (query, location, counts found/imported/duplicate, or the
+  error) - never configuration. A rejected pre-flight check (not
+  configured) never writes a row, same rule `voice_calls` already
+  follows. Discovered leads land with `source_channel = 'lead_discovery'`.
+  Manager/Admin-only (`LEAD_MANAGER_ROLES`, same gate `POST
+  /leads/bulk-assign` uses) since each search can incur real third-party
+  cost and bulk-inserts leads.
+- New `excel-leads.test.js` (18 tests) and `lead-generation.test.js` (19
+  tests) - config detection, pure request/URL/payload builders, and the
+  actual HTTP call via a mocked `fetch`, no real network calls in the
+  test suite, same pattern `voice-agent.test.js` established. Added
+  integration coverage against a real database for the template
+  download, a real spreadsheet upload landing rows in `leads`, role
+  gating on discovery, and the "not configured" 503 leaving no
+  `lead_discovery_runs` row behind.
+- Full unit suite passes (205/206, the one skip pre-existing and
   unrelated - see "Testing"); `npm run build` succeeds.

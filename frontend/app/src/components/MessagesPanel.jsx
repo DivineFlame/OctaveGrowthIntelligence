@@ -20,6 +20,11 @@ import {
   Trash2,
   Phone,
   Loader2,
+  Upload,
+  Download,
+  Search,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { api, ApiError } from '../lib/api.js';
 
@@ -824,6 +829,95 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
   const [assignErr, setAssignErr] = useState('');
   const [assignMsg, setAssignMsg] = useState('');
 
+  // "Add leads" - a spreadsheet import (download a blank template, then
+  // upload it filled in) and automated discovery ("Find leads"), both
+  // tucked behind a single toggleable inline panel next to the Leads
+  // header (this app has no modal/dialog component - see Thread's own
+  // inline panels for the same pattern). Only ever rendered when
+  // inquiryOnly is true (the Leads screen, not Inbox) - see the render
+  // below.
+  const [addLeadsOpen, setAddLeadsOpen] = useState(false);
+  const [addLeadsTab, setAddLeadsTab] = useState('import'); // 'import' | 'discover'
+  const fileInputRef = useRef(null);
+  const [templateDownloading, setTemplateDownloading] = useState(false);
+  const [templateErr, setTemplateErr] = useState('');
+  const [importFile, setImportFile] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [importErr, setImportErr] = useState('');
+  const [importMsg, setImportMsg] = useState('');
+  const [discoverQuery, setDiscoverQuery] = useState('');
+  const [discoverLocation, setDiscoverLocation] = useState('');
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverErr, setDiscoverErr] = useState('');
+  const [discoverMsg, setDiscoverMsg] = useState('');
+
+  const reloadLeads = () => {
+    if (!productId) return;
+    api
+      .leads({ product_id: productId, channel: activeChannel, inquiry_only: inquiryOnly })
+      .then(setLeads)
+      .catch(() => {});
+  };
+
+  const downloadTemplate = async () => {
+    setTemplateDownloading(true);
+    setTemplateErr('');
+    try {
+      const blob = await api.downloadLeadsTemplate();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'leads-template.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setTemplateErr(e instanceof ApiError ? e.message : 'Could not download the template');
+    } finally {
+      setTemplateDownloading(false);
+    }
+  };
+
+  const uploadImportFile = async () => {
+    if (!importFile) return;
+    setImporting(true);
+    setImportErr('');
+    setImportMsg('');
+    try {
+      const result = await api.uploadLeadsExcel(importFile, { productId });
+      setImportMsg(
+        `Imported ${result.rows_valid} lead(s) from ${result.rows_total} row(s)` +
+          (result.rows_duplicate ? `, ${result.rows_duplicate} duplicate(s) skipped` : '') +
+          (result.rows_invalid ? `, ${result.rows_invalid} invalid` : '') +
+          '.'
+      );
+      setImportFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      reloadLeads();
+    } catch (e) {
+      setImportErr(e instanceof ApiError ? e.message : 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const runDiscoverLeads = async () => {
+    if (!discoverQuery.trim()) return;
+    setDiscovering(true);
+    setDiscoverErr('');
+    setDiscoverMsg('');
+    try {
+      const result = await api.discoverLeads({ query: discoverQuery.trim(), location: discoverLocation.trim() || undefined, productId });
+      setDiscoverMsg(result.message || `Found ${result.leads_found} lead(s), imported ${result.leads_imported}.`);
+      reloadLeads();
+    } catch (e) {
+      setDiscoverErr(e instanceof ApiError ? e.message : 'Search failed');
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
   const toggleSelect = (id, checked) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -935,6 +1029,12 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
     setSelectedIds(new Set());
     setAssignErr('');
     setAssignMsg('');
+    setAddLeadsOpen(false);
+    setImportFile(null);
+    setImportErr('');
+    setImportMsg('');
+    setDiscoverErr('');
+    setDiscoverMsg('');
   }, [productId, activeChannel, inquiryOnly]);
 
   if (!productId) {
@@ -958,6 +1058,16 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
               <h2 className="text-[13px] font-semibold text-zinc-900 dark:text-white">{title}</h2>
               {subtitle ? <p className="text-[11px] text-zinc-500 dark:text-white/50">{subtitle}</p> : null}
             </div>
+            {inquiryOnly && selectedIds.size === 0 ? (
+              <button
+                type="button"
+                onClick={() => setAddLeadsOpen((v) => !v)}
+                className="flex shrink-0 items-center gap-1 rounded-full border border-brand/30 px-2.5 py-1 text-[11px] font-medium text-brand hover:bg-brand/10"
+              >
+                Add leads
+                {addLeadsOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              </button>
+            ) : null}
             {selectedIds.size > 0 ? (
               <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                 {reports.length > 0 ? (
@@ -997,6 +1107,97 @@ export default function MessagesPanel({ productId, channelStatuses, inquiryOnly,
               </div>
             ) : null}
           </div>
+          {inquiryOnly && addLeadsOpen ? (
+            <div className="mb-3 rounded-[10px] border border-black/5 bg-black/[0.02] p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="mb-2 flex gap-1 text-[11px] font-medium">
+                <button
+                  type="button"
+                  onClick={() => setAddLeadsTab('import')}
+                  className={`rounded-full px-2.5 py-1 ${addLeadsTab === 'import' ? 'bg-brand text-white' : 'text-zinc-600 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10'}`}
+                >
+                  Import spreadsheet
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAddLeadsTab('discover')}
+                  className={`rounded-full px-2.5 py-1 ${addLeadsTab === 'discover' ? 'bg-brand text-white' : 'text-zinc-600 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10'}`}
+                >
+                  Find leads
+                </button>
+              </div>
+
+              {addLeadsTab === 'import' ? (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-zinc-500 dark:text-white/50">
+                    Download the blank template, fill in your leads, then upload it here. Accepts .xlsx files up to 10MB.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={downloadTemplate}
+                      disabled={templateDownloading}
+                      className="flex items-center gap-1 rounded-full border border-black/10 px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:bg-black/5 disabled:opacity-50 dark:border-white/15 dark:text-white/80 dark:hover:bg-white/10"
+                    >
+                      <Download className="h-3 w-3" />
+                      {templateDownloading ? 'Downloading…' : 'Download template'}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".xlsx"
+                      onChange={(e) => setImportFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+                      className="text-[11px] text-zinc-600 dark:text-white/60"
+                    />
+                    <button
+                      type="button"
+                      onClick={uploadImportFile}
+                      disabled={!importFile || importing}
+                      className="flex items-center gap-1 rounded-full border border-brand/30 px-2.5 py-1 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50"
+                    >
+                      <Upload className="h-3 w-3" />
+                      {importing ? 'Importing…' : 'Import'}
+                    </button>
+                  </div>
+                  {templateErr ? <p className="text-[11px] text-red-500">{templateErr}</p> : null}
+                  {importErr ? <p className="text-[11px] text-red-500">{importErr}</p> : null}
+                  {importMsg ? <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{importMsg}</p> : null}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-zinc-500 dark:text-white/50">
+                    Search for businesses matching a term and an optional location - matches are imported straight into Leads.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={discoverQuery}
+                      onChange={(e) => setDiscoverQuery(e.target.value)}
+                      placeholder="e.g. dental clinics"
+                      className="min-w-[160px] flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1 text-[11px] text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={discoverLocation}
+                      onChange={(e) => setDiscoverLocation(e.target.value)}
+                      placeholder="Location (optional)"
+                      className="min-w-[140px] flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1 text-[11px] text-zinc-900 outline-none focus:border-brand dark:border-white/15 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={runDiscoverLeads}
+                      disabled={!discoverQuery.trim() || discovering}
+                      className="flex items-center gap-1 rounded-full border border-brand/30 px-2.5 py-1 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50"
+                    >
+                      <Search className="h-3 w-3" />
+                      {discovering ? 'Searching…' : 'Search'}
+                    </button>
+                  </div>
+                  {discoverErr ? <p className="text-[11px] text-red-500">{discoverErr}</p> : null}
+                  {discoverMsg ? <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{discoverMsg}</p> : null}
+                </div>
+              )}
+            </div>
+          ) : null}
           {deleteErr ? <p className="mb-2 px-1 text-[11px] text-red-500">{deleteErr}</p> : null}
           {assignErr ? <p className="mb-2 px-1 text-[11px] text-red-500">{assignErr}</p> : null}
           {assignMsg ? <p className="mb-2 px-1 text-[11px] text-emerald-600 dark:text-emerald-400">{assignMsg}</p> : null}

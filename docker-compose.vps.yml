@@ -61,7 +61,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -259,8 +259,8 @@ services:
     # against a schema that didn't fully apply.
     command: ["sh", "-c", "node src/migrate.js && node src/server.js"]
     ports:
-      - "127.0.0.1:8300:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
-      - "127.0.0.1:8301:3001"
+      - "127.0.0.1:${API_HOST_PORT:-8300}:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
+      - "127.0.0.1:${API_METRICS_HOST_PORT:-8301}:3001"
     deploy:
       resources:
         limits:
@@ -360,7 +360,7 @@ services:
     logging: *default-logging
     networks: [frontend]
     ports:
-      - "127.0.0.1:8305:80"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-8305}:80"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
       interval: 15s

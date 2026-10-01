@@ -23,6 +23,14 @@ Uses the same `docker-compose.vps.yml` as a real deployment.
    Leave the `SARVAM_*`/`APIFY_API_TOKEN` lines commented out - see
    "What's real vs. simulated" below for why that's intentional.
 
+   If this VPS already runs a production deployment of this same repo (or
+   another demo), keep `.env.demo`'s `POSTGRES_HOST_PORT`/`API_HOST_PORT`/
+   `API_METRICS_HOST_PORT`/`FRONTEND_HOST_PORT` lines uncommented - they
+   give this stack its own host ports so `docker compose up` doesn't fail
+   with "port is already allocated" against the ports the other stack is
+   already using. If this is the only deployment on the box, you can
+   comment them back out and it'll fall back to the production defaults.
+
 2. Bring the stack up on the `demo` branch, pointed at `.env.demo`:
    ```
    git checkout demo

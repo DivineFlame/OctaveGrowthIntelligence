@@ -36,25 +36,39 @@ Uses the same `docker-compose.vps.yml` as a real deployment.
    git checkout demo
    docker compose -f docker-compose.vps.yml --env-file .env.demo up -d
    ```
-   The `api` container's own startup command (`node src/migrate.js &&
-   node src/server.js`) applies the schema migrations automatically -
-   same as any deployment, nothing demo-specific there.
+   The `api` container's own startup command runs the schema migrations
+   (`node src/migrate.js`, same as any deployment), then - because
+   `.env.demo` sets `RUN_DEMO_SEED=true` - seeds the sample data itself
+   (`node scripts/seed-demo.js`), and only then starts the server. **No
+   shell/terminal into the container is needed**: if your platform's
+   terminal/console (e.g. Dokploy's) isn't working, this step still
+   happens on its own - just watch the `api` container's logs for
+   `[seed-demo] done.` (or `[seed-demo] ... already exists ...` on a
+   restart after the first successful seed - it's idempotent, so leaving
+   `RUN_DEMO_SEED=true` permanently is safe).
 
-3. Seed the sample data (one-off, run once against a fresh database):
-   ```
-   docker compose -f docker-compose.vps.yml --env-file .env.demo exec api npm run seed:demo
-   ```
-   This is idempotent and safety-guarded: it checks whether the demo
-   admin (`admin@demo.octave.invalid`) already exists and exits quietly
-   if so, and it refuses to run at all against a database that already
-   has other real users in it unless you pass `--force` - this is a
-   deliberate guard against accidentally pointing the seed script at a
-   production database. It needs `ENCRYPTION_KEY` set (step 1) to
-   encrypt the sample channel credentials it writes, the same way the
-   app encrypts real ones.
+   It needs `ENCRYPTION_KEY` set (step 1) to encrypt the sample channel
+   credentials it writes, the same way the app encrypts real ones. It
+   refuses to run at all (and the container will keep crash-looping,
+   visible in its logs, until you fix this) against a database that
+   already has other real users in it - the signature of an actual
+   deployment's database, not a fresh demo one - unless `seed-demo.js`
+   is run manually with `--force`; see "Seeding manually" below if you
+   ever need that, or need to re-run it with a shell after all.
 
-4. Log in at `https://$APP_DOMAIN` (or `http://localhost:5173` for a
+3. Log in at `https://$APP_DOMAIN` (or `http://localhost:5173` for a
    local run) with any of the accounts below.
+
+### Seeding manually (fallback, needs a working shell into the container)
+
+If you'd rather not auto-seed on every startup, set `RUN_DEMO_SEED=false`
+(or remove the line) in `.env.demo` and run it yourself once, whenever
+your platform's terminal/console is available:
+```
+docker compose -f docker-compose.vps.yml --env-file .env.demo exec api npm run seed:demo
+```
+Same script either way - idempotent, and safety-guarded against running
+against a non-demo database without `--force`.
 
 ## Logging in
 

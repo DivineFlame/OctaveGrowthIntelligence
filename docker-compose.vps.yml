@@ -245,6 +245,18 @@ services:
       DB_POOL_MAX: ${DB_POOL_MAX:-}
       DB_POOL_IDLE_TIMEOUT_MS: ${DB_POOL_IDLE_TIMEOUT_MS:-}
       DB_POOL_CONNECTION_TIMEOUT_MS: ${DB_POOL_CONNECTION_TIMEOUT_MS:-}
+      # Optional - demo deployments only (see DEMO.md). When true, runs
+      # api/scripts/seed-demo.js once on container start, right after
+      # migrations and before the server starts serving - so a demo stack
+      # seeds itself with no shell/terminal access needed. Idempotent: a
+      # restart after the first successful seed just detects the demo
+      # admin already exists and skips straight to starting the server.
+      # Leave unset/false on a real deployment.
+      RUN_DEMO_SEED: ${RUN_DEMO_SEED:-false}
+      # Optional - overrides the shared password seed-demo.js sets for
+      # every demo account (default OctaveDemo#2026 if unset). Only read
+      # when RUN_DEMO_SEED is true.
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
     volumes:
       - recordings:/app/recordings
       # Read-only: lets src/migrate.js apply postgres/migrate-*.sql against
@@ -257,7 +269,7 @@ services:
     # migrate.js exits non-zero (crash-looping this container, visible in
     # `docker ps`/logs) if a migration fails, rather than starting the API
     # against a schema that didn't fully apply.
-    command: ["sh", "-c", "node src/migrate.js && node src/server.js"]
+    command: ["sh", "-c", "node src/migrate.js && if [ \"$RUN_DEMO_SEED\" = \"true\" ]; then node scripts/seed-demo.js; fi && node src/server.js"]
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8300}:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
       - "127.0.0.1:${API_METRICS_HOST_PORT:-8301}:3001"

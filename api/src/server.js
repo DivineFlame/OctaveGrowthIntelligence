@@ -2499,7 +2499,7 @@ app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SU
 
     const newStatus = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'DRAFT'; // REQUEST_CHANGE, now zod-enforced above
     await pool.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
-    await pool.query('INSERT INTO approvals (variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5)', [rows[0].asset_id, req.user.id, req.user.id, newStatus, comment || '']);
+    await pool.query('INSERT INTO approvals (variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5)', [variantId, req.user.id, req.user.id, newStatus, comment || '']);
 
     if (newStatus === 'APPROVED') {
       // Push to publisher queue - Hermes Publisher Agent (shared key, see note above)

@@ -739,6 +739,31 @@ function runSuite() {
     assert.ok(fs.existsSync(fileRows[0].s3_key), 'the uploaded file must really exist on disk before we assert it is gone after delete');
   });
 
+  // POST /content/variants/:variantId/approve: the approvals row this
+  // writes must reference the variant that was actually approved
+  // (approvals.variant_id REFERENCES content_variants(id)) - not the
+  // asset it belongs to. Catches a real regression where this insert
+  // used the wrong id and would violate that foreign key outright.
+  let doomedVariantId;
+
+  test('POST /content/:assetId/transform then POST /content/variants/:variantId/approve: writes a real approvals row against the variant, not the asset', async () => {
+    const transform = await call(`/content/${doomedAssetId}/transform`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { channels: ['instagram'] } });
+    assert.equal(transform.status, 200, JSON.stringify(transform.data));
+    doomedVariantId = transform.data.variants[0].id;
+
+    const approve = await call(`/content/variants/${doomedVariantId}/approve`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: { action: 'APPROVE', comment: 'looks good' } });
+    assert.equal(approve.status, 200, JSON.stringify(approve.data));
+    assert.equal(approve.data.status, 'APPROVED');
+
+    const { rows } = await db.query('SELECT variant_id, status FROM approvals WHERE variant_id=$1', [doomedVariantId]);
+    assert.equal(rows.length, 1, 'exactly one approvals row for this variant');
+    assert.equal(rows[0].variant_id, doomedVariantId);
+    assert.equal(rows[0].status, 'APPROVED');
+
+    const { rows: noneForAsset } = await db.query('SELECT 1 FROM approvals WHERE variant_id=$1', [doomedAssetId]);
+    assert.equal(noneForAsset.length, 0, 'the asset id must never end up in approvals.variant_id');
+  });
+
   test('DELETE /products/:id: a regular member cannot delete a product', async () => {
     const { status, data } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenMember}` }, body: { confirm_name: 'Doomed Product' } });
     assert.equal(status, 403, JSON.stringify(data));

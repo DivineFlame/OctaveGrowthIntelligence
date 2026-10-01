@@ -18,6 +18,8 @@ import {
   FileText,
   Image as ImageIcon,
   Trash2,
+  Phone,
+  Loader2,
 } from 'lucide-react';
 import { api, ApiError } from '../lib/api.js';
 
@@ -217,6 +219,33 @@ function AttachmentChip({ name, mimeType, size, onRemove }) {
   );
 }
 
+// One-line summary of the most recent Octave Voice Agent call on a lead,
+// shown under the Thread header. Deliberately terse (it sits in a 10px
+// line next to the contact line) - full history, if ever needed, is the
+// raw `calls` array this reads from.
+function CallStatusLabel({ call }) {
+  const when = new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (call.status === 'failed' || call.error) {
+    return <>Call failed ({when}){call.error ? `: ${call.error}` : ''}</>;
+  }
+  const parts = [`Octave Voice Agent: ${call.status}`];
+  if (call.duration_seconds != null) parts.push(`${call.duration_seconds}s`);
+  parts.push(when);
+  return (
+    <>
+      {parts.join(' · ')}
+      {call.recording_url ? (
+        <>
+          {' · '}
+          <a href={call.recording_url} target="_blank" rel="noreferrer" className="underline">
+            recording
+          </a>
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function Thread({ lead, onClose }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -263,6 +292,71 @@ function Thread({ lead, onClose }) {
       cancelled = true;
     };
   }, [lead.id]);
+
+  // Octave Voice Agent - outbound call to this lead's number (see
+  // api/src/voice-agent.js, POST/GET /leads/:id/call(s)). `calls` is the
+  // full history, newest first; `calling` guards the button while a
+  // request is in flight. After a call is placed, pollCalls() re-fetches
+  // a few times so a ringing/answered status has a chance to resolve to
+  // something terminal without the user having to reopen the thread -
+  // there's no live push from the backend here (that would need
+  // WebSockets this app doesn't have), just a short poll.
+  const [calls, setCalls] = useState([]);
+  const [calling, setCalling] = useState(false);
+  const [callErr, setCallErr] = useState('');
+  const pollRef = useRef(null);
+
+  const TERMINAL_CALL_STATUSES = ['completed', 'failed', 'no-answer', 'no_answer', 'busy', 'cancelled', 'canceled', 'error'];
+
+  function loadCalls() {
+    return api
+      .leadCalls(lead.id)
+      .then((rows) => setCalls(rows))
+      .catch(() => {}); // call history is a convenience, not core to the thread - stay quiet on failure
+  }
+
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  function pollCalls() {
+    stopPolling();
+    let ticks = 0;
+    pollRef.current = setInterval(() => {
+      ticks += 1;
+      api
+        .leadCalls(lead.id)
+        .then((rows) => {
+          setCalls(rows);
+          const latest = rows[0];
+          if (ticks >= 10 || (latest && TERMINAL_CALL_STATUSES.includes(latest.status))) stopPolling();
+        })
+        .catch(() => stopPolling());
+    }, 4000);
+  }
+
+  useEffect(() => {
+    loadCalls();
+    return stopPolling;
+  }, [lead.id]);
+
+  async function startCall() {
+    setCalling(true);
+    setCallErr('');
+    try {
+      const row = await api.callLead(lead.id);
+      setCalls((prev) => [row, ...prev.filter((c) => c.id !== row.id)]);
+      if (row.status === 'failed' && row.error) setCallErr(row.error);
+      else pollCalls();
+    } catch (e) {
+      setCallErr(e instanceof ApiError ? e.message : 'Could not place the call');
+    } finally {
+      setCalling(false);
+    }
+  }
 
   useEffect(() => {
     setSelectedTemplateName('');
@@ -433,17 +527,36 @@ function Thread({ lead, onClose }) {
   return (
     <div className="flex h-full flex-col rounded-[12px] border border-black/5 bg-white dark:border-white/[0.08] dark:bg-[#121214]">
       <div className="flex items-center justify-between border-b border-black/5 px-4 py-3 dark:border-white/[0.08]">
-        <div>
+        <div className="min-w-0">
           <p className="text-[13px] font-semibold text-zinc-900 dark:text-white">
             {lead.contact_name || lead.company_name || 'Unknown'}
           </p>
           <p className="text-[11px] text-zinc-500 dark:text-white/50">
             {lead.source_channel} · {lead.phone || lead.email || 'no contact info on file'}
           </p>
+          {calls.length ? (
+            <p className="mt-0.5 truncate text-[10px] text-zinc-400 dark:text-white/40">
+              <CallStatusLabel call={calls[0]} />
+            </p>
+          ) : null}
+          {callErr ? <p className="mt-0.5 text-[10px] text-red-500">{callErr}</p> : null}
         </div>
-        <button onClick={onClose} className="text-[11px] text-zinc-500 hover:text-zinc-900 dark:text-white/50 dark:hover:text-white">
-          Close
-        </button>
+        <div className="flex shrink-0 items-center gap-3">
+          {lead.phone ? (
+            <button
+              onClick={startCall}
+              disabled={calling}
+              title={`Call ${lead.phone} via Octave Voice Agent`}
+              aria-label="Call this lead"
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500 text-white disabled:opacity-50"
+            >
+              {calling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Phone className="h-3.5 w-3.5" />}
+            </button>
+          ) : null}
+          <button onClick={onClose} className="text-[11px] text-zinc-500 hover:text-zinc-900 dark:text-white/50 dark:hover:text-white">
+            Close
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 min-w-0 space-y-2 overflow-x-hidden overflow-y-auto px-4 py-3">

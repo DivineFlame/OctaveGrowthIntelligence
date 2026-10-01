@@ -451,6 +451,103 @@ product. Either `application/x-www-form-urlencoded`/`multipart/form-data`
 (a real HTML form) or JSON (a JS-driven one) works, on both the main app
 and the separate webhook server (`WEBHOOK_PORT`).
 
+## Octave Voice Agent (calling leads from the Inbox)
+
+Lets a team member place a real outbound call to a lead's phone number
+straight from the Inbox/Leads thread, via [Sarvam AI's Conversations
+(Voice Agents)](https://docs.sarvam.ai/conversations) product. Same
+configuration philosophy as `SARVAM_API_KEY`'s inquiry classifier below:
+everything lives in environment variables, read fresh on every call
+(`api/src/voice-agent.js`) - no database row for settings, no admin UI.
+Leave the required variables unset and calling is simply unavailable (the
+Call button still shows for a lead with a phone number, but the attempt
+comes back `503`); nothing else in the app changes.
+
+If your database already existed before this feature was added, run
+`postgres/migrate-voice-calls.sql` once (same `docker exec ... psql`
+pattern as the bootstrap script, or just re-run `node src/migrate.js`,
+which applies every not-yet-applied migration including this one in
+order) - it adds the `voice_calls` table that records every call attempt
+and whatever Sarvam reports back about it.
+
+**One-time setup, outside this app:**
+
+1. At [indus.sarvam.ai](https://indus.sarvam.ai), create an agent under
+   **Agents** and name it (e.g. "Octave Voice Agent"). Set its greeting/
+   system prompt, language and voice under **Settings**, and test it with
+   the built-in test-agent feature.
+2. Deploy it to a phone number (rent one, or bring your own) under
+   **Outbound Campaigns** / connections - this becomes
+   `SARVAM_VOICE_AGENT_PHONE_NUMBER` and `SARVAM_VOICE_CONNECTION_ID`
+   below.
+3. Copy the agent's `org_id`, `workspace_id`, `app_id` (and its version,
+   default `1`) from the dashboard into the env vars of the same name.
+
+**Environment variables** (see `.env.vps.example` for the exact block):
+
+| Variable | Required | What it is |
+| --- | --- | --- |
+| `SARVAM_API_KEY` | Yes | Shared with the inquiry classifier below - same Sarvam account. |
+| `SARVAM_VOICE_ORG_ID` | Yes | From the Sarvam dashboard. |
+| `SARVAM_VOICE_WORKSPACE_ID` | Yes | From the Sarvam dashboard. |
+| `SARVAM_VOICE_APP_ID` | Yes | The deployed "Octave Voice Agent" app's id. |
+| `SARVAM_VOICE_APP_VERSION` | No (default `1`) | Which deployed version to call. |
+| `SARVAM_VOICE_CONNECTION_ID` | Yes | The phone connection the agent was deployed to. |
+| `SARVAM_VOICE_AGENT_PHONE_NUMBER` | Yes | The caller-ID number calls show as coming from. |
+| `SARVAM_VOICE_GREETING` | No | Overrides the agent's own configured opening line. |
+| `SARVAM_VOICE_LANGUAGE` | No | Overrides the agent's own configured language. |
+| `SARVAM_VOICE_WEBHOOK_SECRET` | Recommended | Gates the status-update webhook (below). Generate like `JWT_SECRET` (`openssl rand -hex 32`). |
+
+All six "Yes" rows have to be set together for calling to turn on at all
+(`voiceAgent.isConfigured()`); any one missing and `POST /leads/:id/call`
+returns `503` naming exactly what's missing, rather than a bare failure.
+
+**Placing a call:** in the Inbox/Leads thread, a lead with a phone number
+on file shows a call button next to its contact line
+(`MessagesPanel.jsx`'s `Thread` header). `POST /leads/:id/call` uses the
+same `canAccessLead()` authorization as replying to a lead (see
+"Webhooks" above and `GET /leads/:id/messages`) - if you can see and
+reply to a lead, you can call it; no separate permission. The lead's
+`phone` column is free text (CSV import, a webhook payload, a web form, or
+typed by hand) - `normalizePhoneForCall()` assumes a bare 10-digit number
+is Indian and prefixes `+91` (this app is scoped to the Indian market
+throughout - GSTIN extraction, INR pricing, etc.), and anything that
+doesn't resolve to a plausible E.164 number is rejected with `400` rather
+than sent to Sarvam as a guess.
+
+Every attempt is recorded in `voice_calls` regardless of outcome -
+`GET /leads/:id/calls` is the history, newest first, shown as a one-line
+summary under the thread header. A failure to actually place the call
+(Sarvam rejects the request, a network error, a timeout) is recorded on
+the row rather than hard-failing the HTTP response - the same
+"recorded, not hard-failed" shape `POST /leads/:id/reply`'s
+`send_status`/`send_error` already uses, so the UI can say exactly why a
+call didn't go out instead of a bare error.
+
+**Status updates after the call is placed** (ringing → answered →
+completed, duration, recording/transcript URLs) arrive, if at all, via
+`POST /webhooks/voice/sarvam/<SARVAM_VOICE_WEBHOOK_SECRET>`, which Sarvam
+is given as the call's `webhook_config.url` - this additionally needs
+`APP_DOMAIN` or `API_DOMAIN` set to a real, internet-reachable domain (the
+same requirement Instagram publishing already has for its own callback),
+or the URL is simply never included in the call request and the call's
+status stays at `ringing` in the UI after being placed. Unlike the
+company-wide webhook secret the other channels share (`webhook_secret` on
+the `company` row), this one is a single global env var, matching the
+rest of this feature's "environment variables only" design.
+
+One honesty note worth being explicit about: Sarvam's publicly fetchable
+API docs confirm the outbound-call creation request/response shape (POST
+.../outbounds returning `{ attempt_id }`) and that a webhook callback URL
+can be supplied, but do not spell out the exact field names used in the
+status webhook's payload. `parseStatusWebhookPayload()` in
+`api/src/voice-agent.js` is deliberately lenient about this - it checks a
+handful of plausible field names/nesting for status, duration, recording
+and transcript URLs, and always keeps the full raw payload in
+`voice_calls.raw_last_webhook` regardless of what it managed to extract,
+so nothing Sarvam actually sends is ever silently lost even where a field
+name here turns out to need adjusting against a live account.
+
 ## Virus scanning (ClamAV)
 
 `POST /leads/upload-csv` and `POST /content/upload` scan every uploaded file
@@ -2208,3 +2305,54 @@ created, even a test one made by mistake - it would sit forever with its
   is actually gone (not just orphaned), and a repeat delete 404ing.
   Extended `schemas.test.js` for the new `deleteProduct` schema.
 - Full unit suite passes (153/153); `npm run build` succeeds.
+
+
+## Octave Voice Agent: real outbound calling from the Inbox, via Sarvam AI
+
+There was previously no way to call a lead at all - the Inbox/Leads thread
+could only send/receive text (email, WhatsApp). This adds a working
+outbound call button next to a lead's phone number, backed by Sarvam AI's
+Conversations (Voice Agents) product, with a deployed agent named "Octave
+Voice Agent".
+
+- New `api/src/voice-agent.js` - the real Sarvam integration (request
+  shape, phone normalization, response/webhook parsing), kept env-var
+  only (`SARVAM_VOICE_*`, see README.md "Octave Voice Agent" above) with
+  no database row and no admin UI for settings, same configuration
+  philosophy `SARVAM_API_KEY`'s inquiry classifier already established.
+  Independently unit-tested (21 tests, including Sarvam's HTTP response
+  handling via a mocked `fetch` - no real network calls in the test
+  suite), same reasoning every other `api/src/*.js` module pulled out of
+  `server.js` already follows.
+- New `voice_calls` table (`postgres/migrate-voice-calls.sql`) recording
+  every call attempt and whatever Sarvam reports back - `POST
+  /leads/:id/call` and `GET /leads/:id/calls`, gated by the same
+  `canAccessLead()` authorization `GET /leads/:id/messages`/`POST
+  /leads/:id/reply` already use (no separate "can call" permission). A
+  failure to actually place the call is recorded on the row rather than
+  hard-failing the response - the same `send_status`/`send_error` shape
+  `POST /leads/:id/reply` already uses for a reply that couldn't be sent.
+- New `POST /webhooks/voice/sarvam/:secret` for Sarvam's own call-status
+  callbacks (ringing/answered/completed, duration, recording/transcript
+  URLs), gated by `SARVAM_VOICE_WEBHOOK_SECRET` - a single global env var
+  rather than the per-company `webhook_secret` the other channels share,
+  matching this feature's env-var-only design. Deliberately lenient
+  payload parsing with the full raw body always kept alongside it (see
+  the README section for why - Sarvam's public docs don't spell out its
+  exact webhook field names).
+- Added a call button to the Inbox/Leads `Thread` header
+  (`MessagesPanel.jsx`) next to the lead's phone number, with a one-line
+  call-status summary (including a link to the recording once Sarvam
+  posts one back) and a short poll after placing a call so a
+  ringing/answered status has a chance to resolve without reopening the
+  thread.
+- Added integration coverage against a real database for the pre-flight
+  checks (unknown lead 404s, unauthorized 403s, an unconfigured agent
+  503s naming exactly what's missing, and that a rejected attempt never
+  writes a `voice_calls` row) and the status webhook's 404 when no
+  webhook secret is configured - the parts of this feature that are safe
+  to exercise without actually calling Sarvam's live API from a test
+  suite; the Sarvam HTTP integration itself is unit-tested with a mocked
+  `fetch` instead (see `voice-agent.test.js`).
+- Full unit suite passes (174/175, the one skip pre-existing and
+  unrelated - see "Testing"); `npm run build` succeeds.

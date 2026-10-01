@@ -793,4 +793,52 @@ function runSuite() {
     const { status } = await call(`/products/${doomedProductId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenA}` }, body: { confirm_name: 'Doomed Product' } });
     assert.equal(status, 404);
   });
+
+  // POST /leads/:id/call, GET /leads/:id/calls, and the status webhook -
+  // Octave Voice Agent (api/src/voice-agent.js). This test environment
+  // deliberately has no SARVAM_VOICE_* env vars set (see the spawn block
+  // above), so every path that would actually place a call over the
+  // network is covered by voice-agent.test.js's mocked-fetch unit tests
+  // instead - what's worth proving against a real database here is the
+  // pre-flight checks: lead lookup, canAccessLead authorization, the
+  // "not configured" 503, and that a rejected/unauthorized attempt never
+  // writes a voice_calls row.
+  let voiceLeadId;
+
+  test('POST /leads/:id/call (setup): create a lead with a phone number, unassigned and with no product', async () => {
+    const insert = await db.query(
+      `INSERT INTO leads (source_channel, company_name, contact_name, phone, status) VALUES ('web_form','Voice Co','Voice Lead','9876543210','NEW') RETURNING id`
+    );
+    voiceLeadId = insert.rows[0].id;
+  });
+
+  test('GET /leads/:id/calls: empty history for a lead with no calls yet', async () => {
+    const { status, data } = await call(`/leads/${voiceLeadId}/calls`, { headers: { Authorization: `Bearer ${tokenA}` } });
+    assert.equal(status, 200, JSON.stringify(data));
+    assert.deepEqual(data, []);
+  });
+
+  test('POST /leads/:id/call: 404 for an unknown lead', async () => {
+    const { status } = await call(`/leads/00000000-0000-0000-0000-000000000000/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: {} });
+    assert.equal(status, 404);
+  });
+
+  test('POST /leads/:id/call: 403 for a user with no access to this lead (unassigned, not a manager)', async () => {
+    const { status } = await call(`/leads/${voiceLeadId}/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokenMember}` }, body: {} });
+    assert.equal(status, 403);
+  });
+
+  test('POST /leads/:id/call: 503 when Octave Voice Agent has no SARVAM_VOICE_* configuration, and nothing is written', async () => {
+    const { status, data } = await call(`/leads/${voiceLeadId}/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokenA}` }, body: {} });
+    assert.equal(status, 503, JSON.stringify(data));
+    assert.match(data.error, /not configured/);
+
+    const { rows } = await db.query('SELECT id FROM voice_calls WHERE lead_id=$1', [voiceLeadId]);
+    assert.equal(rows.length, 0, 'a rejected pre-flight check must never create a voice_calls row');
+  });
+
+  test('POST /webhooks/voice/sarvam/:secret: 404 when SARVAM_VOICE_WEBHOOK_SECRET is not set', async () => {
+    const res = await fetch(`${BASE}/webhooks/voice/sarvam/whatever-secret`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attempt_id: 'att_x', status: 'completed' }) });
+    assert.equal(res.status, 404);
+  });
 }

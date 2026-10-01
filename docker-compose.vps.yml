@@ -197,6 +197,19 @@ services:
       # filtering (is_inquiry stays NULL/unclassified).
       SARVAM_API_KEY: ${SARVAM_API_KEY:-}
       SARVAM_MODEL: ${SARVAM_MODEL:-sarvam-105b}
+      # Octave Voice Agent (outbound calling from the Inbox/Leads UI via
+      # Sarvam AI Conversations - see .env.vps.example / README.md
+      # "Octave Voice Agent"). Reuses SARVAM_API_KEY above; all unset
+      # means calling is simply unavailable in the UI.
+      SARVAM_VOICE_ORG_ID: ${SARVAM_VOICE_ORG_ID:-}
+      SARVAM_VOICE_WORKSPACE_ID: ${SARVAM_VOICE_WORKSPACE_ID:-}
+      SARVAM_VOICE_APP_ID: ${SARVAM_VOICE_APP_ID:-}
+      SARVAM_VOICE_APP_VERSION: ${SARVAM_VOICE_APP_VERSION:-1}
+      SARVAM_VOICE_CONNECTION_ID: ${SARVAM_VOICE_CONNECTION_ID:-}
+      SARVAM_VOICE_AGENT_PHONE_NUMBER: ${SARVAM_VOICE_AGENT_PHONE_NUMBER:-}
+      SARVAM_VOICE_GREETING: ${SARVAM_VOICE_GREETING:-}
+      SARVAM_VOICE_LANGUAGE: ${SARVAM_VOICE_LANGUAGE:-}
+      SARVAM_VOICE_WEBHOOK_SECRET: ${SARVAM_VOICE_WEBHOOK_SECRET:-}
       # Optional - how often (minutes) to poll every product's Email
       # channel for new mail via IMAP, for any that have imap_host/
       # imap_user/imap_pass set (see email-poller.js and README.md

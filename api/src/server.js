@@ -29,6 +29,7 @@ const { userClaims, hasRoleOrFlag, canGrantRole } = require('./rbac');
 const hierarchy = require('./hierarchy');
 const { createLimiters } = require('./rate-limiters');
 const { detectLanguage, extractGstin } = require('./lead-enrichment');
+const voiceAgent = require('./voice-agent');
 const metrics = require('./metrics');
 const errorTracking = require('./error-tracking');
 require('dotenv').config({ path: '../.env.production' });
@@ -2055,6 +2056,92 @@ app.post('/leads/:id/reply', authMiddleware, replyAttachmentUpload.array('attach
   } catch(e){ cleanupUploads(); serverError(res, e); }
 });
 
+// Octave Voice Agent - outbound calling to a lead's phone number, via
+// Sarvam AI (see api/src/voice-agent.js for the real integration and its
+// honesty notes on the webhook payload; config is env-var only -
+// SARVAM_VOICE_* in README.md "Octave Voice Agent" / .env.vps.example).
+// Same access rule as everything else lead-scoped (GET /leads/:id/
+// messages, POST /leads/:id/reply): canAccessLead(), not a separate
+// permission - if you can see and reply to a lead, you can call it.
+app.get('/leads/:id/calls', authMiddleware, async (req, res) => {
+  try {
+    const lead = await pool.query('SELECT id, product_id, assigned_to FROM leads WHERE id=$1', [req.params.id]);
+    if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    if (!(await canAccessLead(req, lead.rows[0]))) return res.status(403).json({ error: 'Not authorized to view this lead' });
+    const { rows } = await pool.query(
+      `SELECT vc.id, vc.to_number, vc.from_number, vc.provider, vc.attempt_id, vc.status,
+              vc.duration_seconds, vc.recording_url, vc.transcript_url, vc.error,
+              vc.initiated_by, u.email AS initiated_by_email, vc.created_at, vc.updated_at
+       FROM voice_calls vc LEFT JOIN users u ON u.id = vc.initiated_by
+       WHERE vc.lead_id=$1 ORDER BY vc.created_at DESC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch(e){ serverError(res, e); }
+});
+
+app.post('/leads/:id/call', authMiddleware, async (req, res) => {
+  try {
+    const leadRows = await pool.query('SELECT id, product_id, assigned_to, phone, contact_name, company_name FROM leads WHERE id=$1', [req.params.id]);
+    if (!leadRows.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    const lead = leadRows.rows[0];
+    if (!(await canAccessLead(req, lead))) return res.status(403).json({ error: 'Not authorized to call this lead' });
+
+    if (!voiceAgent.isConfigured()) {
+      return res.status(503).json({ error: `Octave Voice Agent is not configured yet - missing: ${voiceAgent.missingFields().join(', ')} (see README.md "Octave Voice Agent").` });
+    }
+
+    const toNumber = voiceAgent.normalizePhoneForCall(lead.phone);
+    if (!toNumber) {
+      return res.status(400).json({ error: lead.phone ? `"${lead.phone}" doesn't look like a callable phone number.` : 'This lead has no phone number on file.' });
+    }
+
+    // Status updates (ringing/answered/completed/failed, recording,
+    // transcript) only ever arrive if Sarvam has somewhere to post them
+    // and that endpoint is actually gated - both SARVAM_VOICE_WEBHOOK_SECRET
+    // and a public domain have to be set, same requirement Instagram
+    // publishing already has for its own callback URL.
+    const domain = API_DOMAIN || APP_DOMAIN;
+    const voiceConfig = voiceAgent.getVoiceConfig();
+    const webhookUrl = (domain && voiceConfig.webhookSecret)
+      ? `https://${domain}/webhooks/voice/sarvam/${voiceConfig.webhookSecret}`
+      : null;
+
+    const inserted = await pool.query(
+      `INSERT INTO voice_calls (lead_id, initiated_by, to_number, from_number, provider, status)
+       VALUES ($1,$2,$3,$4,'sarvam','initiating') RETURNING *`,
+      [req.params.id, req.user.id, toNumber, voiceConfig.agentPhoneNumber || null]
+    );
+    const callRow = inserted.rows[0];
+
+    try {
+      const { attemptId } = await voiceAgent.initiateCall({
+        toNumber,
+        leadName: lead.contact_name,
+        leadCompany: lead.company_name,
+        webhookUrl,
+        webhookMetadata: { call_id: callRow.id, lead_id: req.params.id }
+      });
+      const updated = await pool.query(
+        `UPDATE voice_calls SET attempt_id=$1, status='ringing', updated_at=NOW() WHERE id=$2 RETURNING *`,
+        [attemptId, callRow.id]
+      );
+      await auditLog(req.user.id, 'INITIATE_VOICE_CALL', 'lead', req.params.id, req, 'SUCCESS', { to_number: toNumber, attempt_id: attemptId });
+      res.json(updated.rows[0]);
+    } catch (callErr) {
+      // Same "recorded, not hard-failed" shape as POST /leads/:id/reply's
+      // send_status/send_error - the row still exists so the UI can show
+      // exactly why the call didn't go out, instead of a bare 502.
+      const updated = await pool.query(
+        `UPDATE voice_calls SET status='failed', error=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
+        [callErr.message, callRow.id]
+      );
+      await auditLog(req.user.id, 'INITIATE_VOICE_CALL', 'lead', req.params.id, req, 'FAILED', { to_number: toNumber, error: callErr.message });
+      res.json(updated.rows[0]);
+    }
+  } catch(e){ serverError(res, e); }
+});
+
 // Leads - CSV Upload (Secure: 10MB, 5000 rows, sanitize, dedup, ClamAV)
 app.post('/leads/upload-csv', authMiddleware, uploadLimiter, csvUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
@@ -2600,6 +2687,51 @@ async function handleInboundWebhook(req, res) {
 
 app.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
 
+// Octave Voice Agent status webhook - Sarvam posts call status updates
+// (ringing/answered/completed/failed, recording/transcript URLs once
+// available) to the URL POST /leads/:id/call handed it in
+// webhook_config.url. Gated by SARVAM_VOICE_WEBHOOK_SECRET in the path,
+// same timing-safe comparison as the company webhook_secret above, but
+// this one is a single env var (not per-company) since the whole feature
+// is env-var-configured, not DB-backed - see voice-agent.js. Unset
+// SARVAM_VOICE_WEBHOOK_SECRET and this route always 404s; calls can still
+// be placed, they just never get a live status update after "ringing".
+async function handleVoiceStatusWebhook(req, res) {
+  try {
+    const voiceConfig = voiceAgent.getVoiceConfig();
+    if (!voiceConfig.webhookSecret) return res.status(404).json({ error: 'Voice status webhook not set up' });
+    const provided = Buffer.from(req.params.secret || '');
+    const expected = Buffer.from(voiceConfig.webhookSecret);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return res.status(401).json({ error: 'Invalid webhook secret' });
+    }
+
+    const parsed = voiceAgent.parseStatusWebhookPayload(req.body);
+    if (!parsed) return res.status(400).json({ error: 'No attempt_id in webhook payload' });
+
+    const { rows } = await pool.query(
+      `UPDATE voice_calls SET
+         status = COALESCE($1, status),
+         duration_seconds = COALESCE($2, duration_seconds),
+         recording_url = COALESCE($3, recording_url),
+         transcript_url = COALESCE($4, transcript_url),
+         error = COALESCE($5, error),
+         raw_last_webhook = $6,
+         updated_at = NOW()
+       WHERE attempt_id = $7
+       RETURNING id`,
+      [parsed.status, parsed.durationSeconds, parsed.recordingUrl, parsed.transcriptUrl, parsed.errorMessage, JSON.stringify(parsed.raw), parsed.attemptId]
+    );
+    // No matching row (unknown attempt_id - a stale webhook, a retried
+    // delivery after the row was somehow removed) isn't an error worth
+    // surfacing to Sarvam as one; still 200 so it doesn't keep retrying.
+    res.json({ received: true, updated: rows.length > 0 });
+  } catch(e){ serverError(res, e); }
+}
+
+app.post('/webhooks/voice/sarvam/:secret', webhookLimiter, handleVoiceStatusWebhook);
+
+
 // Website Web Form - every product gets its own dedicated, unguessable
 // URL (product_channels.config.form_token, generated when the product is
 // created - see POST /products - and backfilled for pre-existing products
@@ -2746,6 +2878,7 @@ webhookApp.use(express.json());
 // identically regardless of which of the two a given deployment exposes.
 webhookApp.use(express.urlencoded({ extended: true }));
 webhookApp.post('/webhooks/:webhookSecret/:channel', webhookLimiter, handleInboundWebhook);
+webhookApp.post('/webhooks/voice/sarvam/:secret', webhookLimiter, handleVoiceStatusWebhook);
 webhookApp.post('/forms/:token', webhookLimiter, handleWebFormSubmission);
 webhookApp.get('/health', (req, res) => res.json({ status: 'ok', service: 'webhook' }));
 const webhookServer = webhookApp.listen(WEBHOOK_PORT, () => console.log(`Webhook server on ${WEBHOOK_PORT}`));

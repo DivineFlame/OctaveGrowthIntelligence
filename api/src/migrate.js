@@ -42,7 +42,8 @@ const MIGRATIONS_IN_ORDER = [
   // "Hardening notes" and this file's own header comment) - runs last
   // since it depends on every table/column every earlier migration
   // created, and is itself idempotent (safe to run again on every boot).
-  'migrate-remove-multitenancy.sql'
+  'migrate-remove-multitenancy.sql',
+  'migrate-voice-calls.sql'
 ];
 
 async function main() {

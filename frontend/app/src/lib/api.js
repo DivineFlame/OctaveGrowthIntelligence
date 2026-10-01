@@ -132,6 +132,15 @@ export const api = {
     return apiCall(`/leads${q ? `?${q}` : ''}`);
   },
   leadMessages: (leadId) => apiCall(`/leads/${leadId}/messages`),
+  // Octave Voice Agent - outbound call to this lead's phone number (see
+  // api/src/voice-agent.js, POST /leads/:id/call). Always resolves with
+  // the voice_calls row, even on failure to actually place the call -
+  // check the returned row's `status`/`error`, same shape as
+  // replyToLead's send_status/send_error.
+  callLead: (leadId) => apiCall(`/leads/${leadId}/call`, { method: 'POST' }),
+  // Call history for this lead (most recent first) - backs the small
+  // call log under the Thread header in MessagesPanel.jsx.
+  leadCalls: (leadId) => apiCall(`/leads/${leadId}/calls`),
   // Bulk-deletes selected Inbox/Leads rows - a real delete (DB row +, for
   // an IMAP-sourced email, the actual mailbox message), not the separate
   // PII-erasure DELETE /leads/:id. See server.js's comment on

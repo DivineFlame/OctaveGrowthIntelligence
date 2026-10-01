@@ -74,7 +74,7 @@ against a non-demo database without `--force`.
 
 | Email | Role | Password |
 |---|---|---|
-| `admin@demo.octave.invalid` | Super Admin | `OctaveDemo#2026` |
+| `admin@demo.octave` | Super Admin | `OctaveDemo#2026` |
 | `manager@demo.octave.invalid` | Department Admin | `OctaveDemo#2026` |
 | `sales@demo.octave.invalid` | Sales Lead | `OctaveDemo#2026` |
 | `creator@demo.octave.invalid` | Content Creator | `OctaveDemo#2026` |

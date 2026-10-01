@@ -54,7 +54,7 @@ const DEMO_DOMAIN = 'demo.octave.invalid'; // a domain that can never resolve - 
 // see README.md "User hierarchy". All four share one password so a demo
 // walkthrough only has to remember one thing.
 const USERS = [
-  { key: 'admin', email: `admin@${DEMO_DOMAIN}`, role: 'SUPER_ADMIN', reportsTo: null },
+  { key: 'admin', email: 'admin@demo.octave', role: 'SUPER_ADMIN', reportsTo: null },
   { key: 'manager', email: `manager@${DEMO_DOMAIN}`, role: 'DEPT_ADMIN', reportsTo: 'admin' },
   { key: 'sales', email: `sales@${DEMO_DOMAIN}`, role: 'SALES_LEAD', reportsTo: 'manager' },
   { key: 'creator', email: `creator@${DEMO_DOMAIN}`, role: 'CONTENT_CREATOR', reportsTo: 'manager' }

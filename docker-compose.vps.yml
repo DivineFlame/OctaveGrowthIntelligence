@@ -269,7 +269,7 @@ services:
     # migrate.js exits non-zero (crash-looping this container, visible in
     # `docker ps`/logs) if a migration fails, rather than starting the API
     # against a schema that didn't fully apply.
-    command: ["sh", "-c", "node src/migrate.js && if [ \"$RUN_DEMO_SEED\" = \"true\" ]; then node scripts/seed-demo.js; fi && node src/server.js"]
+    command: ["sh", "-c", "node src/migrate.js && if [ \"$RUN_DEMO_SEED\" = \"true\" ]; then node scripts/seed-demo.js || echo '[seed-demo] non-fatal: continuing to start the server regardless'; fi && node src/server.js"]
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8300}:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
       - "127.0.0.1:${API_METRICS_HOST_PORT:-8301}:3001"

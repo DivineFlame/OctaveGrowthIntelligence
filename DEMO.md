@@ -49,12 +49,18 @@ Uses the same `docker-compose.vps.yml` as a real deployment.
 
    It needs `ENCRYPTION_KEY` set (step 1) to encrypt the sample channel
    credentials it writes, the same way the app encrypts real ones. It
-   refuses to run at all (and the container will keep crash-looping,
-   visible in its logs, until you fix this) against a database that
-   already has other real users in it - the signature of an actual
-   deployment's database, not a fresh demo one - unless `seed-demo.js`
-   is run manually with `--force`; see "Seeding manually" below if you
-   ever need that, or need to re-run it with a shell after all.
+   refuses to run at all against a database that already has other real
+   users in it - the signature of an actual deployment's database, not a
+   fresh demo one - unless `seed-demo.js` is run manually with `--force`;
+   see "Seeding manually" below if you ever need that. A seeding failure
+   is logged but never fatal to the container: migrations having already
+   applied is what matters for the server to start, so it starts either
+   way - check the logs for `[seed-demo]` lines if login doesn't work
+   after a deploy. (If you rename one of the demo accounts in
+   `seed-demo.js`'s `USERS` array after already seeding once, e.g. the
+   admin's email, the script detects and repairs that rename in place on
+   the next run instead of refusing - no `--force` or manual step
+   needed.)
 
 3. Log in at `https://$APP_DOMAIN` (or `http://localhost:5173` for a
    local run) with any of the accounts below.

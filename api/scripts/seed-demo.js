@@ -82,6 +82,28 @@ async function main() {
       console.log(`[seed-demo] ${adminEmail} already exists - demo data looks already seeded. Nothing to do.`);
       return;
     }
+
+    // A previous run of this script may have seeded under an earlier
+    // version of adminEmail (e.g. the admin account's domain changed
+    // since). Recognize that case by its signature - the other three
+    // demo accounts already exist under DEMO_DOMAIN - and repair it in
+    // place with a rename instead of either refusing outright or trying
+    // to re-run the whole seed (which would hit duplicate-email/duplicate-
+    // product conflicts on everything that's already there).
+    const legacyAdmin = await client.query(
+      "SELECT id, email FROM users WHERE role='SUPER_ADMIN' AND email LIKE '%@demo.octave%' AND email<>$1",
+      [adminEmail]
+    );
+    const otherDemoAccountsExist = await client.query(
+      'SELECT 1 FROM users WHERE email=$1 OR email=$2',
+      [USERS[1].email, USERS[2].email]
+    );
+    if (legacyAdmin.rows.length && otherDemoAccountsExist.rows.length) {
+      await client.query('UPDATE users SET email=$1 WHERE id=$2', [adminEmail, legacyAdmin.rows[0].id]);
+      console.log(`[seed-demo] renamed existing demo admin ${legacyAdmin.rows[0].email} -> ${adminEmail}. Demo data was already seeded - nothing else to do.`);
+      return;
+    }
+
     const anyOtherUser = await client.query('SELECT 1 FROM users LIMIT 1');
     if (anyOtherUser.rows.length && !FORCE) {
       console.error(

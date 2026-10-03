@@ -133,6 +133,16 @@ function AssetCard({ asset, spec, canApprove, onTransform, onApprove }) {
   const [err, setErr] = useState('');
   const Icon = fileIcon(asset.mime_type);
 
+  // Older variants for a channel Studio no longer publishes to (e.g. a
+  // leftover email/whatsapp variant from before those were removed as
+  // Studio content targets) have nothing actionable left to do - no
+  // retry, no re-transform, nothing. Showing a permanent PUBLISH_FAILED
+  // badge for one of these forever is just confusing, so once a channel
+  // is off the Studio content list we stop surfacing its old variants
+  // here (the asset itself, and variants for channels still offered,
+  // are unaffected).
+  const visibleVariants = (asset.variants || []).filter((v) => spec[v.channel]?.studioContent !== false);
+
   const toggleChannel = (key) =>
     setSelectedChannels((prev) => (prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key]));
 
@@ -181,14 +191,14 @@ function AssetCard({ asset, spec, canApprove, onTransform, onApprove }) {
         disabled={transforming}
         className="mt-3 rounded-full border border-black/10 px-3.5 py-1.5 text-[12px] font-semibold text-brand transition-colors hover:border-brand disabled:opacity-60 dark:border-white/15"
       >
-        {transforming ? 'Transforming…' : asset.variants && asset.variants.length ? 'Transform for more channels' : 'Transform'}
+        {transforming ? 'Transforming…' : visibleVariants.length ? 'Transform for more channels' : 'Transform'}
       </button>
 
       {err ? <p className="mt-2 text-[12px] text-red-500">{err}</p> : null}
 
       <div className="mt-3 space-y-1.5">
-        {asset.variants && asset.variants.length ? (
-          asset.variants.map((v) => (
+        {visibleVariants.length ? (
+          visibleVariants.map((v) => (
             <VariantRow key={v.id} variant={v} onApprove={handleApprove} canApprove={canApprove} busy={approvingId === v.id} />
           ))
         ) : (

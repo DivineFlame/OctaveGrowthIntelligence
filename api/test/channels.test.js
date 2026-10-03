@@ -493,6 +493,52 @@ test('publishToChannel(youtube): full resumable upload flow - refresh token, ini
   });
 });
 
+test('publishToChannel(instagram): rejects a video with a clear "not implemented" error, before any network call', () => {
+  // Studio's channel picker offers Instagram for video uploads
+  // (CHANNEL_SPECS.instagram.contentTypes) ahead of real video/Reels
+  // publishing actually being built - this pins that the publish path
+  // itself fails fast and clearly instead of sending a video URL to the
+  // image-only media-container endpoint and surfacing a confusing error
+  // from Meta's API instead.
+  const originalFetch = global.fetch;
+  let fetchCalled = false;
+  global.fetch = async () => { fetchCalled = true; throw new Error('fetch should not have been called'); };
+  return assert.rejects(
+    () => publishToChannel('instagram', {
+      config: { ig_user_id: 'ig123', access_token: 'tok' },
+      title: 't', text: '', publicFileUrl: 'https://example.com/video.mp4', mimeType: 'video/mp4'
+    }),
+    /not implemented yet/
+  ).finally(() => {
+    global.fetch = originalFetch;
+    assert.equal(fetchCalled, false, 'a video mimeType must be rejected before any Instagram API call');
+  });
+});
+
+test('publishToChannel(instagram): still publishes an image normally (unaffected by the video guard)', () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push(url);
+    if (String(url).endsWith('/media')) {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.image_url, 'https://example.com/photo.jpg');
+      return { ok: true, json: async () => ({ id: 'creation123' }) };
+    }
+    if (String(url).endsWith('/media_publish')) {
+      return { ok: true, json: async () => ({ id: 'published123' }) };
+    }
+    throw new Error(`unexpected fetch call in test: ${url}`);
+  };
+  return publishToChannel('instagram', {
+    config: { ig_user_id: 'ig123', access_token: 'tok' },
+    title: 't', text: '', publicFileUrl: 'https://example.com/photo.jpg', mimeType: 'image/jpeg'
+  }).then((result) => {
+    assert.equal(result.externalId, 'published123');
+    assert.equal(calls.length, 2);
+  }).finally(() => { global.fetch = originalFetch; });
+});
+
 test('publishToChannel refuses an unknown channel', () => {
   return assert.rejects(() => publishToChannel('carrier_pigeon', { config: {} }), /Unknown channel: carrier_pigeon/);
 });

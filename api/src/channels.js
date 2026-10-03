@@ -131,10 +131,14 @@ const CHANNEL_SPECS = {
   instagram: {
     label: 'Instagram Business',
     implemented: true,
-    // publishInstagram() only ever creates an image_url media container -
-    // there is no video/reels path implemented, so only offer this
-    // channel for images.
-    contentTypes: ['image/'],
+    // Studio offers Instagram for video uploads only (not images) - a
+    // deliberate product choice, not a technical one. publishInstagram()
+    // itself still only implements the image_url path today (see below) -
+    // a video selected for Instagram will fail cleanly at publish time
+    // with a clear 'not yet supported' error until Reels/video publishing
+    // is actually built, rather than offering a channel this app can't
+    // really publish to yet.
+    contentTypes: ['video/'],
     fields: [
       { key: 'ig_user_id', label: 'Instagram Business Account ID', required: true },
       { key: 'access_token', label: 'Access token', required: true, secret: true }
@@ -558,7 +562,13 @@ async function publishFacebook({ config, title, text, filePath, mimeType }) {
 // Requires a public URL for the image (publicFileUrl, built by the caller
 // from GET /public/content-assets/:assetId/file) - the Instagram Graph API
 // has no direct-upload option, unlike Facebook's /photos endpoint.
-async function publishInstagram({ config, title, text, publicFileUrl }) {
+async function publishInstagram({ config, title, text, publicFileUrl, mimeType }) {
+  // Studio's channel picker now offers Instagram for video uploads (see
+  // CHANNEL_SPECS.instagram.contentTypes) ahead of this actually being
+  // built - fail cleanly and immediately rather than sending a video URL
+  // to the image_url media-container endpoint below, which would just
+  // bounce off Meta's API with a confusing, unrelated-looking error.
+  if ((mimeType || '').startsWith('video/')) throw new Error('Instagram video/Reels publishing is not implemented yet - only images can be published to Instagram right now.');
   if (!publicFileUrl) throw new Error('Instagram requires a public image URL - set APP_DOMAIN or API_DOMAIN to a real, internet-reachable domain (not localhost) so the asset can be fetched by Instagram');
   const caption = [title, text].filter(Boolean).join('\n\n');
 
@@ -682,7 +692,7 @@ async function publishToChannel(channel, { config, title, text, html, filePath, 
     case 'email': return publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments, to, inReplyTo, references }, deps);
     case 'whatsapp': return publishWhatsApp({ config, template, text: text || title, to });
     case 'facebook': return publishFacebook({ config, title, text, filePath, mimeType });
-    case 'instagram': return publishInstagram({ config, title, text, publicFileUrl });
+    case 'instagram': return publishInstagram({ config, title, text, publicFileUrl, mimeType });
     case 'linkedin': return publishLinkedIn({ config, title, text });
     case 'youtube': return publishYouTube({ config, title, text, filePath, mimeType });
     default: throw new Error(`No publisher wired up for channel: ${channel}`);

@@ -14,6 +14,7 @@ import {
   Globe,
   Check,
   Clock,
+  X,
 } from 'lucide-react';
 import StatusBadge from './StatusBadge.jsx';
 import { api, ApiError } from '../lib/api.js';
@@ -43,13 +44,26 @@ function formatBytes(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function ChannelPicker({ spec, selected, onToggle }) {
-  // web_form is inbound-only (a website contact form has nothing to
-  // "publish" to) - it's a real, configurable channel elsewhere (Products
-  // > Channels, the Inbox), but there's nothing for this content-publish
-  // picker to offer for it, so it's excluded here rather than shown as a
-  // permanently-disabled "soon" tile that could never make sense to turn on.
-  const channels = Object.entries(spec || {}).filter(([key]) => key !== 'web_form');
+// A channel is offered here only if (a) GET /channels/spec says it's a real
+// Studio content-publish target at all (studioContent !== false - excludes
+// web_form, which is inbound-only, and whatsapp, which is deliberately
+// confined to the Inbox/Leads reply composer's per-message approved-template
+// flow - see api/src/channels.js's CHANNEL_SPECS), and (b), when a file's
+// mime type is known, that channel's publisher can actually do something
+// with that type of file (contentTypes - e.g. YouTube only ever accepts
+// video/*, Instagram only ever accepts image/* - see each publish*()
+// function in channels.js for exactly why). Offering a channel the upload
+// can't actually publish to would just turn into a failed-transform error
+// later for no reason, so it's filtered out of the picker up front instead.
+function isChannelOffered(def, mimeType) {
+  if (!def || def.studioContent === false) return false;
+  if (!mimeType) return true;
+  if (!def.contentTypes || def.contentTypes === 'any') return true;
+  return def.contentTypes.some((prefix) => mimeType.startsWith(prefix));
+}
+
+function ChannelPicker({ spec, selected, onToggle, mimeType }) {
+  const channels = Object.entries(spec || {}).filter(([, def]) => isChannelOffered(def, mimeType));
   if (!channels.length) return null;
   return (
     <div className="flex flex-wrap gap-2">
@@ -159,7 +173,7 @@ function AssetCard({ asset, spec, canApprove, onTransform, onApprove }) {
       </div>
 
       <div className="mt-3">
-        <ChannelPicker spec={spec} selected={selectedChannels} onToggle={toggleChannel} />
+        <ChannelPicker spec={spec} selected={selectedChannels} onToggle={toggleChannel} mimeType={asset.mime_type} />
       </div>
 
       <button
@@ -192,64 +206,70 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState('');
-  // Channel(s) picked *before* upload - lets someone upload straight "for"
-  // a specific channel (or several) in one step, instead of uploading
-  // first and only then discovering the separate per-asset channel
-  // picker further down. Mirrors the product spec: "Studio is for
-  // uploading content on the different channel product wise, select
-  // channel and upload content." The per-asset picker below still exists
-  // for transforming an already-uploaded asset into *additional* channels
-  // later, so nothing already working is removed - this just makes
-  // channel selection available up front too.
+  // The file the person just dropped/chose, held here (not uploaded yet)
+  // until they pick which channel(s) it's for - lets the channel picker
+  // below only offer channels that can actually take this file's type
+  // (see isChannelOffered), which we can't know until we have the file.
+  const [pendingFile, setPendingFile] = useState(null);
   const [uploadChannels, setUploadChannels] = useState([]);
   const inputRef = useRef(null);
 
   const toggleUploadChannel = (key) =>
     setUploadChannels((prev) => (prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key]));
 
-  const doUpload = useCallback(
-    async (file) => {
-      if (!uploadChannels.length) {
-        setUploadErr('Pick at least one channel before uploading');
-        return;
-      }
-      setUploading(true);
-      setUploadErr('');
+  const pickFile = (file) => {
+    setUploadErr('');
+    setUploadChannels([]);
+    setPendingFile(file);
+  };
+
+  const clearPendingFile = () => {
+    setPendingFile(null);
+    setUploadChannels([]);
+    setUploadErr('');
+  };
+
+  const confirmUpload = useCallback(async () => {
+    if (!pendingFile) return;
+    if (!uploadChannels.length) {
+      setUploadErr('Pick at least one channel before uploading');
+      return;
+    }
+    setUploading(true);
+    setUploadErr('');
+    try {
+      const { asset } = await api.uploadContent(pendingFile, { productId });
+      onUploaded(asset);
+      setPendingFile(null);
+      setUploadChannels([]);
+      // Kick off the transform for the channel(s) selected above right
+      // away, so picking a file, picking channel(s), and confirming is the
+      // whole flow - a transform failure (e.g. Paperclip briefly
+      // unavailable) is reported but doesn't hide that the upload itself
+      // succeeded; the asset still lands in the list and can be retried
+      // from its own Transform button.
       try {
-        const { asset } = await api.uploadContent(file, { productId });
-        onUploaded(asset);
-        // Kick off the transform for the channel(s) selected above right
-        // away, so picking a channel and dropping a file is the whole
-        // flow - a transform failure (e.g. Paperclip briefly unavailable)
-        // is reported but doesn't hide that the upload itself succeeded;
-        // the asset still lands in the list and can be retried from its
-        // own Transform button.
-        try {
-          await onTransform(asset.id, uploadChannels);
-        } catch (transformErr) {
-          setUploadErr(
-            transformErr instanceof ApiError
-              ? `Uploaded, but transform failed: ${transformErr.message}`
-              : 'Uploaded, but transform failed - retry from the Transform button below.'
-          );
-        }
-      } catch (e) {
-        setUploadErr(e instanceof ApiError ? e.message : 'Upload failed');
-      } finally {
-        setUploading(false);
+        await onTransform(asset.id, uploadChannels);
+      } catch (transformErr) {
+        setUploadErr(
+          transformErr instanceof ApiError
+            ? `Uploaded, but transform failed: ${transformErr.message}`
+            : 'Uploaded, but transform failed - retry from the Transform button below.'
+        );
       }
-    },
-    [productId, onUploaded, onTransform, uploadChannels]
-  );
+    } catch (e) {
+      setUploadErr(e instanceof ApiError ? e.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  }, [pendingFile, uploadChannels, productId, onUploaded, onTransform]);
 
   const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (file) doUpload(file);
+    if (file) pickFile(file);
   };
-
-  const canPickChannel = Object.keys(spec || {}).filter((k) => k !== 'web_form').length > 0;
 
   return (
     <section className="rounded-[16px] border border-black/5 bg-white p-5 dark:border-white/[0.08] dark:bg-[#0f0f10]/90">
@@ -261,64 +281,84 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
         </div>
       </div>
 
-      {canPickChannel ? (
-        <div className="mb-3">
-          <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-white/40">
+      {pendingFile ? (
+        <div className="rounded-[12px] border border-black/10 p-4 dark:border-white/15">
+          <div className="flex items-center gap-2">
+            {React.createElement(fileIcon(pendingFile.type), { className: 'h-4 w-4 text-zinc-500 dark:text-white/50' })}
+            <span className="truncate text-[13px] font-medium text-zinc-900 dark:text-white">{pendingFile.name}</span>
+            <span className="shrink-0 text-[11px] text-zinc-500 dark:text-white/50">{formatBytes(pendingFile.size)}</span>
+            <button
+              type="button"
+              onClick={clearPendingFile}
+              disabled={uploading}
+              aria-label="Remove this file and choose another"
+              className="ml-auto shrink-0 rounded-full p-1 text-zinc-400 hover:bg-black/5 hover:text-zinc-700 disabled:opacity-50 dark:text-white/40 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <p className="mb-1.5 mt-3 text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-white/40">
             Upload for channel
           </p>
-          <ChannelPicker spec={spec} selected={uploadChannels} onToggle={toggleUploadChannel} />
-        </div>
-      ) : null}
+          <ChannelPicker spec={spec} selected={uploadChannels} onToggle={toggleUploadChannel} mimeType={pendingFile.type} />
 
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label="Upload content: drop a file here, or press Enter to choose one"
-        aria-busy={uploading}
-        aria-disabled={!uploadChannels.length}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-        onClick={() => inputRef.current && inputRef.current.click()}
-        onKeyDown={(e) => {
-          // A div isn't natively focusable or clickable-by-keyboard the way
-          // a real <button> is - role="button" + tabIndex alone only get a
-          // screen reader to announce it as one; Enter/Space activation has
-          // to be wired up by hand, same as any custom interactive widget.
-          // Without this, a keyboard-only user could tab to this control
-          // but had no way to actually open the file picker - the hidden
-          // <input type="file"> below isn't itself reachable (display:none
-          // removes it from the tab order and the accessibility tree), so
-          // this div was the only way in, and it didn't work.
-          if (e.key === 'Enter' || e.key === ' ') {
+          <button
+            onClick={confirmUpload}
+            disabled={uploading}
+            className="mt-3 rounded-full bg-brand px-3.5 py-1.5 text-[12px] font-semibold text-white disabled:opacity-60"
+          >
+            {uploading ? 'Uploading…' : 'Upload'}
+          </button>
+        </div>
+      ) : (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label="Upload content: drop a file here, or press Enter to choose one"
+          aria-busy={uploading}
+          onDragOver={(e) => {
             e.preventDefault();
-            if (inputRef.current) inputRef.current.click();
-          }
-        }}
-        className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-[12px] border-2 border-dashed px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand
-          ${dragOver ? 'border-brand bg-brand/5' : 'border-black/10 dark:border-white/15'}`}
-      >
-        <Upload className="h-5 w-5 text-zinc-400 dark:text-white/40" aria-hidden="true" />
-        <p className="text-[13px] text-zinc-600 dark:text-white/70">
-          {uploading ? 'Uploading…' : 'Drop raw video, images, script, or brand brief'}
-        </p>
-        <p className="text-[11px] text-zinc-400 dark:text-white/40">JPG/PNG · DOCX · MP4</p>
-        <input
-          ref={inputRef}
-          type="file"
-          tabIndex={-1}
-          aria-hidden="true"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files && e.target.files[0];
-            if (file) doUpload(file);
-            e.target.value = '';
+            setDragOver(true);
           }}
-        />
-      </div>
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => inputRef.current && inputRef.current.click()}
+          onKeyDown={(e) => {
+            // A div isn't natively focusable or clickable-by-keyboard the way
+            // a real <button> is - role="button" + tabIndex alone only get a
+            // screen reader to announce it as one; Enter/Space activation has
+            // to be wired up by hand, same as any custom interactive widget.
+            // Without this, a keyboard-only user could tab to this control
+            // but had no way to actually open the file picker - the hidden
+            // <input type="file"> below isn't itself reachable (display:none
+            // removes it from the tab order and the accessibility tree), so
+            // this div was the only way in, and it didn't work.
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              if (inputRef.current) inputRef.current.click();
+            }
+          }}
+          className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-[12px] border-2 border-dashed px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand
+            ${dragOver ? 'border-brand bg-brand/5' : 'border-black/10 dark:border-white/15'}`}
+        >
+          <Upload className="h-5 w-5 text-zinc-400 dark:text-white/40" aria-hidden="true" />
+          <p className="text-[13px] text-zinc-600 dark:text-white/70">Drop raw video, images, script, or brand brief</p>
+          <p className="text-[11px] text-zinc-400 dark:text-white/40">JPG/PNG · DOCX · MP4</p>
+          <input
+            ref={inputRef}
+            type="file"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files && e.target.files[0];
+              if (file) pickFile(file);
+              e.target.value = '';
+            }}
+          />
+        </div>
+      )}
       {uploadErr ? <p className="mt-2 text-[12px] text-red-500">{uploadErr}</p> : null}
 
       <div className="mt-5 space-y-3">

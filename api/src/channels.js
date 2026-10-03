@@ -47,6 +47,9 @@ const CHANNEL_SPECS = {
   email: {
     label: 'Email',
     implemented: true,
+    // Sends whatever's attached as a plain email attachment - no file-type
+    // restriction on the email side itself.
+    contentTypes: 'any',
     fields: [
       { key: 'smtp_host', label: 'SMTP host', required: true },
       { key: 'smtp_port', label: 'SMTP port', required: true, default: '587' },
@@ -73,6 +76,17 @@ const CHANNEL_SPECS = {
   whatsapp: {
     label: 'WhatsApp Business',
     implemented: true,
+    // Not offered in Studio's content-publish channel picker. WhatsApp
+    // publishing here is deliberately confined to the Inbox/Leads reply
+    // composer, where every send already goes through a real, per-message
+    // approved template (see MessagesPanel.jsx's isWhatsApp template
+    // picker and GET /channels/whatsapp/templates) - the single generic
+    // broadcast_template_name below exists only for backward-compat with
+    // any channel already configured with one; it is no longer reachable
+    // from the Studio UI. implemented stays true since WhatsApp is still a
+    // real, fully-configurable channel for Inbox replies.
+    studioContent: false,
+    contentTypes: 'any',
     fields: [
       { key: 'auth_id', label: 'WhatsApp Auth ID (e.g. MA_XXXXXXXX)', required: true },
       { key: 'auth_token', label: 'WhatsApp Auth Token', required: true, secret: true },
@@ -97,6 +111,10 @@ const CHANNEL_SPECS = {
   facebook: {
     label: 'Facebook Page',
     implemented: true,
+    // publishFacebook() posts to /photos for anything else, which only
+    // really works for images - so offer this channel for images and
+    // videos, not arbitrary documents.
+    contentTypes: ['image/', 'video/'],
     fields: [
       { key: 'page_id', label: 'Page ID', required: true },
       { key: 'access_token', label: 'Page access token', required: true, secret: true }
@@ -106,6 +124,10 @@ const CHANNEL_SPECS = {
   instagram: {
     label: 'Instagram Business',
     implemented: true,
+    // publishInstagram() only ever creates an image_url media container -
+    // there is no video/reels path implemented, so only offer this
+    // channel for images.
+    contentTypes: ['image/'],
     fields: [
       { key: 'ig_user_id', label: 'Instagram Business Account ID', required: true },
       { key: 'access_token', label: 'Access token', required: true, secret: true }
@@ -115,6 +137,10 @@ const CHANNEL_SPECS = {
   linkedin: {
     label: 'LinkedIn Organization',
     implemented: true,
+    // publishLinkedIn() posts text only today (shareMediaCategory: 'NONE')
+    // and never attaches the uploaded file, so no asset type is excluded -
+    // any upload can be captioned and posted as a text update.
+    contentTypes: 'any',
     fields: [
       { key: 'organization_urn', label: 'Organization URN (e.g. urn:li:organization:12345)', required: true },
       { key: 'access_token', label: 'OAuth access token', required: true, secret: true }
@@ -124,6 +150,9 @@ const CHANNEL_SPECS = {
   youtube: {
     label: 'YouTube',
     implemented: true,
+    // publishYouTube() throws for anything that isn't a video/* mimeType -
+    // keep the picker from ever offering an upload that would just fail.
+    contentTypes: ['video/'],
     fields: [
       { key: 'client_id', label: 'Google OAuth Client ID', required: true },
       { key: 'client_secret', label: 'Google OAuth Client Secret', required: true, secret: true },
@@ -136,6 +165,8 @@ const CHANNEL_SPECS = {
   web_form: {
     label: 'Website Web Form',
     implemented: false,
+    studioContent: false,
+    contentTypes: 'any',
     fields: [
       { key: 'redirect_url', label: 'Thank-you page URL (redirect visitors here after they submit - leave blank to return JSON instead, e.g. for a JS-driven form)', required: false },
       { key: 'allowed_origin', label: "Allowed website origin (optional - restricts submissions to this site, e.g. https://www.example.com)", required: false }

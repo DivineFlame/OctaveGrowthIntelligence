@@ -2427,7 +2427,14 @@ app.post('/content/upload', authMiddleware, uploadLimiter, upload.single('file')
   }
 });
 
-// Content - Transform via Paperclip (YouTube, IG, etc.)
+// Content - Transform: creates one content_variants row per requested
+// channel (PENDING_APPROVAL), carrying descriptive per-channel spec text
+// for the UI. Real per-channel resizing used to happen here via a
+// Paperclip sidecar service - removed (no container for it is deployed
+// any more); a variant's actual published file is always the original
+// asset (content_assets.s3_key - see POST /internal/content-variants/
+// :variantId/publish), so nothing downstream depended on the resize
+// output anyway.
 app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transformContent), async (req, res) => {
   const { assetId } = req.params;
   const { channels } = req.body; // ['whatsapp','facebook','instagram','linkedin','youtube','email'] - web_form is inbound-only (see schemas.transformContent), so it's deliberately excluded here even though it's a member of PRODUCT_CHANNELS
@@ -2456,40 +2463,107 @@ app.post('/content/:assetId/transform', authMiddleware, validate(schemas.transfo
       variants.push(rows[0]);
     }
 
-    // Real, synchronous, per-channel resize via Paperclip - it has the
-    // source file on the same shared `recordings` volume (by s3_key), so
-    // this is one same-network HTTP round trip per variant, not a heavy
-    // background job. Only image assets get a real resized output;
-    // anything else (video/PDF/spreadsheet) comes back "skipped" honestly
-    // rather than a made-up success. Either way the variant row itself was
-    // already created above and stays PENDING_APPROVAL either way - this
-    // just fills in the real rendered file when one could be produced.
-    for (const v of variants) {
-      try {
-        const resp = await fetch(`http://${process.env.PAPERCLIP_SERVICE || 'paperclip-transformer:8000'}/transform`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variant_id: v.id, asset_id: assetId, s3_key: asset.rows[0].s3_key, channel: v.channel, mime_type: asset.rows[0].mime_type })
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (resp.ok && data.status === 'transformed' && data.output) {
-          await pool.query('UPDATE content_variants SET s3_key=$1 WHERE id=$2', [data.output, v.id]);
-          v.s3_key = data.output;
-        } else {
-          console.log(`[transform] variant ${v.id} (${v.channel}): ${data.status || 'no response'}${data.reason ? ' - ' + data.reason : ''}`);
-        }
-      } catch (e) {
-        console.log(`[transform] Paperclip unreachable for variant ${v.id}: ${e.message}`);
-      }
-    }
-
     await auditLog(req.user.id, 'TRANSFORM_CONTENT', 'content_asset', assetId, req, 'SUCCESS', { channels, variants: variants.length });
 
     res.json({ variants, message: 'Transformed per channel spec, pending approval' });
   } catch(e){ serverError(res, e); }
 });
 
-// Content - Approval workflow (Super Admin / Approver only)
+// Publishes one APPROVED content_variant through its real channel
+// integration (api/src/channels.js) - extracted so it can be called
+// in-process, synchronously, right from POST /content/variants/:variantId
+// /approve below, instead of enqueueing a job onto a Redis list for a
+// separate Hermes worker container to pick up. Hermes's "publisher" agent
+// used to be that worker - it only ever did this one thing (see its old
+// orchestrator.js), so removing it and calling this function directly
+// means one fewer container, one fewer moving part (no queue, no
+// worker-is-down failure mode), and the admin now sees whether publishing
+// actually succeeded in the approve response itself instead of finding
+// out later. req is only used for its .ip/.headers (audit logging) and
+// optional .body.to (an explicit recipient override) - any caller with a
+// real Express req works.
+// Returns { ok: true, channel, external_id, external_url } on success, or
+// { ok: false, status, error } on a handled failure (never throws).
+async function publishContentVariant(variantId, req) {
+  async function fail(message, status = 502) {
+    await pool.query(`UPDATE content_variants SET status='PUBLISH_FAILED', publish_error=$1 WHERE id=$2`, [message, variantId]);
+    await auditLog(null, 'PUBLISH_CONTENT_FAILED', 'content_variant', variantId, req, 'FAILED', { error: message });
+    return { ok: false, status, error: message };
+  }
+
+  const v = await pool.query('SELECT * FROM content_variants WHERE id=$1', [variantId]);
+  if (!v.rows.length) return { ok: false, status: 404, error: 'Variant not found' };
+  const variant = v.rows[0];
+  const a = await pool.query('SELECT * FROM content_assets WHERE id=$1', [variant.asset_id]);
+  const asset = a.rows[0];
+
+  if (variant.status !== 'APPROVED') return { ok: false, status: 400, error: `Variant is ${variant.status}, not APPROVED - nothing to publish` };
+
+  if (!asset || !asset.product_id) {
+    return await fail('Content is not associated with a Product, so no channel credentials can be found for it. Re-upload it via a Product (POST /content/upload with product_id) to enable publishing.', 400);
+  }
+
+  const channelRow = await pool.query('SELECT config, status FROM product_channels WHERE product_id=$1 AND channel=$2', [asset.product_id, variant.channel]);
+  if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
+    return await fail(`Channel "${variant.channel}" is not configured on this product yet - configure it under Studio > Channels first.`, 400);
+  }
+
+  let config;
+  try {
+    config = channelsLib.decryptChannelSecrets(variant.channel, channelRow.rows[0].config, decryptSecret);
+  } catch (e) {
+    return await fail(`Could not decrypt channel credentials: ${e.message}`);
+  }
+
+  // Instagram needs the asset reachable at a public URL (see
+  // channels.js) - mint a short-lived, single-purpose token for it
+  // rather than exposing content_assets generally.
+  let publicFileUrl = null;
+  if (variant.channel === 'instagram') {
+    const domain = API_DOMAIN || APP_DOMAIN;
+    if (!domain) {
+      return await fail('Instagram requires APP_DOMAIN or API_DOMAIN to be set to a real, internet-reachable domain so the image can be fetched.', 400);
+    }
+    const tok = await pool.query(
+      `INSERT INTO public_file_tokens (file_path, mime_type, expires_at) VALUES ($1,$2, NOW() + interval '15 minutes') RETURNING token`,
+      [asset.s3_key, asset.mime_type]
+    );
+    publicFileUrl = `https://${domain}/public/content-assets/${tok.rows[0].token}/file`;
+  }
+
+  let result;
+  try {
+    result = await channelsLib.publishToChannel(variant.channel, {
+      config,
+      title: variant.title,
+      text: variant.title,
+      filePath: asset.s3_key,
+      fileName: asset.file_name,
+      mimeType: asset.mime_type,
+      publicFileUrl,
+      to: (req.body && req.body.to) || undefined
+    });
+  } catch (e) {
+    return await fail(e.message);
+  }
+
+  await pool.query(
+    `UPDATE content_variants SET status='PUBLISHED', published_url=$1, published_at=NOW(), publish_error=NULL WHERE id=$2`,
+    [result.externalUrl || null, variantId]
+  );
+  await auditLog(null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
+
+  return { ok: true, channel: variant.channel, external_id: result.externalId, external_url: result.externalUrl };
+}
+
+// Content - Approval workflow (Super Admin / Approver only). Approving a
+// variant now publishes it immediately, in-process (see
+// publishContentVariant above) - there is no publisher queue/worker any
+// more. A publish failure here never blocks the approval itself from
+// going through (the variant is still marked APPROVED either way); it
+// just also ends up PUBLISH_FAILED with publish_error set, exactly as it
+// would have asynchronously before, just visible right away instead of
+// silently queued.
 app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SUPER_ADMIN','APPROVER','DEPT_ADMIN','IT_ADMIN'], 'can_approve_content'), validate(schemas.approveVariant), async (req, res) => {
   const { variantId } = req.params;
   const { action, comment } = req.body; // APPROVE, REJECT, REQUEST_CHANGE
@@ -2501,94 +2575,48 @@ app.post('/content/variants/:variantId/approve', authMiddleware, roleOrFlag(['SU
     await pool.query('UPDATE content_variants SET status=$1, approved_by=$2 WHERE id=$3', [newStatus, req.user.id, variantId]);
     await pool.query('INSERT INTO approvals (variant_id, requested_by, approved_by, status, comment) VALUES ($1,$2,$3,$4,$5)', [variantId, req.user.id, req.user.id, newStatus, comment || '']);
 
+    let publishResult = null;
     if (newStatus === 'APPROVED') {
-      // Push to publisher queue - Hermes Publisher Agent (shared key, see note above)
-      await redisClient.lPush('publisher:queue', JSON.stringify({ variant_id: variantId }));
+      publishResult = await publishContentVariant(variantId, req);
     }
 
     await auditLog(req.user.id, `${action}_CONTENT`, 'content_variant', variantId, req, 'SUCCESS', { comment });
 
-    res.json({ variant_id: variantId, status: newStatus, message: `Content ${newStatus}, ${newStatus==='APPROVED' ? 'queued for publishing to channel' : ''}` });
+    const message = newStatus !== 'APPROVED'
+      ? `Content ${newStatus}`
+      : publishResult.ok
+        ? `Content APPROVED and published to ${publishResult.channel}`
+        : `Content APPROVED, but publishing failed: ${publishResult.error}`;
+
+    // status here is always the approval outcome (APPROVED/REJECTED/DRAFT)
+    // - unchanged field meaning from before this function started also
+    // publishing. Whether the subsequent publish attempt itself succeeded
+    // is reported separately via `published`/`publish_error` (and, on
+    // failure, content_variants.status in the database does move on to
+    // PUBLISH_FAILED - see publishContentVariant's fail() helper - same as
+    // it always eventually did once Hermes got around to it, just visible
+    // immediately now instead of asynchronously).
+    res.json({
+      variant_id: variantId,
+      status: newStatus,
+      published: publishResult ? publishResult.ok : undefined,
+      published_url: publishResult && publishResult.ok ? publishResult.external_url : undefined,
+      publish_error: publishResult && !publishResult.ok ? publishResult.error : undefined,
+      message
+    });
   } catch(e){ serverError(res, e); }
 });
 
-// Internal, server-to-server only (see internalMiddleware) - Hermes calls
-// this after an approved content_variant lands on the `publisher:queue`
-// Redis list, to actually post it through the real channel integration
-// (api/src/channels.js) instead of just logging a fake "Publishing variant
-// X" and fabricating a URL.
+// Internal, server-to-server only (see internalMiddleware) - a thin HTTP
+// wrapper around publishContentVariant() above, kept around for manual
+// use (e.g. retrying one specific PUBLISH_FAILED variant by hand with the
+// shared internal secret) now that nothing calls this automatically -
+// approving a variant publishes it directly in-process instead.
 app.post('/internal/content-variants/:variantId/publish', internalMiddleware, async (req, res) => {
-  const { variantId } = req.params;
   try {
-    const v = await pool.query('SELECT * FROM content_variants WHERE id=$1', [variantId]);
-    if (!v.rows.length) return res.status(404).json({ error: 'Variant not found' });
-    const variant = v.rows[0];
-    const a = await pool.query('SELECT * FROM content_assets WHERE id=$1', [variant.asset_id]);
-    const asset = a.rows[0];
-
-    if (variant.status !== 'APPROVED') return res.status(400).json({ error: `Variant is ${variant.status}, not APPROVED - nothing to publish` });
-
-    async function fail(message) {
-      await pool.query(`UPDATE content_variants SET status='PUBLISH_FAILED', publish_error=$1 WHERE id=$2`, [message, variantId]);
-      await auditLog(null, 'PUBLISH_CONTENT_FAILED', 'content_variant', variantId, req, 'FAILED', { channel: variant.channel, error: message });
-      return res.status(502).json({ published: false, error: message });
-    }
-
-    if (!asset || !asset.product_id) {
-      return await fail('Content is not associated with a Product, so no channel credentials can be found for it. Re-upload it via a Product (POST /content/upload with product_id) to enable publishing.');
-    }
-
-    const channelRow = await pool.query('SELECT config, status FROM product_channels WHERE product_id=$1 AND channel=$2', [asset.product_id, variant.channel]);
-    if (!channelRow.rows.length || channelRow.rows[0].status !== 'configured') {
-      return await fail(`Channel "${variant.channel}" is not configured on this product yet - configure it under Studio > Channels first.`);
-    }
-
-    let config;
-    try {
-      config = channelsLib.decryptChannelSecrets(variant.channel, channelRow.rows[0].config, decryptSecret);
-    } catch (e) {
-      return await fail(`Could not decrypt channel credentials: ${e.message}`);
-    }
-
-    // Instagram needs the asset reachable at a public URL (see
-    // channels.js) - mint a short-lived, single-purpose token for it
-    // rather than exposing content_assets generally.
-    let publicFileUrl = null;
-    if (variant.channel === 'instagram') {
-      const domain = API_DOMAIN || APP_DOMAIN;
-      if (!domain) {
-        return await fail('Instagram requires APP_DOMAIN or API_DOMAIN to be set to a real, internet-reachable domain so the image can be fetched.');
-      }
-      const tok = await pool.query(
-        `INSERT INTO public_file_tokens (file_path, mime_type, expires_at) VALUES ($1,$2, NOW() + interval '15 minutes') RETURNING token`,
-        [asset.s3_key, asset.mime_type]
-      );
-      publicFileUrl = `https://${domain}/public/content-assets/${tok.rows[0].token}/file`;
-    }
-
-    let result;
-    try {
-      result = await channelsLib.publishToChannel(variant.channel, {
-        config,
-        title: variant.title,
-        text: variant.title,
-        filePath: asset.s3_key,
-        fileName: asset.file_name,
-        mimeType: asset.mime_type,
-        publicFileUrl,
-        to: req.body.to
-      });
-    } catch (e) {
-      return await fail(e.message);
-    }
-
-    await pool.query(
-      `UPDATE content_variants SET status='PUBLISHED', published_url=$1, published_at=NOW(), publish_error=NULL WHERE id=$2`,
-      [result.externalUrl || null, variantId]
-    );
-    await auditLog(null, 'PUBLISH_CONTENT_SUCCESS', 'content_variant', variantId, req, 'SUCCESS', { channel: variant.channel, external_id: result.externalId });
-
-    res.json({ published: true, channel: variant.channel, external_id: result.externalId, external_url: result.externalUrl });
+    const result = await publishContentVariant(req.params.variantId, req);
+    if (!result.ok) return res.status(result.status || 502).json({ published: false, error: result.error });
+    res.json({ published: true, channel: result.channel, external_id: result.external_id, external_url: result.external_url });
   } catch(e){ serverError(res, e); }
 });
 

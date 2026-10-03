@@ -131,14 +131,13 @@ const CHANNEL_SPECS = {
   instagram: {
     label: 'Instagram Business',
     implemented: true,
-    // Studio offers Instagram for video uploads only (not images) - a
-    // deliberate product choice, not a technical one. publishInstagram()
-    // itself still only implements the image_url path today (see below) -
-    // a video selected for Instagram will fail cleanly at publish time
-    // with a clear 'not yet supported' error until Reels/video publishing
-    // is actually built, rather than offering a channel this app can't
-    // really publish to yet.
-    contentTypes: ['video/'],
+    // Studio offers Instagram for both images and video. Images publish
+    // for real today (the image_url path below). Video does not yet -
+    // publishInstagram() still only implements the image path, so a video
+    // selected for Instagram fails cleanly at publish time with a clear
+    // 'not yet supported' error (see the guard at the top of
+    // publishInstagram()) rather than a confusing one from Meta's API.
+    contentTypes: ['image/', 'video/'],
     fields: [
       { key: 'ig_user_id', label: 'Instagram Business Account ID', required: true },
       { key: 'access_token', label: 'Access token', required: true, secret: true }

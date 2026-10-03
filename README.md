@@ -9,7 +9,7 @@
 ![Nginx](https://img.shields.io/badge/Nginx-reverse%20proxy-009639?logo=nginx&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Fixed: docker-compose builds from ./api, ./hermes, ./paperclip locally, no external registry. Real source code included.
+Fixed: docker-compose builds from ./api locally, no external registry. Real source code included. (The ./hermes and ./paperclip services this line used to also name were removed later - see "Hardening notes" below for when/why.)
 
 > **A pass of dummy/stub cleanup landed together**: the content-transform
 > pipeline had two Redis consumers (`hermes-orchestrator` and a
@@ -2484,4 +2484,69 @@ automated discovery" above for the full writeup.
   gating on discovery, and the "not configured" 503 leaving no
   `lead_discovery_runs` row behind.
 - Full unit suite passes (205/206, the one skip pre-existing and
+  unrelated - see "Testing"); `npm run build` succeeds.
+
+## Removing Hermes and Paperclip: one fewer worker, one fewer transform sidecar
+
+Two sidecar containers (`hermes-orchestrator`, `paperclip-transformer`)
+are gone from `docker-compose.vps.yml` entirely, along with their
+`hermes/`/`paperclip/` directories and the `paperclip_cache` volume -
+not disabled, not left idle, removed. Also: Studio's content-publish
+channel picker is now scoped to Facebook, Instagram, LinkedIn, and
+YouTube (WhatsApp and Email removed - see each channel's
+`studioContent`/`contentTypes` in `CHANNEL_SPECS`, `api/src/channels.js`),
+with Instagram offered for both images (publishes for real) and video
+(fails immediately with a clear "not implemented yet" error rather than
+a confusing one from Meta's API - no Reels/video upload path exists yet).
+
+- **`hermes-orchestrator` did exactly one real job** (see its old
+  `orchestrator.js` - `scout`/`transformer`/`compliance`/`lead_intake`
+  were already dead code removed earlier, per the comments it left
+  behind): pop a `{ variant_id }` job off the `publisher:queue` Redis
+  list and call `POST /internal/content-variants/:variantId/publish`.
+  That publish logic is now a plain function,
+  `publishContentVariant(variantId, req)` in `api/src/server.js`, called
+  directly and synchronously from `POST /content/variants/:variantId/
+  approve` the moment a variant is approved - no queue, no separate
+  worker container, no "the worker happens to be down" failure mode.
+  `/internal/content-variants/:variantId/publish` itself still exists (a
+  thin wrapper around the same function) for manual use - e.g.
+  hand-retrying one `PUBLISH_FAILED` variant with the internal secret -
+  since nothing calls it automatically any more.
+- **Approving a variant now reports whether publishing actually
+  succeeded**, in the same response: `published` (bool),
+  `published_url`, `publish_error`. Previously this was invisible until
+  someone separately noticed a variant sitting in `PUBLISH_FAILED`. The
+  `status` field's meaning is unchanged (the approval outcome -
+  APPROVED/REJECTED/DRAFT) precisely so nothing that reads it needs to
+  change; a failed publish still moves `content_variants.status` on to
+  `PUBLISH_FAILED` in the database exactly as it always eventually did
+  once Hermes got around to it - just visible immediately now instead of
+  asynchronously.
+- **`paperclip-transformer` provided real-time per-image resizing** for
+  `POST /content/:assetId/transform`. Not in use, so removed rather than
+  left running idle. A variant's `spec` field (descriptive text like
+  "1080x1080 feed / 1080x1350 portrait") is still stored for the UI, but
+  no resize happens any more - publishing a variant always uses the
+  original uploaded asset (`content_assets.s3_key`) regardless of
+  whether a resize ever ran, so nothing downstream actually depended on
+  Paperclip's output in the first place.
+- **Instagram's offered content types changed from image-only to
+  image-and-video** (`CHANNEL_SPECS.instagram.contentTypes`). Only the
+  image path is real (`publishInstagram()`'s `image_url` media
+  container, unchanged, still fully tested); a video reaching
+  `publishInstagram()` now hits an explicit guard
+  (`Instagram video/Reels publishing is not implemented yet`) before any
+  network call, covered by a dedicated test, rather than either silently
+  failing against a mismatched API or (worse) never being offered to
+  begin with.
+- **WhatsApp and Email removed from Studio's content-publish picker and
+  from `transformContent`'s channel enum** (`api/src/schemas.js`) - same
+  treatment the inbound-only `web_form` channel already got. Both stay
+  fully real, configurable channels elsewhere: WhatsApp for Inbox/Leads
+  replies (always via a real, per-message approved template - see
+  `MessagesPanel.jsx`'s `isWhatsApp` picker), Email for both lead replies
+  (`POST /leads/:id/reply`) and its own product channel config - this
+  only narrows what Studio itself can target.
+- Full unit suite passes (207/208, the one skip pre-existing and
   unrelated - see "Testing"); `npm run build` succeeds.

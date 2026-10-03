@@ -244,8 +244,8 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
       setUploadChannels([]);
       // Kick off the transform for the channel(s) selected above right
       // away, so picking a file, picking channel(s), and confirming is the
-      // whole flow - a transform failure (e.g. Paperclip briefly
-      // unavailable) is reported but doesn't hide that the upload itself
+      // whole flow - a transform failure (a network hiccup reaching the
+      // API, say) is reported but doesn't hide that the upload itself
       // succeeded; the asset still lands in the list and can be retried
       // from its own Transform button.
       try {
@@ -277,7 +277,7 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
         <h2 className="text-[15px] font-semibold text-zinc-900 dark:text-white">Content</h2>
         <div className="flex items-center gap-2 text-[11px] text-zinc-500 dark:text-white/50">
           <Check className="h-3.5 w-3.5 text-brand" />
-          Paperclip media pipeline active
+          Approving publishes instantly
         </div>
       </div>
 

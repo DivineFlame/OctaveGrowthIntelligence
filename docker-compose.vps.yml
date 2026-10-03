@@ -23,7 +23,6 @@ volumes:
   redisdata:
   recordings:
   clamav_data:
-  paperclip_cache:
   pgbackups:
 services:
   clamav:
@@ -134,8 +133,9 @@ services:
     # --bind 127.0.0.1 was the actual cause of the api container's endless
     # "Redis error ECONNREFUSED 172.30.0.2:6379" loop: binding to loopback
     # restricts redis-server to connections from *inside its own container*,
-    # so every other service reaching it over the docker network (api, hermes)
-    # as redis:6379 was refused at the TCP level, not just
+    # so every other service reaching it over the docker network (api, the
+    # now-removed hermes-orchestrator) as redis:6379 was refused at the TCP
+    # level, not just
     # denied by auth. redis has no `ports:` entry at all (confirmed above) -
     # it was never reachable from the host or internet either way, so binding
     # to loopback added no real security and just broke internal connectivity.
@@ -189,8 +189,13 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       CLAMAV_HOST: clamav
-      # Server-to-server auth for hermes calling /internal/* routes directly
-      # (no user JWT exists in that context) - see internalMiddleware.
+      # Server-to-server auth for internal-only routes (no user JWT exists in
+      # that context) - see internalMiddleware. Previously used by the
+      # now-removed hermes-orchestrator calling POST /internal/content-
+      # variants/:variantId/publish; that route still exists (manual retry
+      # use) but approving a variant now calls the same publish logic
+      # in-process instead, so nothing calls it over HTTP automatically any
+      # more.
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       # Optional - Sarvam AI message filtering (see .env.vps.example and
       # README.md "Hardening notes"). Unset is fine: falls back to no
@@ -224,7 +229,8 @@ services:
       APIFY_ACTOR_ID: ${APIFY_ACTOR_ID:-compass/google-maps-extractor}
       APIFY_MAX_RESULTS: ${APIFY_MAX_RESULTS:-30}
       APIFY_LANGUAGE: ${APIFY_LANGUAGE:-en}
-      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      # HERMES_MODE only feeds GET /hermes/agents' status response - not
+      # related to the (removed) hermes-orchestrator container.
       HERMES_MODE: premium_multiagent
       # Load-bearing, not cosmetic: with APP_DOMAIN unset, CORS_ALLOWED_ORIGINS
       # ends up empty and server.js rejects every browser cross-origin
@@ -260,9 +266,9 @@ services:
     # Self-heals the shared `recordings` named volume's ownership on every
     # start, before anything else touches it. This matters even with
     # api/Dockerfile now pinning appuser to UID 1001 at build time: a
-    # volume created by an *earlier* image build (before that fix, or by
-    # whichever of api/paperclip-transformer happened to populate it
-    # first) can already be owned by some other UID, and Docker never
+    # volume created by an *earlier* image build (before that fix, or before
+    # paperclip-transformer - since removed - populated it first) can
+    # already be owned by some other UID, and Docker never
     # retroactively re-chowns an existing named volume just because a new
     # image is deployed. Without this, POST /content/upload keeps failing
     # with "EACCES: permission denied, open '/app/recordings/...'" even
@@ -281,74 +287,24 @@ services:
         limits:
           cpus: '1.0'
           memory: 512m
-  hermes-orchestrator:
-    build:
-      context: ./hermes
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    logging: *default-logging
-    # orchestrator.js finishes its current loop iteration on SIGTERM before
-    # exiting (bounded by the two 1s BRPOP timeouts plus one runAgent()
-    # call) - the default 10s grace period is already generous for that,
-    # but bumped slightly so a slow runAgent() call (a real HTTP call to
-    # api) doesn't get SIGKILLed mid-flight on a loaded host.
-    stop_grace_period: 15s
-    networks: [backend, db]
-    user: "1001:1001"
-    read_only: true
-    tmpfs:
-      - /tmp:size=100M
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      PAPERCLIP_SERVICE: paperclip-transformer:8000
-      API_INTERNAL_URL: http://api:3000
-      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
-    depends_on:
-      redis: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256m
-  paperclip-transformer:
-    build:
-      context: ./paperclip
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    logging: *default-logging
-    networks: [backend]
-    user: "1001:1001"
-    read_only: true
-    tmpfs:
-      - /tmp:size=200M
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    volumes:
-      - recordings:/app/recordings
-      # persistent cache — this used to also be tmpfs-mounted at the same
-      # path, which Docker Compose rejects (same bug already fixed in
-      # docker-compose.dokploy.yml; this file just hadn't been updated to
-      # match)
-      - paperclip_cache:/app/cache
-    # python:3.11-slim has no curl/wget by default, but does have python
-    # itself, so use that to hit the real GET /health FastAPI already exposes.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 768m
+  # hermes-orchestrator service removed: it only ever did one real job -
+  # popping variant_id jobs off the `publisher:queue` Redis list and
+  # calling api's POST /internal/content-variants/:variantId/publish (see
+  # its old orchestrator.js) - api now calls that same publish logic
+  # directly and synchronously from POST /content/variants/:variantId/
+  # approve instead (see publishContentVariant() in server.js), so there
+  # is nothing left for a separate worker container to consume. No more
+  # `publisher:queue` pushes happen anywhere. The hermes/ directory has
+  # been deleted (same treatment as csv-handler/transformer-worker below).
+  #
+  # paperclip-transformer service removed: it provided real-time per-image
+  # resizing for POST /content/:assetId/transform - not currently in use,
+  # so removed entirely rather than left running idle. Content variants no
+  # longer get a resized preview image; publishing a variant always uses
+  # the original uploaded asset (content_assets.s3_key) regardless, so
+  # nothing downstream depended on Paperclip's output. The paperclip/
+  # directory and the paperclip_cache volume have both been deleted.
+  #
   # csv-handler service removed: csv-handler.js only defined/exported
   # functions, never started a server or consumer loop, so it crash-looped
   # in production. That logic already lives inline in POST
@@ -360,11 +316,7 @@ services:
   # consumer of the same Redis list for the same jobs - which container
   # actually handled a given upload was non-deterministic, and what it
   # called (Paperclip's old /transform) just fabricated a file path that
-  # was never written. Real per-channel transformation now happens
-  # synchronously inside POST /content/:assetId/transform (api/src/server.js
-  # calls Paperclip directly and persists the real resized output) - nothing
-  # pushes to `transformer:queue` any more, so there was nothing left for
-  # this service to do. The transformer/ directory has been deleted (same
+  # was never written. The transformer/ directory has been deleted (same
   # treatment as csv-handler/ above, for the same reason: a service left
   # running with nothing real to do).
   frontend:

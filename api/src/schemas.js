@@ -65,13 +65,15 @@ const schemas = {
   // route (POST /internal/content-variants/:variantId/publish) can never
   // find the matching product_channels row for it.
   transformContent: z.object({
-    // whatsapp deliberately excluded, same treatment as web_form below: Studio's
-    // content pipeline is for marketing/broadcast content, and WhatsApp here is
-    // confined to the Inbox/Leads reply composer's per-message approved-template
-    // flow (see channels.js's CHANNEL_SPECS.whatsapp studioContent:false and
-    // MessagesPanel.jsx's isWhatsApp template picker) - there is no "publish this
-    // upload to WhatsApp" operation any more.
-    channels: z.array(z.enum(['facebook', 'instagram', 'linkedin', 'youtube', 'email'])).min(1).max(5).optional() // web_form is inbound-only (see api/src/channels.js) - nothing to generate a content variant for, so it's deliberately not a valid transform target
+    // whatsapp and email deliberately excluded, same treatment as web_form
+    // below: Studio's content pipeline is scoped to Facebook/Instagram/
+    // LinkedIn/YouTube only. WhatsApp here is confined to the Inbox/Leads
+    // reply composer's per-message approved-template flow (see channels.js's
+    // CHANNEL_SPECS.whatsapp studioContent:false and MessagesPanel.jsx's
+    // isWhatsApp template picker); email replies to leads still go through
+    // POST /leads/:id/reply independently of this schema - only Studio's
+    // broadcast-a-generated-asset path to either is excluded.
+    channels: z.array(z.enum(['facebook', 'instagram', 'linkedin', 'youtube'])).min(1).max(4).optional() // web_form is inbound-only (see api/src/channels.js) - nothing to generate a content variant for, so it's deliberately not a valid transform target
   }),
   replyToLead: z.object({
     body: z.string().trim().min(1).max(5000),

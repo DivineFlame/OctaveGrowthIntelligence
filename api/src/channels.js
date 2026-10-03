@@ -47,6 +47,13 @@ const CHANNEL_SPECS = {
   email: {
     label: 'Email',
     implemented: true,
+    // Not offered in Studio's content-publish channel picker, same
+    // treatment as whatsapp/web_form above/below - this product's Studio is
+    // scoped to Facebook/Instagram/LinkedIn/YouTube only. Email stays a
+    // real, fully-configurable channel (Products > Channels > Email), and
+    // POST /leads/:id/reply can still send a real email reply to a lead -
+    // only Studio's broadcast-a-generated-asset path is excluded.
+    studioContent: false,
     // Sends whatever's attached as a plain email attachment - no file-type
     // restriction on the email side itself.
     contentTypes: 'any',

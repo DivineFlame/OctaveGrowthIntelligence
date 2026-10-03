@@ -54,15 +54,18 @@ test('transformContent only accepts the canonical channel vocabulary', () => {
   // CHANNEL_SPECS directly), so this test exists to catch the two drifting
   // apart again the way they did before this codebase's channel-vocabulary
   // fix.
-  const ok = schemas.transformContent.safeParse({ channels: ['facebook', 'email'] });
+  const ok = schemas.transformContent.safeParse({ channels: ['facebook', 'instagram'] });
   assert.ok(ok.success);
 
-  // whatsapp is a real CHANNEL_SPECS/product_channels channel but deliberately
-  // not a valid Studio transform target (see channels.js's
-  // CHANNEL_SPECS.whatsapp studioContent:false) - same treatment as web_form
-  // below, covered on its own in channels.test.js.
+  // whatsapp and email are both real CHANNEL_SPECS/product_channels channels
+  // but deliberately not valid Studio transform targets (see channels.js's
+  // studioContent:false on each) - same treatment as web_form below, covered
+  // on its own in channels.test.js.
   const whatsapp = schemas.transformContent.safeParse({ channels: ['whatsapp'] });
   assert.equal(whatsapp.success, false, 'transformContent must reject whatsapp as a publish target');
+
+  const email = schemas.transformContent.safeParse({ channels: ['email'] });
+  assert.equal(email.success, false, 'transformContent must reject email as a publish target');
 
   const bad = schemas.transformContent.safeParse({ channels: ['instagram-feed'] }); // the old, disconnected vocabulary
   assert.equal(bad.success, false);

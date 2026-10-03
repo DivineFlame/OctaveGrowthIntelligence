@@ -257,7 +257,22 @@ services:
     # migrate.js exits non-zero (crash-looping this container, visible in
     # `docker ps`/logs) if a migration fails, rather than starting the API
     # against a schema that didn't fully apply.
-    command: ["sh", "-c", "node src/migrate.js && node src/server.js"]
+    # Self-heals the shared `recordings` named volume's ownership on every
+    # start, before anything else touches it. This matters even with
+    # api/Dockerfile now pinning appuser to UID 1001 at build time: a
+    # volume created by an *earlier* image build (before that fix, or by
+    # whichever of api/paperclip-transformer happened to populate it
+    # first) can already be owned by some other UID, and Docker never
+    # retroactively re-chowns an existing named volume just because a new
+    # image is deployed. Without this, POST /content/upload keeps failing
+    # with "EACCES: permission denied, open '/app/recordings/...'" even
+    # after a redeploy. Safe to run every start: cap_add below grants
+    # CHOWN/SETUID/SETGID specifically so this non-root (1001:1001) user
+    # is allowed to do this even though it doesn't own the directory yet;
+    # `|| true` so a container that somehow lacks the capability (e.g. a
+    # non-Docker runtime that ignores cap_add) still starts instead of
+    # crash-looping on this line alone.
+    command: ["sh", "-c", "chown -R 1001:1001 /app/recordings || true; node src/migrate.js && node src/server.js"]
     ports:
       - "127.0.0.1:8300:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
       - "127.0.0.1:8301:3001"

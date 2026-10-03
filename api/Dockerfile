@@ -1,5 +1,12 @@
 FROM node:20-alpine
-RUN addgroup -S appgroup && adduser -S -G appgroup appuser
+# UID/GID pinned to 1001 to exactly match docker-compose.vps.yml's
+# `user: "1001:1001"` override for this service. Without this, `adduser
+# -S` picks whatever system UID happens to be free (not 1001), so the
+# chown below lands on a different UID than the container actually runs
+# as at runtime - the named `recordings` volume then gets initialized
+# owned by that other UID, and every write to it from this container
+# (e.g. POST /content/upload) fails with EACCES: permission denied.
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S -G appgroup appuser
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev

@@ -167,7 +167,7 @@ function AssetCard({ asset, spec, canApprove, onTransform, onApprove }) {
         disabled={transforming}
         className="mt-3 rounded-full border border-black/10 px-3.5 py-1.5 text-[12px] font-semibold text-brand transition-colors hover:border-brand disabled:opacity-60 dark:border-white/15"
       >
-        {transforming ? 'Transforming…' : 'Transform'}
+        {transforming ? 'Transforming…' : asset.variants && asset.variants.length ? 'Transform for more channels' : 'Transform'}
       </button>
 
       {err ? <p className="mt-2 text-[12px] text-red-500">{err}</p> : null}
@@ -192,22 +192,54 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState('');
+  // Channel(s) picked *before* upload - lets someone upload straight "for"
+  // a specific channel (or several) in one step, instead of uploading
+  // first and only then discovering the separate per-asset channel
+  // picker further down. Mirrors the product spec: "Studio is for
+  // uploading content on the different channel product wise, select
+  // channel and upload content." The per-asset picker below still exists
+  // for transforming an already-uploaded asset into *additional* channels
+  // later, so nothing already working is removed - this just makes
+  // channel selection available up front too.
+  const [uploadChannels, setUploadChannels] = useState([]);
   const inputRef = useRef(null);
+
+  const toggleUploadChannel = (key) =>
+    setUploadChannels((prev) => (prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key]));
 
   const doUpload = useCallback(
     async (file) => {
+      if (!uploadChannels.length) {
+        setUploadErr('Pick at least one channel before uploading');
+        return;
+      }
       setUploading(true);
       setUploadErr('');
       try {
         const { asset } = await api.uploadContent(file, { productId });
         onUploaded(asset);
+        // Kick off the transform for the channel(s) selected above right
+        // away, so picking a channel and dropping a file is the whole
+        // flow - a transform failure (e.g. Paperclip briefly unavailable)
+        // is reported but doesn't hide that the upload itself succeeded;
+        // the asset still lands in the list and can be retried from its
+        // own Transform button.
+        try {
+          await onTransform(asset.id, uploadChannels);
+        } catch (transformErr) {
+          setUploadErr(
+            transformErr instanceof ApiError
+              ? `Uploaded, but transform failed: ${transformErr.message}`
+              : 'Uploaded, but transform failed - retry from the Transform button below.'
+          );
+        }
       } catch (e) {
         setUploadErr(e instanceof ApiError ? e.message : 'Upload failed');
       } finally {
         setUploading(false);
       }
     },
-    [productId, onUploaded]
+    [productId, onUploaded, onTransform, uploadChannels]
   );
 
   const handleDrop = (e) => {
@@ -216,6 +248,8 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     if (file) doUpload(file);
   };
+
+  const canPickChannel = Object.keys(spec || {}).filter((k) => k !== 'web_form').length > 0;
 
   return (
     <section className="rounded-[16px] border border-black/5 bg-white p-5 dark:border-white/[0.08] dark:bg-[#0f0f10]/90">
@@ -227,11 +261,21 @@ export default function ContentPipeline({ productId, assets, spec, canApprove, o
         </div>
       </div>
 
+      {canPickChannel ? (
+        <div className="mb-3">
+          <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-white/40">
+            Upload for channel
+          </p>
+          <ChannelPicker spec={spec} selected={uploadChannels} onToggle={toggleUploadChannel} />
+        </div>
+      ) : null}
+
       <div
         role="button"
         tabIndex={0}
         aria-label="Upload content: drop a file here, or press Enter to choose one"
         aria-busy={uploading}
+        aria-disabled={!uploadChannels.length}
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);

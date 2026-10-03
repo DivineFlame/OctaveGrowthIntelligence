@@ -2550,3 +2550,30 @@ a confusing one from Meta's API - no Reels/video upload path exists yet).
   only narrows what Studio itself can target.
 - Full unit suite passes (207/208, the one skip pre-existing and
   unrelated - see "Testing"); `npm run build` succeeds.
+
+## Running a second instance on the same VPS: host ports moved to `.env`
+
+`docker-compose.vps.yml`'s `postgres`/`api`/`frontend` services each
+publish a port on the host (`127.0.0.1:<host-port>:<container-port>`),
+and those host-side numbers used to be hardcoded straight into the
+compose file (5432/8300/8301/8305). That's fine for one deployment, but
+it broke down the moment you wanted a second instance of this whole
+stack on the same VPS (a second domain for a second client, say): a
+container's own internal port can repeat safely across separate Dokploy
+apps (Traefik routes each one over its own isolated Docker network -
+see "Can I run multiple instances" discussion), but `127.0.0.1:<port>`
+on the host itself is one shared OS-level resource, so two instances
+both trying to bind `127.0.0.1:8300` collide - and fixing that meant
+hand-editing `docker-compose.vps.yml` per instance, which stops the file
+from being the one identical, shareable source of truth across every
+deployment.
+
+Those four host ports are now `${VAR:-default}` references
+(`POSTGRES_HOST_PORT`, `API_HOST_PORT`, `API_WEBHOOK_HOST_PORT`,
+`FRONTEND_HOST_PORT` - see `.env.vps.example`), each defaulting to the
+value this repo has always used. A single-instance deploy needs no
+changes at all. Running a second instance on the same VPS just means
+setting different values for these four in that instance's own `.env` -
+`docker-compose.vps.yml` itself stays untouched and identical across
+every instance. The container-internal ports (right side of each
+mapping) are unchanged and still don't need to vary between instances.

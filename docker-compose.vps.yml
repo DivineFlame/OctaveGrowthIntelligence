@@ -59,8 +59,19 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
+    # Host-side port only - left of the colon, bound to 127.0.0.1 so it's
+    # never internet-reachable. The container's own internal port (right
+    # of the colon) never needs to change: Traefik routes every Dokploy
+    # app over its own isolated Docker network, so internal ports can
+    # repeat across separate apps with no collision. The host port is a
+    # single OS-level resource shared by everything on the VPS though -
+    # running a second instance of this stack on the same VPS needs a
+    # different POSTGRES_HOST_PORT (and the API_HOST_PORT/
+    # API_WEBHOOK_HOST_PORT/FRONTEND_HOST_PORT below) set in that
+    # instance's own .env, with this file itself left untouched and
+    # identical across every instance. See .env.vps.example.
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -279,9 +290,11 @@ services:
     # non-Docker runtime that ignores cap_add) still starts instead of
     # crash-looping on this line alone.
     command: ["sh", "-c", "chown -R 1001:1001 /app/recordings || true; node src/migrate.js && node src/server.js"]
+    # Host-side ports only, overridable per-instance - see the comment on
+    # postgres's ports: above for why and the .env var names to set.
     ports:
-      - "127.0.0.1:8300:3000"  # was 3000 - collides with Dokploy's own dashboard on the host
-      - "127.0.0.1:8301:3001"
+      - "127.0.0.1:${API_HOST_PORT:-8300}:3000"  # host default 8300, not 3000 - collides with Dokploy's own dashboard on the host
+      - "127.0.0.1:${API_WEBHOOK_HOST_PORT:-8301}:3001"
     deploy:
       resources:
         limits:
@@ -326,8 +339,10 @@ services:
     restart: unless-stopped
     logging: *default-logging
     networks: [frontend]
+    # Host-side port only, overridable per-instance - see the comment on
+    # postgres's ports: above for why and the .env var names to set.
     ports:
-      - "127.0.0.1:8305:80"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-8305}:80"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
       interval: 15s

@@ -910,7 +910,7 @@
           var s = spec[ch];
           if (!s) return '';
           if (!s.implemented) {
-            return '<div class="oc-help">' + (s.help || 'Not implemented yet.') + '</div>';
+            return '<div class="oc-help">Not implemented yet.</div>';
           }
           var existing = existingConfig || {};
 
@@ -938,8 +938,6 @@
               (isMasked ? ' placeholder="Already set - leave blank to keep it"' : (val ? ' value="' + String(val).replace(/"/g,'&quot;') + '"' : '')) + '>';
           }
 
-          var helpHtml = s.help ? '<div class="oc-help">' + s.help + '</div>' : '';
-
           // Email is the only channel with two distinct groups - SMTP
           // (outbound sending) and IMAP (inbound, optional) - so it gets
           // its own side-by-side layout (see the CSS comment on
@@ -948,8 +946,7 @@
           if (ch === 'email') {
             var smtpFields = s.fields.filter(function(f){ return f.key.indexOf('imap_') !== 0; });
             var imapFields = s.fields.filter(function(f){ return f.key.indexOf('imap_') === 0; });
-            return helpHtml +
-              '<div class="oc-channel-cols">' +
+            return '<div class="oc-channel-cols">' +
                 '<div class="oc-channel-col">' +
                   '<h4 class="oc-channel-col-title">SMTP &middot; Outbound</h4>' +
                   smtpFields.map(fieldHtml).join('') +
@@ -961,7 +958,7 @@
               '</div>';
           }
 
-          return helpHtml + s.fields.map(fieldHtml).join('');
+          return s.fields.map(fieldHtml).join('');
         }
 
         // A focused, two-step modal (pick a channel -> fill its fields) for

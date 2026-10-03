@@ -21,7 +21,7 @@
 //   - youtube: real, using the YouTube Data API v3's resumable upload
 //     protocol - initiate a session, then PUT the video bytes to the URL
 //     it hands back. Needs a Google OAuth refresh_token (not a short-lived
-//     access token - see publishYouTube() and CHANNEL_SPECS.youtube.help),
+//     access token - see publishYouTube()),
 //     obtained once via Google's OAuth consent flow for the channel-owning
 //     account, outside this app.
 //   - web_form: inbound-only by design - there is nothing to "publish" to
@@ -64,21 +64,20 @@ const CHANNEL_SPECS = {
       { key: 'smtp_user', label: 'SMTP username', required: true },
       { key: 'smtp_pass', label: 'SMTP password', required: true, secret: true },
       { key: 'from_email', label: 'From address', required: true },
-      { key: 'to_default', label: 'Default recipient (optional, or pass one per-publish)', required: false },
+      { key: 'to_default', label: 'Default recipient', required: false },
       // Inbound - optional. Leaving these blank keeps the channel
       // send-only (SMTP above); setting imap_host/imap_user/imap_pass
       // turns on real IMAP polling (see email-poller.js) that turns new
       // messages in this mailbox into leads, same as any other channel's
       // webhook. Deliberately not required, since plenty of setups only
       // ever need to send.
-      { key: 'imap_host', label: 'IMAP host (leave blank to skip inbound fetching)', required: false },
+      { key: 'imap_host', label: 'IMAP host', required: false },
       { key: 'imap_port', label: 'IMAP port', required: false, default: '993' },
       { key: 'imap_secure', label: 'Use TLS', type: 'boolean', required: false, default: 'true' },
-      { key: 'imap_user', label: 'IMAP username (often the same as SMTP username)', required: false },
-      { key: 'imap_pass', label: 'IMAP password (often the same as SMTP password, or an app password)', required: false, secret: true },
-      { key: 'imap_mailbox', label: 'Mailbox to poll (default INBOX)', required: false, default: 'INBOX' }
+      { key: 'imap_user', label: 'IMAP username', required: false },
+      { key: 'imap_pass', label: 'IMAP password', required: false, secret: true },
+      { key: 'imap_mailbox', label: 'Mailbox to poll', required: false, default: 'INBOX' }
     ],
-    help: 'Any SMTP-speaking provider works for sending (SendGrid, SES, Mailgun, Postmark, Gmail with an app password, your own mail server) - this uses plain SMTP, not a vendor-specific REST API. To also turn replies into leads, fill in the IMAP fields too - use a dedicated mailbox for this if you can, since IMAP\'s "unread" flag is shared with whatever else reads that inbox (your own mail client marking a message read makes it invisible to the poller).'
   },
   whatsapp: {
     label: 'WhatsApp Business',
@@ -95,11 +94,11 @@ const CHANNEL_SPECS = {
     studioContent: false,
     contentTypes: 'any',
     fields: [
-      { key: 'auth_id', label: 'WhatsApp Auth ID (e.g. MA_XXXXXXXX)', required: true },
+      { key: 'auth_id', label: 'WhatsApp Auth ID', required: true },
       { key: 'auth_token', label: 'WhatsApp Auth Token', required: true, secret: true },
       { key: 'channel_id', label: 'WhatsApp Channel ID', required: true },
-      { key: 'waba_id', label: 'WhatsApp Business Account ID (WABA ID)', required: true },
-      { key: 'default_recipient', label: "Default recipient (E.164, e.g. +919876543210)", required: false },
+      { key: 'waba_id', label: 'WhatsApp Business Account ID', required: true },
+      { key: 'default_recipient', label: 'Default recipient', required: false },
       // Lead replies (POST /leads/:id/reply) always pick their own
       // template per-message via the Inbox composer - see
       // GET /channels/whatsapp/templates. Studio's content pipeline has
@@ -110,10 +109,9 @@ const CHANNEL_SPECS = {
       // name/language below. Every WhatsApp send this app makes - lead
       // reply or Studio broadcast - goes through an approved template;
       // there is no free-text path.
-      { key: 'broadcast_template_name', label: 'Broadcast template name (for Studio > Content publishing - a generic single-variable template)', required: false },
+      { key: 'broadcast_template_name', label: 'Broadcast template name', required: false },
       { key: 'broadcast_template_language', label: 'Broadcast template language code', required: false, default: 'en_US' }
     ],
-    help: 'From your WhatsApp Business API provider\'s console: Auth ID and Auth Token are under Settings > API. Channel ID is under Channels > WhatsApp (create one there if you haven\'t already). WABA ID comes from Meta\'s WhatsApp Manager (business.facebook.com > WhatsApp Accounts > Settings > Business Info) or is shown alongside the channel in your provider\'s console. Meta requires every business-initiated WhatsApp message to use an approved template - this app never sends free text. Lead replies pick a template per-message in the Inbox; Studio > Content publishing instead uses the single broadcast_template_name/language configured here (get a generic single-variable template like "{{1}}" approved for this purpose with your provider, then set its name here) - your generated post text becomes that template\'s one parameter. Sync/check template approval status with your provider under Channels > WhatsApp > Templates.'
   },
   facebook: {
     label: 'Facebook Page',
@@ -126,7 +124,6 @@ const CHANNEL_SPECS = {
       { key: 'page_id', label: 'Page ID', required: true },
       { key: 'access_token', label: 'Page access token', required: true, secret: true }
     ],
-    help: 'From a Meta Developer App (developers.facebook.com) - needs the pages_manage_posts permission on the target Page, which requires Meta App Review for anything beyond your own test Pages.'
   },
   instagram: {
     label: 'Instagram Business',
@@ -142,7 +139,6 @@ const CHANNEL_SPECS = {
       { key: 'ig_user_id', label: 'Instagram Business Account ID', required: true },
       { key: 'access_token', label: 'Access token', required: true, secret: true }
     ],
-    help: 'Same Meta Developer App as Facebook, with instagram_content_publish permission. Requires the asset to be reachable at a public URL - see publishInstagram() - so APP_DOMAIN/API_DOMAIN must be a real public domain, not localhost.'
   },
   linkedin: {
     label: 'LinkedIn Organization',
@@ -152,10 +148,9 @@ const CHANNEL_SPECS = {
     // any upload can be captioned and posted as a text update.
     contentTypes: 'any',
     fields: [
-      { key: 'organization_urn', label: 'Organization URN (e.g. urn:li:organization:12345)', required: true },
+      { key: 'organization_urn', label: 'Organization URN', required: true },
       { key: 'access_token', label: 'OAuth access token', required: true, secret: true }
     ],
-    help: 'From a LinkedIn Developer App with the Community Management API product added and w_organization_social scope. LinkedIn gates organization-posting access behind an application/review process - this is real, correct API usage against their UGC Posts endpoint, but LinkedIn itself is the approval bottleneck, not this code.'
   },
   youtube: {
     label: 'YouTube',
@@ -166,11 +161,10 @@ const CHANNEL_SPECS = {
     fields: [
       { key: 'client_id', label: 'Google OAuth Client ID', required: true },
       { key: 'client_secret', label: 'Google OAuth Client Secret', required: true, secret: true },
-      { key: 'refresh_token', label: 'OAuth refresh token (see help)', required: true, secret: true },
-      { key: 'privacy_status', label: 'Privacy status (public/unlisted/private)', required: false, default: 'unlisted' },
-      { key: 'category_id', label: 'YouTube category ID (optional, default 22 = People & Blogs)', required: false, default: '22' }
+      { key: 'refresh_token', label: 'OAuth refresh token', required: true, secret: true },
+      { key: 'privacy_status', label: 'Privacy status', required: false, default: 'unlisted' },
+      { key: 'category_id', label: 'YouTube category ID', required: false, default: '22' }
     ],
-    help: 'Uses the YouTube Data API v3 resumable upload protocol. Create an OAuth 2.0 Client ID in Google Cloud Console (Desktop app type is simplest) with the YouTube Data API v3 enabled, then run Google\'s OAuth consent flow once (with offline access) for the channel-owning Google account to get a refresh_token - store that here, not a short-lived access token, since access tokens expire in about an hour and this app refreshes one automatically on every publish. Only accepts video files; publishing a non-video asset to this channel fails with a clear error before any API call is made.'
   },
   web_form: {
     label: 'Website Web Form',
@@ -178,10 +172,9 @@ const CHANNEL_SPECS = {
     studioContent: false,
     contentTypes: 'any',
     fields: [
-      { key: 'redirect_url', label: 'Thank-you page URL (redirect visitors here after they submit - leave blank to return JSON instead, e.g. for a JS-driven form)', required: false },
-      { key: 'allowed_origin', label: "Allowed website origin (optional - restricts submissions to this site, e.g. https://www.example.com)", required: false }
+      { key: 'redirect_url', label: 'Thank-you page URL', required: false },
+      { key: 'allowed_origin', label: 'Allowed website origin', required: false }
     ],
-    help: 'Every product has its own dedicated Website Web Form URL (Products > Channels > Website Web Form > Copy embed code) - copy the ready-made <form> snippet straight into your site\'s HTML, or point your own form at that same URL with fields named company, name, phone, email, and message. Content-Type can be either JSON or a plain HTML form POST (application/x-www-form-urlencoded/multipart), both are accepted. Each submission becomes a new lead in the Inbox for this product, enriched and classified exactly like any other channel. Set a thank-you page URL above so a plain, no-JavaScript <form> redirects visitors somewhere sensible instead of showing them the raw JSON response; set an allowed origin to reject submissions that did not come from your site. If this product\'s URL ever leaks somewhere it shouldn\'t, rotate it from the same panel - that only affects this one product\'s form, nothing else. This channel is inbound-only - there is no publishing API for a web form, so Studio\'s content pipeline correctly shows it as not implemented.'
   }
 };
 
@@ -685,7 +678,7 @@ async function publishLinkedIn({ config, title, text }) {
 async function publishToChannel(channel, { config, title, text, html, filePath, fileName, mimeType, attachments, publicFileUrl, to, template, inReplyTo, references }, deps = {}) {
   const spec = CHANNEL_SPECS[channel];
   if (!spec) throw new Error(`Unknown channel: ${channel}`);
-  if (!spec.implemented) throw new Error(`${spec.label} publishing is not implemented yet. ${spec.help}`);
+  if (!spec.implemented) throw new Error(`${spec.label} publishing is not implemented yet.`);
 
   switch (channel) {
     case 'email': return publishEmail({ config, title, text, html, filePath, fileName, mimeType, attachments, to, inReplyTo, references }, deps);

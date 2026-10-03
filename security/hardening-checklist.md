@@ -9,10 +9,10 @@
 - [ ] Redis requirepass bind 127.0.0.1
 - [ ] ClamAV sidecar freshclam
 - [ ] CSV max 10MB 5000 rows sanitize = + - @ validate email
-- [ ] Content MIME libmagic max 100MB virus scan Paperclip isolated
+- [ ] Content MIME libmagic max 100MB virus scan (ClamAV)
 - [ ] 2FA Super Admin Integrations OTP auto-mask 30s
 - [ ] Audit logs append-only 1 year alert failed reveal
 - [ ] TLS LetsEncrypt auto-renew internal TLS DB
 - [ ] Multitenant cross-tenant blocked tenant_id JWT RLS
-- [ ] Approval workflow no direct publish only Publisher Agent
+- [ ] Approval workflow no direct publish, only via approve -> publishContentVariant()
 - [ ] Docploy healthcheck /health resource limits restart

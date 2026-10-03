@@ -53,7 +53,10 @@ check "POST /auth/login with garbage creds -> 401" POST /auth/login 401 \
 
 # The internal-only publish route must reject without the shared secret -
 # this is the RBAC boundary between "any request from the internet" and
-# "only hermes-orchestrator, with the secret, can call this".
+# "only server-to-server callers with the secret can call this" (kept
+# for manual retries now - see scripts/recover-stuck-publishes.sh -
+# nothing calls it automatically since approving a variant publishes it
+# synchronously in-process instead).
 check "POST /internal/content-variants/x/publish with no secret -> 401" POST \
   /internal/content-variants/00000000-0000-0000-0000-000000000000/publish 401 \
   "-H Content-Type:application/json -d {\"tenant_id\":\"00000000-0000-0000-0000-000000000000\"}"

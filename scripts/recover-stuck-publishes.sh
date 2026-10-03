@@ -1,71 +1,72 @@
 #!/bin/bash
-# Re-queues content_variants that were approved (and pushed onto Redis's
-# publisher:queue) but never actually got published.
+# Retries content_variants stuck in PUBLISH_FAILED by calling the internal
+# publish route by hand for each one.
 #
-# The gap this closes: publisher:queue is a plain Redis list, popped by
-# hermes-orchestrator with BRPOP and no ack. A job is lost for good if:
-# Redis restarts/crashes before AOF fsyncs it, the redisdata volume itself
-# is lost, hermes-orchestrator pops a job then dies before finishing the
-# HTTP call to /internal/content-variants/:id/publish, or
-# hermes-orchestrator simply wasn't running when POST
-# /content/variants/:variantId/approve pushed the job. In every one of
-# those cases content_variants.status is left at 'APPROVED' forever -
-# nothing else ever revisits it, and the content silently never publishes.
+# Background: approving a variant (POST /content/variants/:id/approve)
+# publishes it synchronously, in-process, right there in the request - see
+# publishContentVariant() in api/src/server.js. There is no longer a queue
+# or worker container in between (the old hermes-orchestrator container
+# and its Redis publisher:queue list were removed), so a variant can no
+# longer get silently lost in flight. What it CAN still do is fail: a
+# channel's API was down, DNS hiccuped, a token expired, etc. When that
+# happens the variant's status is set to PUBLISH_FAILED and the error is
+# recorded in content_variants.publish_error - it is never retried
+# automatically.
 #
-# This finds every variant still 'APPROVED' whose most recent approval
-# (the `approvals` table row - content_variants itself has no updated_at)
-# happened more than STALE_MINUTES ago (default 10 - comfortably longer
-# than a single publish HTTP round trip, so it won't re-queue a job that's
-# simply still in flight) and pushes it back onto publisher:queue.
-# Idempotent to run repeatedly: a variant that already published or failed
-# in the meantime is skipped, since it's no longer 'APPROVED' by the time
-# this runs again.
+# This finds every variant still 'PUBLISH_FAILED' and calls
+# POST /internal/content-variants/:id/publish for each one (the same
+# internal, secret-protected route the approve endpoint itself calls
+# in-process), which re-attempts the publish and updates the variant's
+# status based on the outcome. Safe to run repeatedly: a variant that
+# publishes successfully is no longer PUBLISH_FAILED by the time this
+# runs again, so it won't be retried twice.
 #
-# Not run automatically - this handles data loss from a Redis incident,
-# not routine operation. Run it by hand after you've confirmed content is
-# stuck (e.g. a customer reports an approved post never went live):
-#   REDIS_PASSWORD=... ./scripts/recover-stuck-publishes.sh
-#   REDIS_PASSWORD=... STALE_MINUTES=30 ./scripts/recover-stuck-publishes.sh
+# Run it by hand after a channel outage is resolved, or whenever someone
+# reports an approved post that never went live:
+#   INTERNAL_API_SECRET=... ./scripts/recover-stuck-publishes.sh
+#   INTERNAL_API_SECRET=... ./scripts/recover-stuck-publishes.sh https://api.yourdomain.com
 set -euo pipefail
 
-STALE_MINUTES=${STALE_MINUTES:-10}
+BASE_URL="${1:-http://localhost:8300}"
 POSTGRES_USER=${POSTGRES_USER:-orgcomms}
 POSTGRES_DB=${POSTGRES_DB:-orgcomms_prod}
 
-if [ -z "${REDIS_PASSWORD:-}" ]; then
-  echo "REDIS_PASSWORD is not set in this shell's environment - export it (same value as in your .env) before running this." >&2
+if [ -z "${INTERNAL_API_SECRET:-}" ]; then
+  echo "INTERNAL_API_SECRET is not set in this shell's environment - export it (same value as in your .env) before running this." >&2
   exit 1
 fi
 
 PG_CONTAINER=$(docker ps --filter "label=com.docker.compose.service=postgres" --format '{{.Names}}' | head -n1)
-REDIS_CONTAINER=$(docker ps --filter "label=com.docker.compose.service=redis" --format '{{.Names}}' | head -n1)
-if [ -z "$PG_CONTAINER" ] || [ -z "$REDIS_CONTAINER" ]; then
-  echo "Could not find running postgres and/or redis containers (looked for compose service labels 'postgres'/'redis')." >&2
+if [ -z "$PG_CONTAINER" ]; then
+  echo "Could not find a running postgres container (looked for compose service label 'postgres')." >&2
   echo "Is the stack up? (docker ps)" >&2
   exit 1
 fi
 
 IDS=$(docker exec -i "$PG_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c "
-  SELECT cv.id FROM content_variants cv
-  WHERE cv.status = 'APPROVED'
-  AND (
-    SELECT MAX(a.created_at) FROM approvals a
-    WHERE a.variant_id = cv.id AND a.status = 'APPROVED'
-  ) < NOW() - INTERVAL '${STALE_MINUTES} minutes';
+  SELECT id FROM content_variants WHERE status = 'PUBLISH_FAILED';
 ")
 
 if [ -z "$IDS" ]; then
-  echo "No stuck variants found (status=APPROVED, approved more than ${STALE_MINUTES}m ago)."
+  echo "No PUBLISH_FAILED variants found."
   exit 0
 fi
 
-COUNT=0
+OK=0
+STILL_FAILED=0
 while IFS= read -r ID; do
   [ -z "$ID" ] && continue
-  PAYLOAD="{\"variant_id\":\"${ID}\"}"
-  docker exec -i "$REDIS_CONTAINER" redis-cli --no-auth-warning -a "$REDIS_PASSWORD" LPUSH publisher:queue "$PAYLOAD" > /dev/null
-  echo "Re-queued variant $ID"
-  COUNT=$((COUNT+1))
+  RESPONSE=$(curl -s -w '\n%{http_code}' -X POST "$BASE_URL/internal/content-variants/$ID/publish" \
+    -H "X-Internal-Secret: $INTERNAL_API_SECRET" -H "Content-Type: application/json")
+  STATUS=$(echo "$RESPONSE" | tail -n1)
+  BODY=$(echo "$RESPONSE" | sed '$d')
+  if [ "$STATUS" = "200" ]; then
+    echo "Published variant $ID"
+    OK=$((OK+1))
+  else
+    echo "Still failing: variant $ID (HTTP $STATUS) - $BODY"
+    STILL_FAILED=$((STILL_FAILED+1))
+  fi
 done <<< "$IDS"
 
-echo "Re-queued $COUNT stuck variant(s) onto publisher:queue. hermes-orchestrator will pick them up within a second if it's running."
+echo "$OK published, $STILL_FAILED still failed."

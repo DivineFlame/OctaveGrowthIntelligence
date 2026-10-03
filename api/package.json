@@ -1,7 +1,7 @@
 {
   "name": "orgcomms-api",
   "version": "4.0.0-secure",
-  "description": "OrgComms Multitenant SaaS API - Leads, Content, Hermes, Paperclip",
+  "description": "OrgComms Multitenant SaaS API - Leads, Content, Comms Channels",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

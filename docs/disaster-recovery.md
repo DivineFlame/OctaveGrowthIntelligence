@@ -19,7 +19,6 @@ below against a throwaway VPS at least once.
 | Redis (`redisdata` volume) | No | AOF persistence (`--appendonly yes`) protects against a container restart, but nothing backs up the volume itself. See "What losing Redis actually costs" below - it's not just a cache. |
 | Uploaded files (`recordings` volume) | No | `content_assets` rows in Postgres point to files on this volume by path. If the volume is lost independently of the database, those rows become broken links. |
 | ClamAV virus definitions (`clamav_data`) | No, and doesn't need to be | Re-downloaded automatically on container start; not user data. |
-| `paperclip_cache` | No, and doesn't need to be | A cache by name; safe to lose, rebuilds itself. |
 
 ## Secrets: the real single point of failure
 
@@ -48,35 +47,27 @@ now, treat that as the most urgent item in this whole document.
 
 ## What losing Redis actually costs
 
-Redis here isn't just a cache. Grep `api/src/server.js` for `redisClient.`
-and you'll find three `lPush` calls onto real queues, not ephemeral state:
+Redis is mostly just a cache today. There used to be real job queues
+(`redisClient.lPush` onto things like `publisher:queue`) sitting behind
+the old `hermes-orchestrator` worker container, but that container and
+every `lPush` call with it were removed - grep `api/src/server.js` for
+`redisClient.` and you'll find only `connect()`/`ping()`/`quit()` now.
+Content publishing happens synchronously in-process when a variant is
+approved (`publishContentVariant()` in `api/src/server.js`), not via a
+Redis-queued job, so there is no longer a job that can be sitting in
+Redis at the moment the volume is lost.
 
-- `sarvam:queue:<tenant_id>` - uploaded content waiting to be validated/
-  transformed
-- `publisher:queue` - approved content variants waiting to publish to
-  their channels
-- `webhook:incoming` - incoming webhook events waiting to be processed
-  into leads
+What's actually in Redis now: rate-limiter counters
+(`api/src/rate-limiters.js` - harmless to lose, everyone's limits just
+reset) and whatever session/cache state the app keeps there. Losing the
+`redisdata` volume just resets those - no in-flight work is lost with it.
 
-Plus rate-limiter counters (`api/src/rate-limiters.js` - harmless to lose,
-everyone's limits just reset) and whatever session/cache state the app
-keeps there.
-
-If the `redisdata` volume is lost: rate limits reset (fine), but **any
-job sitting in one of those three queues at the moment of loss is gone**
-- an upload that was mid-transform, an approved variant that was about to
-publish, a webhook event that hadn't been turned into a lead yet. There's
-no redo log for these; the source-of-truth row in Postgres (e.g. the
-`content_assets` row) may still say "pending" forever with nothing left
-to process it, since the queue message that would have driven that
-transition is what's missing.
-
-**Action, if you hit this:** after restoring/rebuilding, query for rows
-stuck in a "pending"/"processing" state that's older than the incident
-(content_assets, content_variants, leads referencing an unprocessed
-webhook) and decide per-tenant whether to manually re-trigger or reset
-them. There's no scripted recovery for this today - it's a manual
-Postgres query + judgment call.
+**If a publish does fail** (a channel's API down, a token expired, a
+network blip) it's recorded as `content_variants.status = 'PUBLISH_FAILED'`
+with the error in `publish_error` - that's a Postgres row, not a Redis
+job, so it survives a Redis incident fine, but it is *not* retried
+automatically. Use `./scripts/recover-stuck-publishes.sh` (needs
+`INTERNAL_API_SECRET`) to retry every `PUBLISH_FAILED` variant by hand.
 
 ## Restoring Postgres (data loss, corruption, bad migration)
 

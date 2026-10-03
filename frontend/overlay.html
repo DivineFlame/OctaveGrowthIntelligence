@@ -234,7 +234,7 @@
     // value sent to the API is always the raw name.
     var ROLE_LABELS = { SUPER_ADMIN: 'Admin', DEPT_ADMIN: 'Manager', HR_ADMIN: 'HR', CONTENT_CREATOR: 'Social Media' };
     function roleLabel(r){ return ROLE_LABELS[r] || r; }
-    var API_BASE = 'https://api.octaveaiautomation.com';
+    var API_BASE = '%%API_BASE%%'; // substituted at container start - see frontend/Dockerfile and substitute-api-base.sh
     var SESSION_KEY = 'orgcomms_session';
 
     // Company Settings (Admin-only, see renderAdmin's Company tab below)

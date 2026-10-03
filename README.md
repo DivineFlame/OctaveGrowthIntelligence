@@ -2577,3 +2577,43 @@ setting different values for these four in that instance's own `.env` -
 `docker-compose.vps.yml` itself stays untouched and identical across
 every instance. The container-internal ports (right side of each
 mapping) are unchanged and still don't need to vary between instances.
+
+Ports alone weren't the whole story, though: the frontend's API base URL
+was separately hardcoded into `overlay.html`
+(`https://api.octaveaiautomation.com`), baked into the built `index.html`
+at Docker image build time with no per-deployment override at all. A
+second instance - different ports, different database, even a different
+`API_DOMAIN` set for its `api` service's CORS - still shipped a frontend
+that silently kept calling the *original* instance's API, because that
+URL was compiled into the JavaScript itself. The practical symptom: the
+new instance's own database was genuinely empty (no company, no users),
+but its login screen never offered first-user/company signup - because
+`GET /auth/signup-status` was actually being asked of the *original*
+API, which of course already has a company and correctly says signup is
+no longer available. Every other request from that frontend (login,
+everything else) was silently hitting the original API too.
+
+Fixed the same way as the host ports: `overlay.html`'s `API_BASE` is now
+a `%%API_BASE%%` placeholder, not a literal URL. `frontend/Dockerfile`
+keeps the built `index.html` as a template
+(`index.html.template`, baked into the image once) rather than serving
+it directly, and `frontend/substitute-api-base.sh` - copied into
+nginx's official `/docker-entrypoint.d/` hook directory, which the
+`nginx:alpine` image runs automatically before every start, no
+`ENTRYPOINT`/`CMD` override needed - regenerates the real `index.html`
+from that template on every container start, substituting in whatever
+`API_BASE` the container's environment has right now. `docker-compose.vps.yml`'s
+`frontend` service sets `API_BASE: https://${API_DOMAIN}` - the exact
+same `API_DOMAIN` the `api` service already uses for CORS - so each
+instance's frontend automatically talks to its own API with zero new
+`.env` variables to set; just make sure `API_DOMAIN` is actually
+different per instance (it already needs to be, for CORS to work
+correctly anyway).
+
+**If you already deployed a second instance before this fix**: rebuild
+and redeploy its `frontend` image (the fix is in `overlay.html` and
+`frontend/Dockerfile`, both of which only take effect on a new image
+build, not a container restart of the old image) - its existing,
+already-empty database doesn't need anything done to it; signup will
+correctly become available once the frontend is actually talking to the
+right API.

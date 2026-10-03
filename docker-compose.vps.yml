@@ -339,6 +339,22 @@ services:
     restart: unless-stopped
     logging: *default-logging
     networks: [frontend]
+    # The built frontend image used to have its API base URL hardcoded
+    # into overlay.html at build time (https://api.octaveaiautomation.com)
+    # - harmless for the one original deployment, but it meant a second
+    # instance of this stack (a different app/domain on the same VPS)
+    # served a frontend that silently kept talking to the FIRST
+    # instance's API, no matter what API_DOMAIN or database that second
+    # instance was configured with - e.g. its own, genuinely empty
+    # database never shows first-user/company signup, because the
+    # browser is actually calling the original API, which already has a
+    # company and GET /auth/signup-status correctly says unavailable.
+    # API_BASE is substituted in at container start now (see
+    # frontend/Dockerfile and substitute-api-base.sh) from this same
+    # API_DOMAIN the api service already uses for CORS, so each instance
+    # automatically talks to its own API.
+    environment:
+      API_BASE: https://${API_DOMAIN}
     # Host-side port only, overridable per-instance - see the comment on
     # postgres's ports: above for why and the .env var names to set.
     ports:
